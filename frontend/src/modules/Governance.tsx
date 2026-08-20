@@ -415,7 +415,7 @@ export default function Governance({ user: _user }: { user: any }) {
               <span className="chair-filter-label">Snapshot</span>
               <span className="chair-filter-control chair-filter-control-wide">
                 <GovGlyph kind="calendar" />
-                <select value={selectedStart || activeRange?.start || data.range.start} onChange={event => setSelectedStart(event.target.value)}>
+                <select value={selectedStart || activeRange?.start || data.range?.start || ''} onChange={event => setSelectedStart(event.target.value)}>
                   {filteredRanges.map(range => (
                     <option key={range.key} value={range.start}>{range.label}</option>
                   ))}

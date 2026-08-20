@@ -52,6 +52,28 @@ export const api = {
     req('/workflows/decide', { method: 'POST', body: JSON.stringify({ workflow_id, action, reason }) }),
   workflows: (scope = 'all') => req(`/workflows?scope=${scope}`),
   workflow: (id: string) => req(`/workflows/${id}`),
+  chairmanApprovals: (params: Record<string, any> = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([key, value]) => {
+      if (value == null || value === '') return
+      qs.set(key, String(value))
+    })
+    const suffix = qs.toString()
+    return req(`/approvals/chairman${suffix ? `?${suffix}` : ''}`)
+  },
+  chairmanInitiateRequest: (body: any) =>
+    req('/approvals/chairman/initiate', { method: 'POST', body: JSON.stringify(body) }),
+  chairmanDelegations: (params: Record<string, any> = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([key, value]) => {
+      if (value == null || value === '') return
+      qs.set(key, String(value))
+    })
+    const suffix = qs.toString()
+    return req(`/delegations/chairman${suffix ? `?${suffix}` : ''}`)
+  },
+  chairmanCreateDelegation: (body: any) =>
+    req('/delegations/chairman', { method: 'POST', body: JSON.stringify(body) }),
 
   delegations: () => req('/delegations'),
   createDelegation: (b: any) => req('/delegations', { method: 'POST', body: JSON.stringify(b) }),

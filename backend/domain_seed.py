@@ -11,8 +11,9 @@ from datetime import date, datetime, timedelta
 from database import (SessionLocal, TENANT, engine, DEMO_USERNAMES, CAMPUS_SCOPES,
                       slug)
 from matrices import APPROVAL_MATRIX
-from models import (Base, User, Delegation, WorkflowInstance, Approval,
-                    Notification)
+from models import (Base, User, Delegation, DelegationPolicy, DelegationProfile,
+                    WorkflowInstance, WorkflowProfile, Approval, Notification,
+                    DelegationOption, DelegationContext)
 import domain_models as D
 
 R = random.Random(42)
@@ -970,6 +971,53 @@ def _seed_chairman_workflows(s):
 
     s.flush()
 
+    def semester_meta(created_at: datetime):
+        year = created_at.year
+        if created_at.month >= 7:
+            start_year = year
+            end_year = year + 1
+            return f"odd_{start_year}_{end_year}", f"Odd Semester {start_year}-{str(end_year)[-2:]}"
+        start_year = year - 1
+        end_year = year
+        return f"even_{start_year}_{end_year}", f"Even Semester {start_year}-{str(end_year)[-2:]}"
+
+    profile_rows = [
+        ("wf_exec_01", "Infrastructure", "CAP-2026-101", "Capital expansion pack for utilities, labs, and hostel upgrades."),
+        ("wf_exec_02", "Infrastructure", "CAP-2026-102", "Follow-up tranche for the campus development and safety program."),
+        ("wf_exec_03", "Infrastructure", "CAP-2026-103", "Escalated civil works package that exceeds branch authority."),
+        ("wf_exec_04", "Finance", "FIN-2026-081", "Budget allocation round for shared procurement and branch upgrades."),
+        ("wf_exec_05", "Finance", "FIN-2026-082", "Budget allocation package awaiting finance review."),
+        ("wf_exec_06", "Finance", "FIN-2026-083", "Final procurement gate for the institutional budget refresh."),
+        ("wf_exec_07", "Finance", "FIN-2026-084", "Escalated procurement request reserved for chairman visibility."),
+        ("wf_exec_08", "Finance", "FIN-2026-085", "Strategic spend pack pushed upward after amount validation."),
+        ("wf_exec_09", "Administrative", "PRU-2026-041", "Reserved governance update bundle covering policies and regulations."),
+        ("wf_exec_10", "Administrative", "PRU-2026-042", "Chairman-originated governance amendment routed through final review."),
+        ("wf_exec_11", "Human Resources", "HR-2026-031", "Faculty recruitment slate and panel approvals."),
+        ("wf_exec_12", "Human Resources", "HR-2026-032", "Assistant professor and specialist recruitment package in review."),
+        ("wf_exec_13", "Human Resources", "HR-2026-033", "Promotion and recruitment matter escalated for reserved sign-off."),
+        ("wf_exec_14", "Partnerships", "MOU-2026-021", "Strategic partnership proposal requiring executive oversight."),
+        ("wf_exec_15", "Governance", "GOV-2026-015", "Disciplinary action with reputational impact and board visibility."),
+        ("wf_exec_16", "Governance", "GOV-2026-016", "Critical safety review escalated to the chairman office."),
+        ("wf_exec_17", "Student Affairs", "STU-2026-011", "Research and scholarship appeal raised for final closure."),
+        ("wf_exec_18", "Academic Operations", "EXM-2026-054", "Exam security approval and execution control pack."),
+        ("wf_exec_19", "Finance", "PAY-2026-009", "Monthly payroll approval cycle for group release."),
+        ("wf_exec_20", "Academic Operations", "EXM-2026-055", "Results moderation request rejected after evidence review."),
+    ]
+    spec_index = {wf_id: created_at for wf_id, _, _, _, _, _, _, _, _, created_at, _ in specs}
+    for workflow_id, category, reference_code, notes in profile_rows:
+        semester_key, semester_label = semester_meta(spec_index[workflow_id])
+        _ensure(
+            s, WorkflowProfile, f"profile_{workflow_id}",
+            lambda workflow_id=workflow_id, category=category, reference_code=reference_code,
+            notes=notes, semester_key=semester_key, semester_label=semester_label,
+            created_at=spec_index[workflow_id]: WorkflowProfile(
+                id=f"profile_{workflow_id}", tenant_id=TENANT, workflow_id=workflow_id,
+                semester_key=semester_key, semester_label=semester_label, category=category,
+                reference_code=reference_code, notes=notes,
+                created_at=created_at, updated_at=created_at
+            ),
+        )
+
     approval_rows = [
         ("app_exec_01", "wf_exec_01", "user_29", "Facilities Director", 1, "Maintenance/Facilities", "ALLOW", "LIMITED", "Initial review completed", datetime(2026, 8, 4, 12, 0)),
         ("app_exec_02", "wf_exec_03", "user_4", "Principal", 3, "Principal", "ESCALATE", "FULL", "Capex exceeds branch authority", datetime(2026, 7, 25, 18, 0)),
@@ -995,15 +1043,327 @@ def _seed_chairman_workflows(s):
             ),
         )
 
-    _ensure(
-        s, Delegation, "deleg_exec_01",
-        lambda: Delegation(
-            id="deleg_exec_01", tenant_id=TENANT, from_user="user_1", to_user="user_2",
-            authority="approve:strategic", scope_ref="scope_global", limit=50000000,
-            start=datetime(2026, 8, 1, 9, 0), end=datetime(2026, 8, 31, 18, 0),
-            status="active", reason="Acting authority during external board meetings"
-        ),
-    )
+    delegation_option_rows = [
+        {"id": "deleg_opt_type_finance", "group_key": "policy_type", "option_key": "finance", "label": "Finance", "description": "Financial approvals, budgets and fund controls", "sort_order": 1},
+        {"id": "deleg_opt_type_hr", "group_key": "policy_type", "option_key": "human_resources", "label": "Human Resources", "description": "People, hiring and staffing decisions", "sort_order": 2},
+        {"id": "deleg_opt_type_infra", "group_key": "policy_type", "option_key": "infrastructure", "label": "Infrastructure", "description": "Infrastructure projects and facilities work", "sort_order": 3},
+        {"id": "deleg_opt_type_academics", "group_key": "policy_type", "option_key": "academics", "label": "Academics", "description": "Academic programs, examination and quality controls", "sort_order": 4},
+        {"id": "deleg_opt_type_governance", "group_key": "policy_type", "option_key": "governance", "label": "Governance", "description": "Policies, regulations and institutional governance", "sort_order": 5},
+        {"id": "deleg_opt_scope_finance", "group_key": "delegation_scope", "option_key": "financial_approvals", "label": "Financial approvals", "description": "workflow:purchase_request,workflow:payroll_approval,workflow:fee_waiver,workflow:refund", "sort_order": 1},
+        {"id": "deleg_opt_scope_hr", "group_key": "delegation_scope", "option_key": "recruitment_workflows", "label": "Recruitment workflows", "description": "workflow:recruitment", "sort_order": 2},
+        {"id": "deleg_opt_scope_infra", "group_key": "delegation_scope", "option_key": "infrastructure_projects", "label": "Infrastructure projects", "description": "workflow:infrastructure_capex", "sort_order": 3},
+        {"id": "deleg_opt_scope_academic", "group_key": "delegation_scope", "option_key": "academic_governance", "label": "Academic governance", "description": "workflow:branch_creation,workflow:result_publication,workflow:marks_submission,workflow:question_paper", "sort_order": 4},
+        {"id": "deleg_opt_scope_scholarship", "group_key": "delegation_scope", "option_key": "scholarship_disbursement", "label": "Scholarship disbursement", "description": "workflow:fee_waiver,workflow:refund", "sort_order": 5},
+        {"id": "deleg_opt_scope_governance", "group_key": "delegation_scope", "option_key": "policy_regulation_updates", "label": "Policy and regulation updates", "description": "workflow:branch_creation", "sort_order": 6},
+        {"id": "deleg_opt_access_finance", "group_key": "delegation_access", "option_key": "approve:financial", "label": "Financial approvals", "description": "Approve financial items within the delegated limit", "sort_order": 1},
+        {"id": "deleg_opt_access_hr", "group_key": "delegation_access", "option_key": "approve:hr", "label": "HR approvals", "description": "Approve staffing and recruitment actions", "sort_order": 2},
+        {"id": "deleg_opt_access_projects", "group_key": "delegation_access", "option_key": "approve:projects", "label": "Project approvals", "description": "Approve infrastructure and capital projects", "sort_order": 3},
+        {"id": "deleg_opt_access_academic", "group_key": "delegation_access", "option_key": "approve:academic", "label": "Academic approvals", "description": "Approve academic programs and result operations", "sort_order": 4},
+        {"id": "deleg_opt_access_strategic", "group_key": "delegation_access", "option_key": "approve:strategic", "label": "Strategic approvals", "description": "Approve governance and strategic matters", "sort_order": 5},
+        {"id": "deleg_opt_access_scholarships", "group_key": "delegation_access", "option_key": "approve:scholarships", "label": "Scholarship approvals", "description": "Approve scholarship releases and refunds", "sort_order": 6},
+        {"id": "deleg_opt_access_review", "group_key": "delegation_access", "option_key": "review", "label": "Review only", "description": "Review and escalate without final approval", "sort_order": 7},
+        {"id": "deleg_opt_access_view", "group_key": "delegation_access", "option_key": "view", "label": "View only", "description": "Read-only oversight access", "sort_order": 8},
+        {"id": "deleg_opt_review_none", "group_key": "review_frequency", "option_key": "none", "label": "None", "description": "No recurring review scheduled", "sort_order": 1},
+        {"id": "deleg_opt_review_monthly", "group_key": "review_frequency", "option_key": "monthly", "label": "Monthly", "description": "Review every month", "sort_order": 2},
+        {"id": "deleg_opt_review_quarterly", "group_key": "review_frequency", "option_key": "quarterly", "label": "Quarterly", "description": "Review every quarter", "sort_order": 3},
+        {"id": "deleg_opt_review_semesterly", "group_key": "review_frequency", "option_key": "semesterly", "label": "Semesterly", "description": "Review every semester", "sort_order": 4},
+        {"id": "deleg_opt_review_annual", "group_key": "review_frequency", "option_key": "annual", "label": "Annual", "description": "Review once a year", "sort_order": 5},
+    ]
+    for item in delegation_option_rows:
+        row = _ensure(
+            s, DelegationOption, item["id"],
+            lambda item=item: DelegationOption(id=item["id"], tenant_id=TENANT)
+        )
+        row.tenant_id = TENANT
+        row.group_key = item["group_key"]
+        row.option_key = item["option_key"]
+        row.label = item["label"]
+        row.description = item["description"]
+        row.sort_order = item["sort_order"]
+        row.active = True
+        row.updated_at = datetime.utcnow()
+
+    option_index = {(item["group_key"], item["option_key"]): item for item in delegation_option_rows}
+
+    policy_rows = [
+        {
+            "id": "deleg_policy_budget",
+            "policy_key": "budget_approval",
+            "policy_type": "Finance",
+            "subject": "Budget Approval",
+            "authority": "approve:financial",
+            "action": "approve",
+            "resource_scope": "workflow:purchase_request,workflow:payroll_approval,workflow:fee_waiver,workflow:refund",
+            "default_limit": 50000000,
+            "delegated_to_type_default": "Office",
+            "icon": "finance",
+            "sort_order": 1,
+        },
+        {
+            "id": "deleg_policy_faculty",
+            "policy_key": "faculty_recruitment",
+            "policy_type": "Human Resources",
+            "subject": "Faculty Recruitment",
+            "authority": "approve:hr",
+            "action": "approve",
+            "resource_scope": "workflow:recruitment",
+            "default_limit": None,
+            "delegated_to_type_default": "Individual",
+            "icon": "people",
+            "sort_order": 2,
+        },
+        {
+            "id": "deleg_policy_infra",
+            "policy_key": "infrastructure_projects",
+            "policy_type": "Infrastructure",
+            "subject": "Infrastructure Projects",
+            "authority": "approve:projects",
+            "action": "approve",
+            "resource_scope": "workflow:infrastructure_capex",
+            "default_limit": 20000000,
+            "delegated_to_type_default": "Office",
+            "icon": "shield",
+            "sort_order": 3,
+        },
+        {
+            "id": "deleg_policy_academic",
+            "policy_key": "academic_program_approval",
+            "policy_type": "Academics",
+            "subject": "Academic Program Approval",
+            "authority": "approve:academic",
+            "action": "approve",
+            "resource_scope": "workflow:branch_creation,workflow:result_publication,workflow:marks_submission,workflow:question_paper",
+            "default_limit": None,
+            "delegated_to_type_default": "Individual",
+            "icon": "academy",
+            "sort_order": 4,
+        },
+        {
+            "id": "deleg_policy_scholarship",
+            "policy_key": "scholarship_disbursement",
+            "policy_type": "Finance",
+            "subject": "Scholarship Disbursement",
+            "authority": "approve:scholarships",
+            "action": "approve",
+            "resource_scope": "workflow:fee_waiver,workflow:refund",
+            "default_limit": 5000000,
+            "delegated_to_type_default": "Individual",
+            "icon": "finance",
+            "sort_order": 5,
+        },
+        {
+            "id": "deleg_policy_governance",
+            "policy_key": "policy_regulation_updates",
+            "policy_type": "Governance",
+            "subject": "Policy & Regulation Updates",
+            "authority": "approve:strategic",
+            "action": "approve",
+            "resource_scope": "workflow:branch_creation",
+            "default_limit": None,
+            "delegated_to_type_default": "Office",
+            "icon": "shield",
+            "sort_order": 6,
+        },
+    ]
+    for item in policy_rows:
+        row = _ensure(
+            s, DelegationPolicy, item["id"],
+            lambda item=item: DelegationPolicy(id=item["id"], tenant_id=TENANT)
+        )
+        row.tenant_id = TENANT
+        row.policy_key = item["policy_key"]
+        row.policy_type = item["policy_type"]
+        row.subject = item["subject"]
+        row.authority = item["authority"]
+        row.action = item["action"]
+        row.resource_scope = item["resource_scope"]
+        row.default_limit = item["default_limit"]
+        row.delegated_to_type_default = item["delegated_to_type_default"]
+        row.icon = item["icon"]
+        row.sort_order = item["sort_order"]
+        row.active = True
+        row.updated_at = datetime.utcnow()
+
+    delegation_rows = [
+        {
+            "id": "deleg_exec_01",
+            "to_user": "user_2",
+            "policy_key": "budget_approval",
+            "limit": 50000000,
+            "start": datetime(2026, 5, 1, 9, 0),
+            "end": datetime(2026, 12, 31, 18, 0),
+            "status": "active",
+            "reason": "Vice Chairman handles strategic finance approvals during board travel.",
+            "reference_code": "FIN-POL-2026-01",
+            "delegated_to_type": "Office",
+        },
+        {
+            "id": "deleg_exec_02",
+            "to_user": "user_24",
+            "policy_key": "faculty_recruitment",
+            "limit": None,
+            "start": datetime(2026, 4, 15, 9, 0),
+            "end": datetime(2026, 10, 15, 18, 0),
+            "status": "active",
+            "reason": "HR Manager is covering faculty recruitment while the chairman focuses on board reviews.",
+            "reference_code": "HR-POL-2026-02",
+            "delegated_to_type": "Individual",
+        },
+        {
+            "id": "deleg_exec_03",
+            "to_user": "user_26",
+            "policy_key": "infrastructure_projects",
+            "limit": 20000000,
+            "start": datetime(2026, 3, 10, 9, 0),
+            "end": datetime(2027, 3, 10, 18, 0),
+            "status": "active",
+            "reason": "Admin Manager can clear operational infrastructure packages below the delegated ceiling.",
+            "reference_code": "INF-POL-2026-03",
+            "delegated_to_type": "Office",
+        },
+        {
+            "id": "deleg_exec_04",
+            "to_user": "user_6",
+            "policy_key": "academic_program_approval",
+            "limit": None,
+            "start": datetime(2026, 1, 1, 9, 0),
+            "end": datetime(2026, 8, 31, 18, 0),
+            "status": "active",
+            "reason": "Dean Academics is closing the current cycle of academic program reviews.",
+            "reference_code": "ACA-POL-2026-04",
+            "delegated_to_type": "Individual",
+        },
+        {
+            "id": "deleg_exec_05",
+            "to_user": "user_22",
+            "policy_key": "scholarship_disbursement",
+            "limit": 5000000,
+            "start": datetime(2026, 2, 1, 9, 0),
+            "end": datetime(2026, 7, 31, 18, 0),
+            "status": "active",
+            "reason": "Finance Manager was delegated scholarship disbursement authority for the summer release window.",
+            "reference_code": "FIN-POL-2026-05",
+            "delegated_to_type": "Individual",
+        },
+        {
+            "id": "deleg_exec_06",
+            "to_user": "user_5",
+            "policy_key": "policy_regulation_updates",
+            "limit": None,
+            "start": datetime(2026, 3, 1, 9, 0),
+            "end": datetime(2026, 12, 1, 18, 0),
+            "status": "revoked",
+            "reason": "Vice Principal delegation was revoked after the policy review committee changed its ownership.",
+            "reference_code": "GOV-POL-2026-06",
+            "delegated_to_type": "Office",
+        },
+    ]
+    policy_map = {row["policy_key"]: row for row in policy_rows}
+    delegation_context_rows = {
+        "deleg_exec_01": {
+            "description": "Delegates reserved finance approvals to the vice chairman during board travel and investor review periods.",
+            "scope_key": "financial_approvals",
+            "access_key": "approve:financial",
+            "review_frequency_key": "monthly",
+            "notes": "Requires weekly coordination with the finance manager for items above Rs 25 lakh.",
+        },
+        "deleg_exec_02": {
+            "description": "Allows faculty hiring reviews to continue while the chairman is focused on board governance priorities.",
+            "scope_key": "recruitment_workflows",
+            "access_key": "approve:hr",
+            "review_frequency_key": "quarterly",
+            "notes": "Shortlist changes must still be shared in the monthly chairman HR review.",
+        },
+        "deleg_exec_03": {
+            "description": "Supports time-bound infrastructure execution without waiting for daily chairman clearance.",
+            "scope_key": "infrastructure_projects",
+            "access_key": "approve:projects",
+            "review_frequency_key": "quarterly",
+            "notes": "Civil works exceeding the delegated ceiling must be escalated immediately.",
+        },
+        "deleg_exec_04": {
+            "description": "Keeps academic program and examination governance moving during curriculum closeout.",
+            "scope_key": "academic_governance",
+            "access_key": "approve:academic",
+            "review_frequency_key": "semesterly",
+            "notes": "Any change impacting branch expansion should still be routed back to the chairman.",
+        },
+        "deleg_exec_05": {
+            "description": "Covers scholarship releases and related refund actions for the summer cycle.",
+            "scope_key": "scholarship_disbursement",
+            "access_key": "approve:scholarships",
+            "review_frequency_key": "monthly",
+            "notes": "Release sheets must be filed with the chairman office after every disbursement batch.",
+        },
+        "deleg_exec_06": {
+            "description": "Historical governance delegation retained for audit visibility after revocation.",
+            "scope_key": "policy_regulation_updates",
+            "access_key": "approve:strategic",
+            "review_frequency_key": "none",
+            "notes": "Revoked after ownership moved to a different executive office.",
+        },
+    }
+    for item in delegation_rows:
+        policy = policy_map[item["policy_key"]]
+        row = _ensure(
+            s, Delegation, item["id"],
+            lambda item=item, policy=policy: Delegation(
+                id=item["id"], tenant_id=TENANT, from_user="user_1", to_user=item["to_user"],
+                authority=policy["authority"], scope_ref="scope_global", limit=item["limit"],
+                start=item["start"], end=item["end"], status=item["status"], reason=item["reason"]
+            ),
+        )
+        row.tenant_id = TENANT
+        row.from_user = "user_1"
+        row.to_user = item["to_user"]
+        row.authority = policy["authority"]
+        row.scope_ref = "scope_global"
+        row.limit = item["limit"]
+        row.start = item["start"]
+        row.end = item["end"]
+        row.status = item["status"]
+        row.reason = item["reason"]
+
+        profile = _ensure(
+            s, DelegationProfile, f"profile_{item['id']}",
+            lambda item=item: DelegationProfile(
+                id=f"profile_{item['id']}", tenant_id=TENANT, delegation_id=item["id"]
+            ),
+        )
+        profile.tenant_id = TENANT
+        profile.delegation_id = item["id"]
+        profile.policy_key = item["policy_key"]
+        profile.policy_type = policy["policy_type"]
+        profile.subject = policy["subject"]
+        profile.reference_code = item["reference_code"]
+        profile.delegated_to_type = item["delegated_to_type"]
+        profile.updated_at = datetime.utcnow()
+
+        context_item = delegation_context_rows[item["id"]]
+        scope_meta = option_index[("delegation_scope", context_item["scope_key"])]
+        access_meta = option_index[("delegation_access", context_item["access_key"])]
+        review_meta = option_index[("review_frequency", context_item["review_frequency_key"])]
+        context = _ensure(
+            s, DelegationContext, f"context_{item['id']}",
+            lambda item=item: DelegationContext(
+                id=f"context_{item['id']}", tenant_id=TENANT, delegation_id=item["id"]
+            ),
+        )
+        context.tenant_id = TENANT
+        context.delegation_id = item["id"]
+        context.policy_description = context_item["description"]
+        context.scope_key = context_item["scope_key"]
+        context.scope_label = scope_meta["label"]
+        context.access_key = context_item["access_key"]
+        context.access_label = access_meta["label"]
+        context.review_frequency_key = context_item["review_frequency_key"]
+        context.review_frequency_label = review_meta["label"]
+        context.notes = context_item["notes"]
+        context.attachment_name = ""
+        context.attachment_mime_type = ""
+        context.attachment_size = None
+        context.attachment_data = ""
+        context.updated_at = datetime.utcnow()
 
     chairman = s.get(User, "user_1")
     if chairman:
