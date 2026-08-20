@@ -15,13 +15,22 @@ pipeline {
         ECR_REGISTRY =
             "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
-        APP_SERVER = "ubuntu@YOUR_APPLICATION_EC2_IP"
+        // IMPORTANT:
+        // Replace this with the REAL PUBLIC IP or reachable private IP
+        // of your ICMS Application EC2.
+        APP_SERVER = "ubuntu@16.16.216.155"
 
         APP_DIR = "/opt/icms"
     }
 
 
     stages {
+
+        /*
+         * ============================================================
+         * 1. CHECKOUT
+         * ============================================================
+         */
 
         stage('Checkout') {
 
@@ -36,11 +45,19 @@ pipeline {
         }
 
 
+        /*
+         * ============================================================
+         * 2. BUILD BACKEND
+         * ============================================================
+         */
+
         stage('Build Backend') {
 
             steps {
 
-                echo "Building ICMS backend..."
+                echo "======================================="
+                echo "Building ICMS Backend"
+                echo "======================================="
 
                 sh """
                     docker build \
@@ -51,11 +68,19 @@ pipeline {
         }
 
 
+        /*
+         * ============================================================
+         * 3. BUILD FRONTEND
+         * ============================================================
+         */
+
         stage('Build Frontend') {
 
             steps {
 
-                echo "Building ICMS frontend..."
+                echo "======================================="
+                echo "Building ICMS Frontend"
+                echo "======================================="
 
                 sh """
                     docker build \
@@ -66,11 +91,19 @@ pipeline {
         }
 
 
+        /*
+         * ============================================================
+         * 4. LOGIN TO ECR
+         * ============================================================
+         */
+
         stage('Login to Amazon ECR') {
 
             steps {
 
-                echo "Logging into Amazon ECR..."
+                echo "======================================="
+                echo "Logging into Amazon ECR"
+                echo "======================================="
 
                 withCredentials([
                     [
@@ -92,11 +125,19 @@ pipeline {
         }
 
 
+        /*
+         * ============================================================
+         * 5. TAG IMAGES
+         * ============================================================
+         */
+
         stage('Tag Images') {
 
             steps {
 
-                echo "Tagging Docker images..."
+                echo "======================================="
+                echo "Tagging Docker Images"
+                echo "======================================="
 
                 sh """
                     docker tag \
@@ -111,33 +152,71 @@ pipeline {
         }
 
 
+        /*
+         * ============================================================
+         * 6. PUSH BACKEND
+         * ============================================================
+         */
+
         stage('Push Backend') {
 
             steps {
 
-                echo "Pushing backend image to ECR..."
+                echo "======================================="
+                echo "Pushing Backend Image"
+                echo "======================================="
 
-                sh """
-                    docker push \
-                        ${ECR_REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG}
-                """
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-ecr'
+                    ]
+                ]) {
+
+                    sh """
+                        docker push \
+                            ${ECR_REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG}
+                    """
+                }
             }
         }
 
+
+        /*
+         * ============================================================
+         * 7. PUSH FRONTEND
+         * ============================================================
+         */
 
         stage('Push Frontend') {
 
             steps {
 
-                echo "Pushing frontend image to ECR..."
+                echo "======================================="
+                echo "Pushing Frontend Image"
+                echo "======================================="
 
-                sh """
-                    docker push \
-                        ${ECR_REGISTRY}/${FRONTEND_REPO}:${IMAGE_TAG}
-                """
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-ecr'
+                    ]
+                ]) {
+
+                    sh """
+                        docker push \
+                            ${ECR_REGISTRY}/${FRONTEND_REPO}:${IMAGE_TAG}
+                    """
+                }
             }
         }
 
+
+        /*
+         * ============================================================
+         * 8. DEPLOY TO APPLICATION EC2
+         * ============================================================
+         */
 
         stage('Deploy to Application EC2') {
 
@@ -149,64 +228,78 @@ pipeline {
 
                 sshagent(credentials: ['app-server-ssh']) {
 
-                    withCredentials([
-                        [
-                            $class: 'AmazonWebServicesCredentialsBinding',
-                            credentialsId: 'aws-ecr'
-                        ]
-                    ]) {
+                    sh """
+                        ssh \
+                            -o StrictHostKeyChecking=no \
+                            ${APP_SERVER} \
+                            '
+                            set -e
 
-                        sh """
-                            ssh \
-                                -o StrictHostKeyChecking=no \
-                                ${APP_SERVER} \
-                                '
-                                set -e
+                            echo "Connected to Application EC2"
 
-                                cd ${APP_DIR}
+                            echo "Changing directory..."
 
-                                echo "Logging Application EC2 into ECR..."
+                            cd ${APP_DIR}
 
-                                aws ecr get-login-password \
-                                    --region ${AWS_REGION} |
-                                docker login \
-                                    --username AWS \
-                                    --password-stdin \
-                                    ${ECR_REGISTRY}
+                            echo "Checking Docker..."
 
-                                echo "Pulling new ICMS images..."
+                            docker --version
 
-                                export BACKEND_IMAGE=${ECR_REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG}
-                                export FRONTEND_IMAGE=${ECR_REGISTRY}/${FRONTEND_REPO}:${IMAGE_TAG}
+                            echo "Checking Docker Compose..."
 
-                                docker compose \
-                                    -f docker-compose.prod.yml \
-                                    pull
+                            docker compose version
 
-                                echo "Starting ICMS services..."
+                            echo "Logging Application EC2 into ECR..."
 
-                                docker compose \
-                                    -f docker-compose.prod.yml \
-                                    up -d
+                            aws ecr get-login-password \
+                                --region ${AWS_REGION} |
+                            docker login \
+                                --username AWS \
+                                --password-stdin \
+                                ${ECR_REGISTRY}
 
-                                echo "Deployment completed."
+                            echo "Pulling new ICMS images..."
 
-                                docker compose \
-                                    -f docker-compose.prod.yml \
-                                    ps
-                                '
-                        """
-                    }
+                            export BACKEND_IMAGE=${ECR_REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG}
+                            export FRONTEND_IMAGE=${ECR_REGISTRY}/${FRONTEND_REPO}:${IMAGE_TAG}
+
+                            docker compose \
+                                -f docker-compose.prod.yml \
+                                pull backend frontend
+
+                            echo "Starting / updating ICMS services..."
+
+                            docker compose \
+                                -f docker-compose.prod.yml \
+                                up -d
+
+                            echo "Deployment completed."
+
+                            echo "Current container status:"
+
+                            docker compose \
+                                -f docker-compose.prod.yml \
+                                ps
+                            '
+                    """
                 }
             }
         }
 
 
+        /*
+         * ============================================================
+         * 9. VERIFY DEPLOYMENT
+         * ============================================================
+         */
+
         stage('Verify Deployment') {
 
             steps {
 
-                echo "Verifying ICMS deployment..."
+                echo "======================================="
+                echo "Verifying ICMS Deployment"
+                echo "======================================="
 
                 sshagent(credentials: ['app-server-ssh']) {
 
@@ -215,6 +308,8 @@ pipeline {
                             -o StrictHostKeyChecking=no \
                             ${APP_SERVER} \
                             '
+                            set -e
+
                             cd ${APP_DIR}
 
                             echo "======================================="
@@ -226,13 +321,21 @@ pipeline {
                                 ps
 
                             echo "======================================="
-                            echo "Frontend Check"
+                            echo "Frontend Health Check"
                             echo "======================================="
 
-                            curl -f http://localhost:8080/ \
+                            curl \
+                                --fail \
+                                --silent \
+                                --show-error \
+                                http://localhost:8080/ \
                                 > /dev/null
 
                             echo "Frontend is UP"
+
+                            echo "======================================="
+                            echo "ICMS Deployment Verified"
+                            echo "======================================="
                             '
                     """
                 }
@@ -241,24 +344,31 @@ pipeline {
     }
 
 
+    /*
+     * ================================================================
+     * POST ACTIONS
+     * ================================================================
+     */
+
     post {
 
         success {
 
             echo """
             =======================================
-            ICMS DEPLOYMENT SUCCESSFUL
+              ICMS DEPLOYMENT SUCCESSFUL
             =======================================
 
-            Build Number : ${BUILD_NUMBER}
+            Build Number:
+            ${BUILD_NUMBER}
 
-            Backend:
+            Backend Image:
             ${ECR_REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG}
 
-            Frontend:
+            Frontend Image:
             ${ECR_REGISTRY}/${FRONTEND_REPO}:${IMAGE_TAG}
 
-            Application:
+            Application Server:
             ${APP_SERVER}
 
             =======================================
@@ -270,10 +380,11 @@ pipeline {
 
             echo """
             =======================================
-            ICMS DEPLOYMENT FAILED
+              ICMS DEPLOYMENT FAILED
             =======================================
 
-            Build Number : ${BUILD_NUMBER}
+            Build Number:
+            ${BUILD_NUMBER}
 
             Check Jenkins Console Output.
 
