@@ -45,11 +45,7 @@ export default function Dashboard({ user, go }: { user: any; go: (v: string) => 
           </div>
           <div className="card-pad">
             {data.owned_processes.length === 0 && (
-<<<<<<< HEAD
-              <p style={{ color: 'var(--txt-mute)', fontSize: 10 }}>
-=======
               <p style={{ color: 'var(--txt-mute)', fontSize: 14 }}>
->>>>>>> 22ee34d (updated code to branch)
                 This office participates in workflows but does not own a reserved process.
                 Open Workflows to initiate a request that routes to the owning office.
               </p>
@@ -57,17 +53,10 @@ export default function Dashboard({ user, go }: { user: any; go: (v: string) => 
             {data.owned_processes.map((p: any) => (
               <div key={p.key} style={{ padding: '13px 0', borderBottom: '1px solid #f2efe8' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-<<<<<<< HEAD
-                  <div style={{ fontWeight: 600, fontSize: 10.5, color: 'var(--txt)' }}>{p.label}</div>
-                  {p.amount && <span className="tag" style={{ background: '#fdf3dc', color: '#96701b' }}>monetary</span>}
-                </div>
-                <div style={{ fontFamily: 'var(--ff-mono)', fontSize: 8, color: 'var(--txt-mute)', marginTop: 5 }}>
-=======
                   <div style={{ fontWeight: 600, fontSize: 14.5, color: 'var(--txt)' }}>{p.label}</div>
                   {p.amount && <span className="tag" style={{ background: '#fdf3dc', color: '#96701b' }}>monetary</span>}
                 </div>
                 <div style={{ fontFamily: 'var(--ff-mono)', fontSize: 11.5, color: 'var(--txt-mute)', marginTop: 5 }}>
->>>>>>> 22ee34d (updated code to branch)
                   {p.chain.join('  →  ')}  ⇡ {p.escalation}
                 </div>
               </div>
@@ -85,22 +74,14 @@ export default function Dashboard({ user, go }: { user: any; go: (v: string) => 
             <span className="hint">{total} total</span>
           </div>
           <div className="card-pad">
-<<<<<<< HEAD
-            {total === 0 && <p style={{ color: 'var(--txt-mute)', fontSize: 10 }}>No workflows have run yet. Start one from the Workflows page to see the engine route it through the approval chain.</p>}
-=======
             {total === 0 && <p style={{ color: 'var(--txt-mute)', fontSize: 14 }}>No workflows have run yet. Start one from the Workflows page to see the engine route it through the approval chain.</p>}
->>>>>>> 22ee34d (updated code to branch)
             {stateOrder.filter(s => states[s]).map(s => {
               const pct = Math.round((states[s] / total) * 100)
               return (
                 <div key={s} style={{ marginBottom: 14 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
                     <StatePill s={s} />
-<<<<<<< HEAD
-                    <span style={{ fontFamily: 'var(--ff-mono)', fontSize: 8, color: 'var(--txt-soft)' }}>{states[s]}</span>
-=======
                     <span style={{ fontFamily: 'var(--ff-mono)', fontSize: 12, color: 'var(--txt-soft)' }}>{states[s]}</span>
->>>>>>> 22ee34d (updated code to branch)
                   </div>
                   <div style={{ height: 8, background: '#f0ede5', borderRadius: 4, overflow: 'hidden' }}>
                     <div style={{ width: `${pct}%`, height: '100%', background: 'var(--brass)', borderRadius: 4, transition: 'width .6s' }} />
@@ -127,11 +108,7 @@ export default function Dashboard({ user, go }: { user: any; go: (v: string) => 
           </div>
           <div>
             <div className="side-sec" style={{ padding: 0, color: 'var(--txt-mute)' }}>Key workflows</div>
-<<<<<<< HEAD
-            <ul style={{ marginTop: 10, paddingLeft: 16, fontSize: 9.5, color: 'var(--txt-soft)', lineHeight: 1.9 }}>
-=======
             <ul style={{ marginTop: 10, paddingLeft: 16, fontSize: 13.5, color: 'var(--txt-soft)', lineHeight: 1.9 }}>
->>>>>>> 22ee34d (updated code to branch)
               {user.workflows.map((w: string) => <li key={w}>{w}</li>)}
             </ul>
           </div>

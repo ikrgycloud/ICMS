@@ -116,81 +116,6 @@ class Delegation(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
-<<<<<<< HEAD
-class DelegationPolicy(Base):
-    """Catalog of delegation subjects and their authority mapping."""
-    __tablename__ = "delegation_policies"
-    id = Column(String, primary_key=True)
-    tenant_id = Column(String, index=True)
-    policy_key = Column(String, unique=True, index=True)
-    policy_type = Column(String, index=True)
-    subject = Column(String)
-    authority = Column(String)
-    action = Column(String, default="approve")
-    resource_scope = Column(Text, default="")
-    default_limit = Column(Float, nullable=True)
-    delegated_to_type_default = Column(String, default="Individual")
-    icon = Column(String, default="shield")
-    sort_order = Column(Integer, default=0)
-    active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
-
-
-class DelegationProfile(Base):
-    """Presentation metadata for a concrete delegation grant."""
-    __tablename__ = "delegation_profiles"
-    id = Column(String, primary_key=True)
-    tenant_id = Column(String, index=True)
-    delegation_id = Column(String, ForeignKey("delegations.id"), unique=True, index=True)
-    policy_key = Column(String, index=True, default="")
-    policy_type = Column(String, index=True, default="")
-    subject = Column(String, default="")
-    reference_code = Column(String, unique=True, index=True)
-    delegated_to_type = Column(String, default="Individual")
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
-
-
-class DelegationOption(Base):
-    """DB-backed option catalog for delegation form controls."""
-    __tablename__ = "delegation_options"
-    id = Column(String, primary_key=True)
-    tenant_id = Column(String, index=True)
-    group_key = Column(String, index=True)
-    option_key = Column(String, index=True)
-    label = Column(String)
-    description = Column(Text, default="")
-    sort_order = Column(Integer, default=0)
-    active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
-
-
-class DelegationContext(Base):
-    """Extended metadata for chairman delegation records."""
-    __tablename__ = "delegation_contexts"
-    id = Column(String, primary_key=True)
-    tenant_id = Column(String, index=True)
-    delegation_id = Column(String, ForeignKey("delegations.id"), unique=True, index=True)
-    policy_description = Column(Text, default="")
-    scope_key = Column(String, default="")
-    scope_label = Column(String, default="")
-    access_key = Column(String, default="")
-    access_label = Column(String, default="")
-    review_frequency_key = Column(String, default="")
-    review_frequency_label = Column(String, default="")
-    notes = Column(Text, default="")
-    attachment_name = Column(String, default="")
-    attachment_mime_type = Column(String, default="")
-    attachment_size = Column(Integer, nullable=True)
-    attachment_data = Column(Text, default="")
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
-
-
-=======
->>>>>>> 22ee34d (updated code to branch)
 class ApprovalLimit(Base):
     __tablename__ = "approval_limits"
     id = Column(String, primary_key=True)
@@ -220,24 +145,6 @@ class WorkflowInstance(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
-<<<<<<< HEAD
-class WorkflowProfile(Base):
-    """Presentation metadata used by approval dashboards and request forms."""
-    __tablename__ = "workflow_profiles"
-    id = Column(String, primary_key=True)
-    tenant_id = Column(String, index=True)
-    workflow_id = Column(String, ForeignKey("workflow_instances.id"), unique=True, index=True)
-    semester_key = Column(String, index=True, default="")
-    semester_label = Column(String, default="")
-    category = Column(String, default="")
-    reference_code = Column(String, unique=True, index=True)
-    notes = Column(Text, default="")
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
-
-
-=======
->>>>>>> 22ee34d (updated code to branch)
 class Approval(Base):
     """Each decision on a workflow (Document §10)."""
     __tablename__ = "approvals"

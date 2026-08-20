@@ -65,11 +65,7 @@ function Approval() {
                     {p.chain.map((c: string, i: number) => (
                       <>
                         <span className="chip-stage" key={i}>{c}</span>
-<<<<<<< HEAD
-                        {i < p.chain.length - 1 && <span className="chain-arrow" style={{ fontSize: 8 }}>→</span>}
-=======
                         {i < p.chain.length - 1 && <span className="chain-arrow" style={{ fontSize: 12 }}>→</span>}
->>>>>>> 22ee34d (updated code to branch)
                       </>
                     ))}
                   </div>
@@ -104,11 +100,7 @@ function Scope() {
               <tr key={r.office}>
                 <td style={{ fontWeight: 600 }}>{r.office}</td>
                 <td><span className="pill" style={{ background: (SCOPE_COLORS[r.scope] || '#999') + '22', color: SCOPE_COLORS[r.scope] || '#555' }}>{r.scope}</span></td>
-<<<<<<< HEAD
-                <td style={{ color: 'var(--txt-soft)', fontSize: 9 }}>{r.reach}</td>
-=======
                 <td style={{ color: 'var(--txt-soft)', fontSize: 13 }}>{r.reach}</td>
->>>>>>> 22ee34d (updated code to branch)
               </tr>
             ))}
           </tbody>

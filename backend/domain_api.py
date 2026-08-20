@@ -9,19 +9,11 @@ return 403 with the engine's reason — the same verdict the UI uses to disable
 the control.
 """
 from datetime import date, datetime, timedelta
-<<<<<<< HEAD
-import re
-=======
->>>>>>> 22ee34d (updated code to branch)
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import desc, func
 
-<<<<<<< HEAD
-from core import db, auth, uid, write_audit, notify, active_delegations_for
-=======
 from core import db, auth, uid, write_audit, notify, active_delegation_for
->>>>>>> 22ee34d (updated code to branch)
 from database import office, TENANT, slug
 from authority import authorize, ALLOW
 from matrices import rbac_for, scope_for, approval_limit_for, APPROVAL_LIMITS
@@ -60,11 +52,7 @@ def gate(s, ctx, module: str, action: str, amount=None):
             approval_limit = approval_limit_for(scope_level, proc)
     dec = authorize(ctx=ctx, action=verb, resource=module, rbac_authority=rbac,
                     amount=amount, approval_limit=approval_limit,
-<<<<<<< HEAD
-                    active_delegation=active_delegations_for(s, ctx["sub"]),
-=======
                     active_delegation=active_delegation_for(s, ctx["sub"]),
->>>>>>> 22ee34d (updated code to branch)
                     target_scope_level=ctx.get("scope_level", "individual"),
                     escalate_to=escalate_to)
     return dec, verb
@@ -134,8 +122,6 @@ def overview(ctx=Depends(auth), s=Depends(db)):
     return {"stats": stats, "dept_distribution": dept_counts}
 
 
-<<<<<<< HEAD
-=======
 @router.get("/overview/principal")
 def principal_overview(academic_year: str = "", student_semester: str = "", ctx=Depends(auth), s=Depends(db)):
     """Branch-leadership dashboard aggregates, calculated only from domain records."""
@@ -195,7 +181,6 @@ def principal_overview(academic_year: str = "", student_semester: str = "", ctx=
     }
 
 
->>>>>>> 22ee34d (updated code to branch)
 def _month_start(d: date) -> date:
     return d.replace(day=1)
 
@@ -236,27 +221,6 @@ def _percent_delta(current: float, previous: float) -> dict:
     }
 
 
-<<<<<<< HEAD
-def _normalize_period(start: str = "", end: str = "", fallback: date | None = None):
-    anchor = fallback or _month_start(date.today())
-    selected_start = date.fromisoformat(start) if start else anchor
-    selected_end = date.fromisoformat(end) if end else _month_end(selected_start)
-    if selected_end < selected_start:
-        selected_end = selected_start
-    return selected_start, selected_end
-
-
-def _latest_snapshot_within_range(snapshots, start: date, end: date):
-    start_month = _month_start(start)
-    end_month = _month_start(end)
-    in_scope = [row for row in snapshots if start_month <= row.snapshot_month <= end_month]
-    if in_scope:
-        return in_scope[0]
-    return next((row for row in snapshots if row.snapshot_month <= end_month), None)
-
-
-=======
->>>>>>> 22ee34d (updated code to branch)
 @router.get("/overview/chairman")
 def chairman_overview(start: str = "", end: str = "", ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "governance", "view")[0])
@@ -264,20 +228,6 @@ def chairman_overview(start: str = "", end: str = "", ctx=Depends(auth), s=Depen
     available_snapshots = (s.query(D.InstitutionSnapshot)
                            .order_by(D.InstitutionSnapshot.snapshot_month.desc()).all())
     latest_snapshot = available_snapshots[0] if available_snapshots else None
-<<<<<<< HEAD
-    selected_start, selected_end = _normalize_period(
-        start, end, latest_snapshot.snapshot_month if latest_snapshot else None
-    )
-    period_days = max((selected_end - selected_start).days, 0) + 1
-    previous_end = selected_start - timedelta(days=1)
-    previous_start = previous_end - timedelta(days=period_days - 1)
-
-    snapshot = _latest_snapshot_within_range(available_snapshots, selected_start, selected_end)
-    snapshot_month = snapshot.snapshot_month if snapshot else _month_start(selected_end)
-    previous_snapshot = (s.query(D.InstitutionSnapshot)
-                         .filter(D.InstitutionSnapshot.snapshot_month < snapshot_month)
-                         .order_by(D.InstitutionSnapshot.snapshot_month.desc()).first())
-=======
     selected_start = date.fromisoformat(start) if start else (
         latest_snapshot.snapshot_month if latest_snapshot else _month_start(date.today())
     )
@@ -290,7 +240,6 @@ def chairman_overview(start: str = "", end: str = "", ctx=Depends(auth), s=Depen
                 .filter(D.InstitutionSnapshot.snapshot_month == selected_start).first())
     previous_snapshot = (s.query(D.InstitutionSnapshot)
                          .filter(D.InstitutionSnapshot.snapshot_month == previous_start).first())
->>>>>>> 22ee34d (updated code to branch)
 
     current_outstanding = snapshot.outstanding_fees if snapshot else 0
     previous_outstanding = previous_snapshot.outstanding_fees if previous_snapshot else 0
@@ -458,34 +407,12 @@ def chairman_overview(start: str = "", end: str = "", ctx=Depends(auth), s=Depen
 
 
 @router.get("/overview/chairman/outstanding-fees")
-<<<<<<< HEAD
-def chairman_outstanding_fees(start: str = "", end: str = "", ctx=Depends(auth), s=Depends(db)):
-=======
 def chairman_outstanding_fees(start: str = "", ctx=Depends(auth), s=Depends(db)):
->>>>>>> 22ee34d (updated code to branch)
     require(gate(s, ctx, "governance", "view")[0])
 
     available = (s.query(D.OutstandingFeeSnapshot)
                  .order_by(D.OutstandingFeeSnapshot.snapshot_month.desc()).all())
     latest = available[0] if available else None
-<<<<<<< HEAD
-    selected_start, selected_end = _normalize_period(
-        start, end, latest.snapshot_month if latest else None
-    )
-
-    current = _latest_snapshot_within_range(available, selected_start, selected_end)
-    if not current and latest and latest.snapshot_month <= _month_start(selected_end):
-        current = latest
-        selected_start = latest.snapshot_month
-        selected_end = _month_end(latest.snapshot_month)
-    if not current:
-        return {
-            "range": {
-                "start": selected_start.isoformat(),
-                "end": selected_end.isoformat(),
-                "label": _fmt_range(selected_start, selected_end),
-            },
-=======
     selected_start = date.fromisoformat(start) if start else (
         latest.snapshot_month if latest else _month_start(date.today())
     )
@@ -499,7 +426,6 @@ def chairman_outstanding_fees(start: str = "", ctx=Depends(auth), s=Depends(db))
     if not current:
         return {
             "range": {"start": selected_start.isoformat(), "label": _month_label(selected_start)},
->>>>>>> 22ee34d (updated code to branch)
             "summary": {
                 "total_outstanding": {"value": 0, "delta_pct": 0, "direction": "up"},
                 "students_with_dues": {"value": 0, "delta_pct": 0, "direction": "up"},
@@ -510,32 +436,19 @@ def chairman_outstanding_fees(start: str = "", ctx=Depends(auth), s=Depends(db))
         }
 
     previous = (s.query(D.OutstandingFeeSnapshot)
-<<<<<<< HEAD
-                .filter(D.OutstandingFeeSnapshot.snapshot_month < current.snapshot_month)
-                .order_by(D.OutstandingFeeSnapshot.snapshot_month.desc()).first())
-
-    trend_rows = (s.query(D.OutstandingFeeSnapshot)
-                  .filter(D.OutstandingFeeSnapshot.snapshot_month <= current.snapshot_month)
-=======
                 .filter(D.OutstandingFeeSnapshot.snapshot_month < selected_start)
                 .order_by(D.OutstandingFeeSnapshot.snapshot_month.desc()).first())
 
     trend_rows = (s.query(D.OutstandingFeeSnapshot)
                   .filter(D.OutstandingFeeSnapshot.snapshot_month <= selected_start)
->>>>>>> 22ee34d (updated code to branch)
                   .order_by(D.OutstandingFeeSnapshot.snapshot_month.desc()).limit(6).all())
     trend_rows = list(reversed(trend_rows))
 
     return {
         "range": {
             "start": selected_start.isoformat(),
-<<<<<<< HEAD
-            "end": selected_end.isoformat(),
-            "label": _fmt_range(selected_start, selected_end),
-=======
             "end": _month_end(selected_start).isoformat(),
             "label": _fmt_range(selected_start, _month_end(selected_start)),
->>>>>>> 22ee34d (updated code to branch)
         },
         "summary": {
             "total_outstanding": {
@@ -1160,15 +1073,6 @@ class StudentIn(BaseModel):
     program_level: str = "UG"
 
 
-<<<<<<< HEAD
-@router.get("/students")
-def list_students(q: str = "", dept: str = "", ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "students", "view")[0])
-    query = s.query(D.Student)
-    if q:
-        like = f"%{q}%"
-        query = query.filter((D.Student.name.ilike(like)) | (D.Student.roll_no.ilike(like)))
-=======
 def _student_scope(query, ctx):
     """Apply the authenticated campus scope; never accept campus from the browser."""
     scope = (ctx.get("scope_ref") or "").strip()
@@ -1223,20 +1127,10 @@ def list_students(q: str = "", dept: str = "", program: str = "", academic_year:
     if q:
         like = f"%{q}%"
         query = query.filter((D.Student.name.ilike(like)) | (D.Student.roll_no.ilike(like)) | (D.Student.email.ilike(like)))
->>>>>>> 22ee34d (updated code to branch)
     if dept:
         d = s.query(D.Department).filter(D.Department.code == dept).first()
         if d:
             query = query.filter(D.Student.dept_id == d.id)
-<<<<<<< HEAD
-    rows = query.order_by(D.Student.roll_no).limit(300).all()
-    dept_map = {d.id: d.code for d in s.query(D.Department).all()}
-    return {"students": [{
-        "id": r.id, "roll_no": r.roll_no, "name": r.name, "dept": dept_map.get(r.dept_id, ""),
-        "batch": r.batch, "semester": r.semester, "section": r.section, "cgpa": r.cgpa,
-        "status": r.status, "hosteller": r.hosteller, "scholarship": r.scholarship,
-    } for r in rows], "total": query.count(),
-=======
     if program:
         query = query.join(D.Program, D.Student.program_id == D.Program.id).filter((D.Program.code == program) | (D.Program.name == program))
     if academic_year:
@@ -1316,13 +1210,10 @@ def list_students(q: str = "", dept: str = "", program: str = "", academic_year:
             for code, name in sorted({(dept_map[row.dept_id].code, dept_map[row.dept_id].name) for row in scoped_students if row.dept_id in dept_map}, key=lambda item: item[1])
         ],
         "summary": {"all_students": total, **risk_summary},
->>>>>>> 22ee34d (updated code to branch)
         "can_add": can(s, ctx, "students", "add"),
         "can_edit": can(s, ctx, "students", "edit")}
 
 
-<<<<<<< HEAD
-=======
 @router.get("/students/{student_id}/profile")
 def student_profile(student_id: str, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "students", "view")[0])
@@ -1349,7 +1240,6 @@ def student_profile(student_id: str, ctx=Depends(auth), s=Depends(db)):
             "limitations": {"backlogs": "Development sample results are included only where labelled development_sample.", "welfare": "Unavailable: student-linked welfare records are not modelled."}}
 
 
->>>>>>> 22ee34d (updated code to branch)
 @router.post("/students")
 def add_student(body: StudentIn, ctx=Depends(auth), s=Depends(db)):
     dec, verb = gate(s, ctx, "students", "add")
@@ -1807,9 +1697,6 @@ def list_jobs(ctx=Depends(auth), s=Depends(db)):
     rows = s.query(D.JobPosting).all()
     return {"jobs": [{"id": j.id, "title": j.title, "dept": j.dept, "kind": j.kind,
                       "openings": j.openings, "status": j.status} for j in rows],
-<<<<<<< HEAD
-            "can_post": can(s, ctx, "hr", "post_job")}
-=======
               "can_post": can(s, ctx, "hr", "post_job")}
 
 
@@ -1846,7 +1733,6 @@ def faculty_profile(staff_id: str, ctx=Depends(auth), s=Depends(db)):
     students = sum(s.query(D.Enrollment).filter(D.Enrollment.section_id == section.id, D.Enrollment.status == "enrolled").count() for section in sections)
     leave = s.query(D.LeaveRequest).filter(D.LeaveRequest.staff_id == row.id).order_by(D.LeaveRequest.from_date.desc()).all()
     return {"staff": {"id": row.id, "employee_id": row.emp_id, "name": row.name, "email": row.email, "department": department.name if department else "Administration", "designation": row.designation, "type": "Teaching" if "professor" in (row.designation or "").lower() else "Non-Teaching", "status": row.status, "campus": row.campus, "date_joined": row.date_joined.isoformat() if row.date_joined else None, "classes": len(sections), "students": students}, "sections": [{"code": section.section_code, "term": section.term, "schedule": section.schedule, "room": section.room} for section in sections], "leave": [{"kind": item.kind, "from": item.from_date.isoformat(), "to": item.to_date.isoformat(), "days": item.days, "status": item.status, "reason": item.reason} for item in leave]}
->>>>>>> 22ee34d (updated code to branch)
 
 
 class LeaveDecisionIn(BaseModel):
@@ -2026,69 +1912,6 @@ def _governance_rating(score: float) -> str:
     return "Needs Attention"
 
 
-<<<<<<< HEAD
-_GOVERNANCE_SEMESTER_KEY_RE = re.compile(r"^(odd|even)_(\d{4})_(\d{2})$")
-
-
-def _governance_snapshot_window(snapshot):
-    key = (snapshot.semester_key or "").strip().lower()
-    match = _GOVERNANCE_SEMESTER_KEY_RE.match(key)
-    if match:
-        term = match.group(1)
-        start_year = int(match.group(2))
-        end_year = (start_year // 100) * 100 + int(match.group(3))
-        if end_year < start_year:
-            end_year += 100
-        if term == "odd":
-            return date(start_year, 7, 1), date(start_year, 12, 31)
-        return date(end_year, 1, 1), date(end_year, 6, 30)
-
-    anchor = snapshot.as_of_date or date.today()
-    return _month_start(anchor), _month_end(anchor)
-
-
-def _governance_available_ranges(snapshots):
-    dated = sorted(
-        snapshots,
-        key=lambda row: (_governance_snapshot_window(row)[0], row.as_of_date or date.min),
-        reverse=True,
-    )
-    ranges = []
-    for snapshot in dated:
-        start, end = _governance_snapshot_window(snapshot)
-        ranges.append({
-            "key": snapshot.semester_key,
-            "semester_label": snapshot.semester_label,
-            "start": start.isoformat(),
-            "end": end.isoformat(),
-            "label": _fmt_range(start, end),
-        })
-    return ranges
-
-
-def _governance_snapshot_for_period(snapshots, start: date, end: date):
-    dated = sorted(
-        snapshots,
-        key=lambda row: (_governance_snapshot_window(row)[1], row.as_of_date or date.min),
-        reverse=True,
-    )
-    overlapping = []
-    previous = []
-    for snapshot in dated:
-        window_start, window_end = _governance_snapshot_window(snapshot)
-        if window_start <= end and window_end >= start:
-            overlapping.append(snapshot)
-        elif window_end <= end:
-            previous.append(snapshot)
-    if overlapping:
-        return overlapping[0]
-    if previous:
-        return previous[0]
-    return None
-
-
-=======
->>>>>>> 22ee34d (updated code to branch)
 def _governance_snapshots(s):
     return (
         s.query(D.GovernanceDashboardSnapshot)
@@ -2099,28 +1922,6 @@ def _governance_snapshots(s):
     )
 
 
-<<<<<<< HEAD
-def _governance_snapshot_bundle(s, semester: str = "", start: str = "", end: str = ""):
-    snapshots = _governance_snapshots(s)
-    if not snapshots:
-        return None, [], [], [], {"start": "", "end": "", "label": "", "available_ranges": []}
-
-    selected = None
-    query_start = None
-    query_end = None
-    if semester:
-        selected = next((row for row in snapshots if row.semester_key == semester), None)
-        if selected is not None:
-            query_start, query_end = _governance_snapshot_window(selected)
-    elif start or end:
-        fallback_start, _ = _governance_snapshot_window(snapshots[0])
-        query_start, query_end = _normalize_period(start, end, fallback_start)
-        selected = _governance_snapshot_for_period(snapshots, query_start, query_end)
-    if selected is None:
-        selected = next((row for row in snapshots if row.is_default), snapshots[0])
-    if query_start is None or query_end is None:
-        query_start, query_end = _governance_snapshot_window(selected)
-=======
 def _governance_snapshot_bundle(s, semester: str = ""):
     snapshots = _governance_snapshots(s)
     if not snapshots:
@@ -2131,7 +1932,6 @@ def _governance_snapshot_bundle(s, semester: str = ""):
         selected = next((row for row in snapshots if row.semester_key == semester), None)
     if selected is None:
         selected = next((row for row in snapshots if row.is_default), snapshots[0])
->>>>>>> 22ee34d (updated code to branch)
 
     compliance_rows = (
         s.query(D.GovernanceComplianceMetric)
@@ -2145,23 +1945,10 @@ def _governance_snapshot_bundle(s, semester: str = ""):
         .order_by(D.GovernancePerformanceMetric.sort_order, D.GovernancePerformanceMetric.area)
         .all()
     )
-<<<<<<< HEAD
-    range_payload = {
-        "start": query_start.isoformat(),
-        "end": query_end.isoformat(),
-        "label": _fmt_range(query_start, query_end),
-        "available_ranges": _governance_available_ranges(snapshots),
-    }
-    return selected, snapshots, compliance_rows, performance_rows, range_payload
-
-
-def _governance_payload_from_snapshot(snapshot, compliance_rows, performance_rows, semesters, range_payload=None):
-=======
     return selected, snapshots, compliance_rows, performance_rows
 
 
 def _governance_payload_from_snapshot(snapshot, compliance_rows, performance_rows, semesters):
->>>>>>> 22ee34d (updated code to branch)
     total_budget = snapshot.total_budget or 0
     utilized_budget = snapshot.utilized_budget or 0
     utilization_pct = round(100 * utilized_budget / total_budget, 1) if total_budget else 0
@@ -2180,10 +1967,6 @@ def _governance_payload_from_snapshot(snapshot, compliance_rows, performance_row
         "subtitle": "Institution-wide performance for leadership and trustees",
         "selected_semester": {"key": snapshot.semester_key, "label": snapshot.semester_label},
         "semesters": semesters,
-<<<<<<< HEAD
-        "range": range_payload or {"start": "", "end": "", "label": "", "available_ranges": []},
-=======
->>>>>>> 22ee34d (updated code to branch)
         "kpis": {
             "students": snapshot.student_count,
             "faculty": snapshot.faculty_count,
@@ -2251,36 +2034,11 @@ def _governance_live_fallback(s, can_edit_dashboard=False):
     open_risk = s.query(D.Complaint).filter(D.Complaint.status != "resolved").count()
     compliance_score = max(80, min(98, round((100 + min(active_accreditations * 6, 96) + 88 + max(82, 96 - open_risk)) / 4)))
 
-<<<<<<< HEAD
-    today = date.today()
-    if today.month >= 7:
-        live_start = date(today.year, 7, 1)
-        live_end = date(today.year, 12, 31)
-    else:
-        live_start = date(today.year, 1, 1)
-        live_end = date(today.year, 6, 30)
-=======
->>>>>>> 22ee34d (updated code to branch)
     return {
         "title": "Governance dashboard",
         "subtitle": "Institution-wide performance for leadership and trustees",
         "selected_semester": {"key": "live", "label": "Live Institution View"},
         "semesters": [{"key": "live", "label": "Live Institution View"}],
-<<<<<<< HEAD
-        "range": {
-            "start": live_start.isoformat(),
-            "end": live_end.isoformat(),
-            "label": _fmt_range(live_start, live_end),
-            "available_ranges": [{
-                "key": "live",
-                "semester_label": "Live Institution View",
-                "start": live_start.isoformat(),
-                "end": live_end.isoformat(),
-                "label": _fmt_range(live_start, live_end),
-            }],
-        },
-=======
->>>>>>> 22ee34d (updated code to branch)
         "kpis": {
             "students": students,
             "faculty": faculty,
@@ -2325,29 +2083,15 @@ def _governance_live_fallback(s, can_edit_dashboard=False):
 
 
 @router.get("/governance")
-<<<<<<< HEAD
-def governance(semester: str = Query("", description="Semester key"),
-               start: str = Query("", description="Period start date"),
-               end: str = Query("", description="Period end date"),
-               ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "governance", "view")[0])
-    can_edit_dashboard = can(s, ctx, "governance", "edit_dashboard")
-    selected, snapshots, compliance_rows, performance_rows, range_payload = _governance_snapshot_bundle(s, semester, start, end)
-=======
 def governance(semester: str = Query("", description="Semester key"), ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "governance", "view")[0])
     can_edit_dashboard = can(s, ctx, "governance", "edit_dashboard")
     selected, snapshots, compliance_rows, performance_rows = _governance_snapshot_bundle(s, semester)
->>>>>>> 22ee34d (updated code to branch)
     if not snapshots or not selected:
         return _governance_live_fallback(s, can_edit_dashboard)
 
     semesters = [{"key": row.semester_key, "label": row.semester_label} for row in snapshots]
-<<<<<<< HEAD
-    payload = _governance_payload_from_snapshot(selected, compliance_rows, performance_rows, semesters, range_payload)
-=======
     payload = _governance_payload_from_snapshot(selected, compliance_rows, performance_rows, semesters)
->>>>>>> 22ee34d (updated code to branch)
     payload["can_edit"] = can_edit_dashboard
     return payload
 
@@ -2407,11 +2151,7 @@ def update_governance_dashboard(semester_key: str, body: GovernanceDashboardUpda
     dec, _ = gate(s, ctx, "governance", "edit_dashboard")
     require(dec)
 
-<<<<<<< HEAD
-    selected, snapshots, compliance_rows, performance_rows, _ = _governance_snapshot_bundle(s, semester_key)
-=======
     selected, snapshots, compliance_rows, performance_rows = _governance_snapshot_bundle(s, semester_key)
->>>>>>> 22ee34d (updated code to branch)
     if not snapshots or not selected:
         raise HTTPException(404, "Governance semester snapshot not found")
 
@@ -2495,15 +2235,9 @@ def update_governance_dashboard(semester_key: str, body: GovernanceDashboardUpda
         ctx.get("auth_level", "mfa"),
     )
 
-<<<<<<< HEAD
-    selected, snapshots, compliance_rows, performance_rows, range_payload = _governance_snapshot_bundle(s, semester_key)
-    semesters = [{"key": row.semester_key, "label": row.semester_label} for row in snapshots]
-    payload = _governance_payload_from_snapshot(selected, compliance_rows, performance_rows, semesters, range_payload)
-=======
     selected, snapshots, compliance_rows, performance_rows = _governance_snapshot_bundle(s, semester_key)
     semesters = [{"key": row.semester_key, "label": row.semester_label} for row in snapshots]
     payload = _governance_payload_from_snapshot(selected, compliance_rows, performance_rows, semesters)
->>>>>>> 22ee34d (updated code to branch)
     payload["can_edit"] = can(s, ctx, "governance", "edit_dashboard")
     return payload
 

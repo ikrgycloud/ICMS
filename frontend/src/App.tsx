@@ -9,10 +9,7 @@ import Permissions from './views/Permissions'
 import OfficeProfile from './views/OfficeProfile'
 import Overview from './modules/Overview'
 import Calendar from './modules/Calendar'
-<<<<<<< HEAD
-=======
 import MySchedule from './modules/MySchedule'
->>>>>>> 22ee34d (updated code to branch)
 import AcademicCalendar from './modules/AcademicCalendar'
 import Students from './modules/Students'
 import Academics from './modules/Academics'
@@ -22,10 +19,7 @@ import Admissions from './modules/Admissions'
 import Finance from './modules/Finance'
 import Library from './modules/Library'
 import HR from './modules/HR'
-<<<<<<< HEAD
-=======
 import FacultyStaff from './modules/FacultyStaff'
->>>>>>> 22ee34d (updated code to branch)
 import Assets from './modules/Assets'
 import Hostel from './modules/Hostel'
 import Transport from './modules/Transport'
@@ -33,11 +27,6 @@ import Research from './modules/Research'
 import Placements from './modules/Placements'
 import Grievance from './modules/Grievance'
 import Governance from './modules/Governance'
-<<<<<<< HEAD
-import ChairmanApprovals from './modules/ChairmanApprovals'
-import ChairmanDelegation from './modules/ChairmanDelegation'
-=======
->>>>>>> 22ee34d (updated code to branch)
 import AdminPanel from './modules/AdminPanel'
 import Analytics from './modules/Analytics'
 import Procurement from './modules/Procurement'
@@ -76,8 +65,6 @@ const CHAIRMAN_DISPLAY: Record<string, { label: string; group: string }> = {
   matrices: { label: 'Settings', group: 'Support' },
 }
 
-<<<<<<< HEAD
-=======
 // Principal navigation intentionally follows the reference information architecture.
 // Entries without a matching capability remain visible but disabled, so the UI does
 // not imply that an unavailable backend workflow can be opened.
@@ -97,7 +84,6 @@ const PRINCIPAL_NAV = [
   ['Reference', 'Directory', 'directory'], ['Reference', 'Authority & Permissions', 'matrices'],
 ] as const
 
->>>>>>> 22ee34d (updated code to branch)
 export default function App({ onLogout }: { onLogout: () => void }) {
   const [user, setUser] = useState<any>(getUser())
   const [ws, setWs] = useState<any>(null)
@@ -126,12 +112,6 @@ export default function App({ onLogout }: { onLogout: () => void }) {
 
   useEffect(() => {
     if (!ws?.modules?.length) return
-<<<<<<< HEAD
-    if (!ws.modules.some((module: any) => module.key === view)) {
-      setView(ws.modules[0].key)
-    }
-  }, [ws, view])
-=======
     // Faculty & Staff is a Principal-specific presentation of the authorised
     // HR module.  It has its own route so that the list/profile experience is
     // retained when opened from the dashboard KPI or the Principal sidebar.
@@ -140,7 +120,6 @@ export default function App({ onLogout }: { onLogout: () => void }) {
       setView(ws.modules[0].key)
     }
   }, [ws, view, user?.office_n])
->>>>>>> 22ee34d (updated code to branch)
 
   async function pickRole(role: string) {
     if (role === user.active_role) {
@@ -185,10 +164,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
 
   const color = LEVEL_COLORS[user.level] || '#c9a24a'
   const chairmanShell = user.office_n === 1
-<<<<<<< HEAD
-=======
   const principalShell = user.office_n === 4
->>>>>>> 22ee34d (updated code to branch)
   const groups: Record<string, any[]> = {}
   displayModules.forEach((module: any) => {
     ;(groups[module.group] = groups[module.group] || []).push(module)
@@ -196,11 +172,6 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const order = chairmanShell ? CHAIRMAN_GROUP_ORDER : GROUP_ORDER
   const groupKeys = [...order.filter(key => groups[key]), ...Object.keys(groups).filter(key => !order.includes(key))]
   const current = displayModules.find((module: any) => module.key === view) || displayModules[0]
-<<<<<<< HEAD
-
-  return (
-    <div className={`app ${chairmanShell ? 'chairman-shell' : ''}`}>
-=======
   const principalGroups = PRINCIPAL_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
     const source = displayModules.find((module: any) => module.key === key)
       || (key === 'faculty_staff' ? { key, label, group, enabled: true } : undefined)
@@ -210,18 +181,13 @@ export default function App({ onLogout }: { onLogout: () => void }) {
 
   return (
     <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''}`}>
->>>>>>> 22ee34d (updated code to branch)
       <aside className={`sidebar ${sideOpen ? 'open' : ''}`}>
         <div className="brand">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <div className="seal">IC</div>
             <div>
               <div className="brand-name">ICMS</div>
-<<<<<<< HEAD
-              <div className="brand-sub">University Group</div>
-=======
               <div className="brand-sub">{principalShell ? 'Principal Portal' : 'University Group'}</div>
->>>>>>> 22ee34d (updated code to branch)
             </div>
           </div>
         </div>
@@ -231,31 +197,10 @@ export default function App({ onLogout }: { onLogout: () => void }) {
           <div style={{ minWidth: 0 }}>
             <div className="ot-office">{user.office}</div>
             <div className="ot-level">Level {user.level} - {toTitleCase(user.scope_level)} scope</div>
-<<<<<<< HEAD
-            {!!user.active_delegation_count && (
-              <div className="ot-delegation">
-                {user.active_delegation_count} active delegation{user.active_delegation_count === 1 ? '' : 's'}
-              </div>
-            )}
-=======
->>>>>>> 22ee34d (updated code to branch)
           </div>
         </div>
 
         <nav className="side-nav">
-<<<<<<< HEAD
-          {groupKeys.map(group => (
-            <div key={group}>
-              <div className="side-sec">{group}</div>
-              {groups[group].map((module: any) => (
-                <button
-                  key={module.key}
-                  className={`nav-item ${view === module.key ? 'on' : ''}`}
-                  onClick={() => {
-                    setView(module.key)
-                    setSideOpen(false)
-                  }}
-=======
           {(principalShell ? Object.keys(principalGroups) : groupKeys).map(group => (
             <div key={group}>
               <div className="side-sec">{group}</div>
@@ -269,7 +214,6 @@ export default function App({ onLogout }: { onLogout: () => void }) {
                     setSideOpen(false)
                   }}
                   title={principalShell && !module.enabled ? 'This module is not currently available for the Principal workspace' : module.label}
->>>>>>> 22ee34d (updated code to branch)
                   type="button"
                 >
                   <span className="ico">
@@ -341,11 +285,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
               {showNotif && (
                 <div className="notif-panel">
                   <div className="card-h" style={{ padding: '14px 18px' }}>
-<<<<<<< HEAD
-                    <h3 style={{ fontSize: 12 }}>Notifications</h3>
-=======
                     <h3 style={{ fontSize: 16 }}>Notifications</h3>
->>>>>>> 22ee34d (updated code to branch)
                     <button className="linkish" onClick={readAll} type="button">Mark all read</button>
                   </div>
                   <div style={{ maxHeight: 380, overflowY: 'auto' }}>
@@ -413,11 +353,8 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <Overview user={user} go={go} />
     case 'calendar':
       return <Calendar user={user} caps={caps} />
-<<<<<<< HEAD
-=======
     case 'my_schedule':
       return <MySchedule user={user} go={go} />
->>>>>>> 22ee34d (updated code to branch)
     case 'academic_calendar':
       return <AcademicCalendar user={user} caps={caps} />
     case 'integrations':
@@ -440,15 +377,12 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <Library caps={caps} />
     case 'hr':
       return <HR caps={caps} />
-<<<<<<< HEAD
-=======
     case 'faculty_staff':
       return <FacultyStaff />
     case 'leave':
       return <HR caps={caps} />
     case 'recruitment':
       return <HR caps={caps} />
->>>>>>> 22ee34d (updated code to branch)
     case 'procurement':
       return <Procurement caps={caps} />
     case 'assets':
@@ -468,21 +402,11 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'admin':
       return <AdminPanel caps={caps} />
     case 'approvals':
-<<<<<<< HEAD
-      return user.office_n === 1
-        ? <ChairmanApprovals user={user} onChange={onChange} />
-        : <Workflows user={user} onChange={onChange} />
-    case 'workflows':
-      return <Workflows user={user} onChange={onChange} />
-    case 'delegation':
-      return user.office_n === 1 ? <ChairmanDelegation user={user} /> : <Delegations user={user} />
-=======
       return <Workflows user={user} onChange={onChange} />
     case 'workflows':
       return <Workflows user={user} onChange={onChange} />
     case 'delegation':
       return <Delegations user={user} />
->>>>>>> 22ee34d (updated code to branch)
     case 'audit':
       return <AuditView />
     case 'directory':

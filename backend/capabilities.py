@@ -19,10 +19,7 @@ through authorize() in authority.py. This map only decides what is *offered*.
 # App module keys and their display metadata (icon is a glyph used by the UI).
 MODULES = {
     "overview":     {"label": "Overview",      "icon": "◆", "group": "Workspace"},
-<<<<<<< HEAD
-=======
     "my_schedule":  {"label": "My Schedule",   "icon": "📅", "group": "Workspace"},
->>>>>>> 22ee34d (updated code to branch)
     "calendar":     {"label": "Calendar",      "icon": "📆", "group": "Workspace"},
     "academic_calendar": {"label": "Academic Calendar", "icon": "🗓", "group": "Academics"},
     "students":     {"label": "Students",      "icon": "🎓", "group": "Academics"},
@@ -62,11 +59,7 @@ OFFICE_MODULES = {
     1:  ["governance", "analytics", "finance", "hr", "integrations", "approvals"], # Chairman
     2:  ["governance", "analytics", "finance", "approvals"],                       # Vice Chairman
     3:  ["analytics", "academics", "finance", "hr", "approvals"],                  # Campus Head
-<<<<<<< HEAD
-    4:  ["analytics", "academics", "students", "examinations", "finance", "approvals"],  # Principal
-=======
     4:  ["my_schedule", "analytics", "academics", "students", "admissions", "attendance", "examinations", "finance", "hr", "procurement", "assets", "hostel", "transport", "grievance", "approvals"],  # Principal: branch oversight views
->>>>>>> 22ee34d (updated code to branch)
     5:  ["academics", "students", "attendance", "examinations", "approvals"],      # Vice Principal
     6:  ["academics", "students", "examinations", "research", "approvals"],        # Dean Academics
     7:  ["hr", "procurement", "assets", "finance", "approvals"],                   # Dean Administration
@@ -154,13 +147,8 @@ ACTION_OFFICE_ALLOW = {
     ("academic_calendar", "create"): {1, 2, 4, 5},
     ("academic_calendar", "edit"): {1, 2, 4, 5},
     ("academic_calendar", "delete"): {1, 2, 4, 5},
-<<<<<<< HEAD
-    ("students", "add"): {4, 15, 35},                 # Principal, Admissions, Front office
-    ("students", "edit"): {4, 10, 15, 35},
-=======
     ("students", "add"): {15, 35},                    # Admissions / Front office own creation
     ("students", "edit"): {10, 15, 35},               # Principal has oversight, not record editing
->>>>>>> 22ee34d (updated code to branch)
     ("academics", "create_section"): {6, 10, 17},     # Dean Acad, HOD, Acad Coordinator
     ("academics", "assign_faculty"): {6, 10, 17},
     ("attendance", "mark"): {10, 11, 12, 13, 14, 17},  # HOD + faculty + coordinator

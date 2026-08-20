@@ -1,17 +1,11 @@
 import { api } from '../api'
 import { PageHead, Kpis, Spinner, money, useLoad } from './kit'
 import ChairmanOverview from './ChairmanOverview'
-<<<<<<< HEAD
-
-export default function Overview({ user, go }: { user: any; go: (v: string) => void }) {
-  if (user.office_n === 1) return <ChairmanOverview go={go} />
-=======
 import PrincipalDashboard from './PrincipalDashboard'
 
 export default function Overview({ user, go }: { user: any; go: (v: string) => void }) {
   if (user.office_n === 1) return <ChairmanOverview go={go} />
   if (user.office_n === 4) return <PrincipalDashboard user={user} go={go} />
->>>>>>> 22ee34d (updated code to branch)
   const [data, loading] = useLoad<any>(() => api.overview())
   if (loading || !data) return <Spinner />
   const s = data.stats

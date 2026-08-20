@@ -115,7 +115,12 @@ def seed():
                         s.add(RolePermission(id=rpid, role_id=role_id,
                                              office_n=o["n"], action=v, authority=auth))
 
-        # Demo users: one head account per office (password: demo123).
+        # Flush the shared reference data before inserting rows that depend on it.
+        # SessionLocal has autoflush disabled, so PostgreSQL cannot otherwise
+        # guarantee that foreign-key parents are inserted first.
+        s.flush()
+
+        # Demo people: one head account per office (password: demo123).
         for o in OFFICES:
             n = o["n"]
             uname = DEMO_USERNAMES.get(n, f"office_{n}")
@@ -124,6 +129,15 @@ def seed():
             if not s.get(Person, pid):
                 s.add(Person(id=pid, tenant_id=TENANT, name=head_role,
                              email=f"{uname}@icms.edu", contact="+91-00000-00000"))
+
+        s.flush()
+
+        # Designations and users depend on the people inserted above.
+        for o in OFFICES:
+            n = o["n"]
+            uname = DEMO_USERNAMES.get(n, f"office_{n}")
+            head_role = o["internal_roles"][0]
+            pid = f"person_{n}"
             desg_id = f"desg_{n}"
             if not s.get(Designation, desg_id):
                 s.add(Designation(id=desg_id, person_id=pid, title=head_role,
@@ -135,13 +149,18 @@ def seed():
                            mfa_enabled=level_privileged(o["level"]),
                            office_n=n, role=head_role, scope_level=scope_for(n),
                            scope_ref="scope_global"))
+
+        s.flush()
+
+        # User-role links depend on both users and roles.
+        for o in OFFICES:
+            n = o["n"]
+            uid = f"user_{n}"
             urid = f"ur_{n}"
             if not s.get(UserRole, urid):
                 s.add(UserRole(id=urid, user_id=uid, role_id=f"role_{n}_0",
                                org_scope_id="scope_global"))
 
-<<<<<<< HEAD
-=======
         # The demo Principal is a campus role.  Older databases were seeded
         # with the global scope for every demo account, which let this account
         # see students belonging to other campuses.  Keep the scope explicit
@@ -150,7 +169,6 @@ def seed():
         if principal and principal.scope_ref == "scope_global":
             principal.scope_ref = CAMPUS_SCOPES[0]
 
->>>>>>> 22ee34d (updated code to branch)
         s.commit()
         return {"status": "seeded", "offices": len(OFFICES),
                 "campuses": len(CAMPUS_SCOPES),

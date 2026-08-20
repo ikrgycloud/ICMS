@@ -142,11 +142,7 @@ def authorize(*, ctx: dict, action: str, resource: str,
               workflow_valid_states: Optional[list] = None,
               amount: Optional[float] = None, approval_limit: Optional[float] = None,
               requester_id: Optional[str] = None,
-<<<<<<< HEAD
-              active_delegation: Optional[object] = None,
-=======
               active_delegation: Optional[dict] = None,
->>>>>>> 22ee34d (updated code to branch)
               target_scope_level: str = "individual",
               escalate_to: Optional[str] = None) -> Decision:
     """
@@ -154,19 +150,6 @@ def authorize(*, ctx: dict, action: str, resource: str,
     rbac_authority: the RBAC/ABAC verdict for (role x action x resource) — one of
                     FULL/LIMITED/VIEW/RECOMMEND/DELEGATED/CONDITIONAL/NOT_ALLOWED.
     """
-<<<<<<< HEAD
-    delegation_match = _matching_delegation(active_delegation, action, resource,
-                                            target_scope_level, amount)
-    effective_authority = DELEGATED if delegation_match and rbac_authority in (NOT_ALLOWED, VIEW) else rbac_authority
-
-    # 8. Permission check (RBAC + ABAC).
-    if effective_authority == NOT_ALLOWED:
-        return Decision(DENY, f"Role has no '{action}' permission on {resource}", NOT_ALLOWED)
-
-    # View-only roles can never mutate unless a valid delegation upgrades them.
-    mutating = action not in ("view", "export", "print", "download", "audit")
-    if effective_authority == VIEW and mutating:
-=======
     # 8. Permission check (RBAC + ABAC).
     if rbac_authority == NOT_ALLOWED:
         return Decision(DENY, f"Role has no '{action}' permission on {resource}", NOT_ALLOWED)
@@ -174,7 +157,6 @@ def authorize(*, ctx: dict, action: str, resource: str,
     # View-only roles can never mutate.
     mutating = action not in ("view", "export", "print", "download", "audit")
     if rbac_authority == VIEW and mutating:
->>>>>>> 22ee34d (updated code to branch)
         return Decision(DENY, "View-only authority cannot perform this action", VIEW)
 
     # 6/scope. Scope check — actor must cover the target scope.
@@ -182,15 +164,6 @@ def authorize(*, ctx: dict, action: str, resource: str,
         return Decision(
             DENY,
             f"Out of scope: {ctx.get('scope_level')} cannot act on {target_scope_level}",
-<<<<<<< HEAD
-            effective_authority,
-        )
-
-    # 10. Delegation check — DELEGATED authority requires an active, in-date grant.
-    if effective_authority == DELEGATED:
-        if not delegation_match:
-            return Decision(DENY, "Delegated authority required but no active grant", DELEGATED)
-=======
             rbac_authority,
         )
 
@@ -200,7 +173,6 @@ def authorize(*, ctx: dict, action: str, resource: str,
             return Decision(DENY, "Delegated authority required but no active grant", DELEGATED)
         if not _delegation_valid(active_delegation, action, target_scope_level, amount):
             return Decision(DENY, "Delegation expired, revoked, or out of scope/limit", DELEGATED)
->>>>>>> 22ee34d (updated code to branch)
 
     # 11. Workflow-state check — action must be valid for the entity's current state.
     if workflow_valid_states is not None and workflow_state is not None:
@@ -208,22 +180,14 @@ def authorize(*, ctx: dict, action: str, resource: str,
             return Decision(
                 DENY,
                 f"Action '{action}' invalid for workflow state '{workflow_state}'",
-<<<<<<< HEAD
-                effective_authority,
-=======
                 rbac_authority,
->>>>>>> 22ee34d (updated code to branch)
             )
 
     # 12. Segregation of duties — requester != approver.
     if action in ("approve", "reject", "publish") and requester_id is not None:
         if requester_id == ctx.get("sub"):
             return Decision(DENY, "Segregation of duties: requester cannot approve own request",
-<<<<<<< HEAD
-                            effective_authority)
-=======
                             rbac_authority)
->>>>>>> 22ee34d (updated code to branch)
 
     # 9. Approval-limit check — amount vs configured threshold for scope.
     if action == "approve" and amount is not None:
@@ -231,44 +195,15 @@ def authorize(*, ctx: dict, action: str, resource: str,
             return Decision(
                 ESCALATE,
                 f"Amount {amount:,.0f} exceeds approval limit {approval_limit:,.0f} — auto-escalated",
-<<<<<<< HEAD
-                effective_authority, escalate_to=escalate_to,
-            )
-
-    # RECOMMEND authority never finalizes — it recommends upward.
-    if effective_authority == RECOMMEND and action in ("approve", "publish"):
-=======
                 rbac_authority, escalate_to=escalate_to,
             )
 
     # RECOMMEND authority never finalizes — it recommends upward.
     if rbac_authority == RECOMMEND and action in ("approve", "publish"):
->>>>>>> 22ee34d (updated code to branch)
         return Decision(RECOMMEND_OUT, "Recommendation recorded; final approval required upward",
                         RECOMMEND, escalate_to=escalate_to)
 
     # CONDITIONAL authority allows but flags for review.
-<<<<<<< HEAD
-    if effective_authority == CONDITIONAL:
-        return Decision(ALLOW, "Allowed conditionally (per exam/scope authority)", CONDITIONAL)
-
-    # 13. Decision.
-    return Decision(ALLOW, "Authorized", effective_authority)
-
-
-def _matching_delegation(active_delegation: Optional[object], action: str, resource: str,
-                         target_scope_level: str, amount: Optional[float]):
-    if not active_delegation:
-        return None
-    candidates = active_delegation if isinstance(active_delegation, list) else [active_delegation]
-    for delegation in candidates:
-        if _delegation_valid(delegation, action, resource, target_scope_level, amount):
-            return delegation
-    return None
-
-
-def _delegation_valid(d: dict, action: str, resource: str, target_scope_level: str,
-=======
     if rbac_authority == CONDITIONAL:
         return Decision(ALLOW, "Allowed conditionally (per exam/scope authority)", CONDITIONAL)
 
@@ -277,7 +212,6 @@ def _delegation_valid(d: dict, action: str, resource: str, target_scope_level: s
 
 
 def _delegation_valid(d: dict, action: str, target_scope_level: str,
->>>>>>> 22ee34d (updated code to branch)
                       amount: Optional[float]) -> bool:
     if d.get("status") != "active":
         return False
@@ -289,44 +223,8 @@ def _delegation_valid(d: dict, action: str, target_scope_level: str,
         return False
     if not (start <= now <= end):
         return False
-<<<<<<< HEAD
-    if not _delegation_action_matches(d.get("action") or d.get("authority") or "*", action):
-        return False
-    if not _delegation_resource_matches(d.get("resource_scope") or "*", resource):
-=======
     if d.get("authority") and action not in ("view",) and d["authority"] not in ("*", action):
->>>>>>> 22ee34d (updated code to branch)
         return False
     if d.get("limit") is not None and amount is not None and amount > float(d["limit"]):
         return False
     return True
-<<<<<<< HEAD
-
-
-def _delegation_action_matches(grant_action: str, action: str) -> bool:
-    allowed = {
-        "*": {"approve", "review", "reject", "escalate", "execute", "view", "audit", "publish"},
-        "approve": {"approve", "review", "reject", "escalate"},
-        "review": {"review", "escalate"},
-        "view": {"view", "audit"},
-    }
-    key = str(grant_action or "*").strip().lower()
-    if key in allowed:
-        return action in allowed[key]
-    return key == action
-
-
-def _delegation_resource_matches(scope_raw: str, resource: str) -> bool:
-    patterns = [part.strip() for part in str(scope_raw or "*").split(",") if part.strip()]
-    if not patterns:
-        return True
-    for pattern in patterns:
-        if pattern == "*":
-            return True
-        if pattern.endswith("*") and resource.startswith(pattern[:-1]):
-            return True
-        if resource == pattern:
-            return True
-    return False
-=======
->>>>>>> 22ee34d (updated code to branch)

@@ -190,17 +190,10 @@ export default function Landing({ onSignIn }: { onSignIn: () => void }) {
           <div className="lp-split">
             <div>
               <div className="lp-kicker">The authority engine</div>
-<<<<<<< HEAD
-              <h2 style={{ fontFamily: 'var(--ff-d)', fontSize: 34, fontWeight: 500, letterSpacing: '-.015em', lineHeight: 1.12, marginBottom: 10 }}>
-                Correct by construction, <em>provable</em> after the fact.
-              </h2>
-              <p style={{ fontSize: 12, color: 'var(--txt-soft)', marginBottom: 20, lineHeight: 1.65 }}>
-=======
               <h2 style={{ fontFamily: 'var(--ff-d)', fontSize: 38, fontWeight: 500, letterSpacing: '-.015em', lineHeight: 1.12, marginBottom: 10 }}>
                 Correct by construction, <em>provable</em> after the fact.
               </h2>
               <p style={{ fontSize: 16, color: 'var(--txt-soft)', marginBottom: 20, lineHeight: 1.65 }}>
->>>>>>> 22ee34d (updated code to branch)
                 Every action in the system passes through one engine that computes effective
                 authority from independent, configurable factors — then records the decision permanently.
               </p>

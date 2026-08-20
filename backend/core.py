@@ -8,19 +8,11 @@ Kept in one place so both routers behave identically and the audit chain stays
 single-writer-consistent.
 """
 import uuid
-<<<<<<< HEAD
-from datetime import datetime, timezone
-=======
->>>>>>> 22ee34d (updated code to branch)
 from fastapi import Header, HTTPException
 from sqlalchemy import desc
 
 from database import SessionLocal, TENANT
-<<<<<<< HEAD
-from models import AuditLog, Notification, Delegation, DelegationPolicy, DelegationProfile
-=======
 from models import AuditLog, Notification, Delegation
->>>>>>> 22ee34d (updated code to branch)
 from authority import decode_token, audit_hash
 
 
@@ -65,49 +57,6 @@ def notify(s, user_id, title, body, severity="info"):
     s.commit()
 
 
-<<<<<<< HEAD
-def _delegation_active_window(d):
-    now = datetime.now(timezone.utc)
-    start = d.start if getattr(d.start, "tzinfo", None) else d.start.replace(tzinfo=timezone.utc)
-    end = d.end if getattr(d.end, "tzinfo", None) else d.end.replace(tzinfo=timezone.utc)
-    return d.status == "active" and start <= now <= end
-
-
-def _delegation_payload(s, d):
-    profile = s.query(DelegationProfile).filter(DelegationProfile.delegation_id == d.id).first()
-    policy = None
-    if profile and profile.policy_key:
-        policy = s.query(DelegationPolicy).filter(DelegationPolicy.policy_key == profile.policy_key).first()
-    return {
-        "id": d.id,
-        "status": d.status,
-        "authority": d.authority,
-        "action": policy.action if policy else d.authority,
-        "resource_scope": policy.resource_scope if policy else "*",
-        "policy_key": profile.policy_key if profile else "",
-        "policy_type": profile.policy_type if profile else "",
-        "subject": profile.subject if profile else "",
-        "reference_code": profile.reference_code if profile else "",
-        "delegated_to_type": profile.delegated_to_type if profile else "Individual",
-        "limit": d.limit,
-        "start": d.start.isoformat(),
-        "end": d.end.isoformat(),
-        "reason": d.reason,
-        "active": _delegation_active_window(d),
-    }
-
-
-def active_delegations_for(s, user_id):
-    rows = (s.query(Delegation)
-            .filter(Delegation.to_user == user_id, Delegation.status == "active")
-            .order_by(desc(Delegation.created_at)).all())
-    return [payload for payload in (_delegation_payload(s, row) for row in rows) if payload["active"]]
-
-
-def active_delegation_for(s, user_id):
-    active = active_delegations_for(s, user_id)
-    return active[0] if active else None
-=======
 def active_delegation_for(s, user_id):
     d = (s.query(Delegation)
          .filter(Delegation.to_user == user_id, Delegation.status == "active")
@@ -116,4 +65,3 @@ def active_delegation_for(s, user_id):
         return None
     return {"status": d.status, "authority": d.authority, "limit": d.limit,
             "start": d.start.isoformat(), "end": d.end.isoformat()}
->>>>>>> 22ee34d (updated code to branch)

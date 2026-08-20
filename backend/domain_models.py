@@ -178,8 +178,6 @@ class ResultSheet(Base):
     published_at = Column(DateTime, nullable=True)
 
 
-<<<<<<< HEAD
-=======
 class StudentSubjectResult(Base):
     """Subject-level published outcomes; backlog state is derived, never manually cleared."""
     __tablename__ = "student_subject_results"
@@ -196,7 +194,6 @@ class StudentSubjectResult(Base):
     source = Column(String, default="examination")  # examination / development_sample
 
 
->>>>>>> 22ee34d (updated code to branch)
 # --------------------------------------------------------------------------- #
 #  Admissions
 # --------------------------------------------------------------------------- #

@@ -14,16 +14,12 @@ async function req(path: string, opts: RequestInit = {}) {
   }
   const txt = await res.text()
   const data = txt ? JSON.parse(txt) : {}
-<<<<<<< HEAD
-  if (!res.ok) throw new Error(data.detail || `Request failed (${res.status})`)
-=======
   if (!res.ok) {
     const detail = Array.isArray(data.detail)
       ? data.detail.map((item: any) => item.msg || item.message || JSON.stringify(item)).join(', ')
       : data.detail
     throw new Error(detail || `Request failed (${res.status})`)
   }
->>>>>>> 22ee34d (updated code to branch)
   return data
 }
 
@@ -56,31 +52,6 @@ export const api = {
     req('/workflows/decide', { method: 'POST', body: JSON.stringify({ workflow_id, action, reason }) }),
   workflows: (scope = 'all') => req(`/workflows?scope=${scope}`),
   workflow: (id: string) => req(`/workflows/${id}`),
-<<<<<<< HEAD
-  chairmanApprovals: (params: Record<string, any> = {}) => {
-    const qs = new URLSearchParams()
-    Object.entries(params).forEach(([key, value]) => {
-      if (value == null || value === '') return
-      qs.set(key, String(value))
-    })
-    const suffix = qs.toString()
-    return req(`/approvals/chairman${suffix ? `?${suffix}` : ''}`)
-  },
-  chairmanInitiateRequest: (body: any) =>
-    req('/approvals/chairman/initiate', { method: 'POST', body: JSON.stringify(body) }),
-  chairmanDelegations: (params: Record<string, any> = {}) => {
-    const qs = new URLSearchParams()
-    Object.entries(params).forEach(([key, value]) => {
-      if (value == null || value === '') return
-      qs.set(key, String(value))
-    })
-    const suffix = qs.toString()
-    return req(`/delegations/chairman${suffix ? `?${suffix}` : ''}`)
-  },
-  chairmanCreateDelegation: (body: any) =>
-    req('/delegations/chairman', { method: 'POST', body: JSON.stringify(body) }),
-=======
->>>>>>> 22ee34d (updated code to branch)
 
   delegations: () => req('/delegations'),
   createDelegation: (b: any) => req('/delegations', { method: 'POST', body: JSON.stringify(b) }),
@@ -99,14 +70,11 @@ export const api = {
   // ---- workspace / capabilities ----
   workspace: () => req('/workspace'),
   overview: () => req('/overview'),
-<<<<<<< HEAD
-=======
   principalOverview: (academic_year = '', student_semester = '') => {
     const params = new URLSearchParams({ academic_year })
     if (student_semester) params.set('student_semester', student_semester)
     return req(`/overview/principal?${params.toString()}`)
   },
->>>>>>> 22ee34d (updated code to branch)
   chairmanOverview: (start = '', end = '') => {
     const params = new URLSearchParams()
     if (start) params.set('start', start)
@@ -114,16 +82,9 @@ export const api = {
     const qs = params.toString()
     return req(`/overview/chairman${qs ? `?${qs}` : ''}`)
   },
-<<<<<<< HEAD
-  chairmanOutstandingFees: (start = '', end = '') => {
-    const params = new URLSearchParams()
-    if (start) params.set('start', start)
-    if (end) params.set('end', end)
-=======
   chairmanOutstandingFees: (start = '') => {
     const params = new URLSearchParams()
     if (start) params.set('start', start)
->>>>>>> 22ee34d (updated code to branch)
     const qs = params.toString()
     return req(`/overview/chairman/outstanding-fees${qs ? `?${qs}` : ''}`)
   },
@@ -149,9 +110,6 @@ export const api = {
   deleteAcademicCalendarEntry: (id: string) => req(`/academic-calendar/${id}`, { method: 'DELETE' }),
 
   // ---- students ----
-<<<<<<< HEAD
-  students: (q = '', dept = '') => req(`/students?q=${encodeURIComponent(q)}&dept=${dept}`),
-=======
   students: (q = '', dept = '', page = 1, pageSize = 25, filters: any = {}) => {
     const params = new URLSearchParams({ q, dept, page: String(page), page_size: String(pageSize) })
     if (filters.program) params.set('program', filters.program)
@@ -165,7 +123,6 @@ export const api = {
   studentProfile: (id: string) => req(`/students/${encodeURIComponent(id)}/profile`),
   facultyStaff: (q = '', dept = '', kind = '', page = 1, filters: any = {}) => req(`/faculty-staff?q=${encodeURIComponent(q)}&dept=${encodeURIComponent(dept)}&kind=${encodeURIComponent(kind)}&page=${page}&designation=${encodeURIComponent(filters.designation || '')}&status=${encodeURIComponent(filters.status || '')}`),
   facultyProfile: (id: string) => req(`/faculty-staff/${encodeURIComponent(id)}`),
->>>>>>> 22ee34d (updated code to branch)
   addStudent: (b: any) => req('/students', { method: 'POST', body: JSON.stringify(b) }),
 
   // ---- academics ----
@@ -223,17 +180,9 @@ export const api = {
     req('/grievance/resolve', { method: 'POST', body: JSON.stringify({ complaint_id, status }) }),
 
   // ---- governance / admin ----
-<<<<<<< HEAD
-  governance: (semester = '', start = '', end = '') => {
-    const params = new URLSearchParams()
-    if (semester) params.set('semester', semester)
-    if (start) params.set('start', start)
-    if (end) params.set('end', end)
-=======
   governance: (semester = '') => {
     const params = new URLSearchParams()
     if (semester) params.set('semester', semester)
->>>>>>> 22ee34d (updated code to branch)
     const qs = params.toString()
     return req(`/governance${qs ? `?${qs}` : ''}`)
   },
