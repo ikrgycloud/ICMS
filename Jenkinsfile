@@ -4,17 +4,22 @@ pipeline {
 
     environment {
 
-        AWS_REGION = "eu-north-1"
+        AWS_REGION     = "eu-north-1"
+        AWS_ACCOUNT_ID = "032844082845"
 
-        BACKEND_REPOSITORY = "icms-backend"
-        FRONTEND_REPOSITORY = "icms-frontend"
+        BACKEND_REPO  = "icms-backend"
+        FRONTEND_REPO = "icms-frontend"
 
-        APPLICATION_SERVER = "ubuntu@YOUR_APPLICATION_EC2_IP"
+        IMAGE_TAG = "${BUILD_NUMBER}"
 
-        APPLICATION_DIRECTORY = "/opt/icms"
+        ECR_REGISTRY =
+            "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
-        SSH_CREDENTIALS = "icms-app-server-ssh"
+        APP_SERVER = "ubuntu@YOUR_APPLICATION_EC2_IP"
+
+        APP_DIR = "/opt/icms"
     }
+
 
     stages {
 
@@ -22,54 +27,11 @@ pipeline {
 
             steps {
 
-                echo "========================================"
-                echo "Checking out ICMS"
-                echo "========================================"
+                echo "======================================="
+                echo "Checking out ICMS source code"
+                echo "======================================="
 
                 checkout scm
-
-                sh '''
-                    echo "Commit:"
-                    git rev-parse HEAD
-
-                    echo ""
-                    echo "Repository:"
-                    ls -la
-                '''
-            }
-        }
-
-
-        stage('Initialize Build Variables') {
-
-            steps {
-
-                script {
-
-                    env.AWS_ACCOUNT_ID = sh(
-                        script: '''
-                            aws sts get-caller-identity \
-                            --query Account \
-                            --output text
-                        ''',
-                        returnStdout: true
-                    ).trim()
-
-                    env.ECR_REGISTRY =
-                        "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
-
-                    env.BACKEND_IMAGE =
-                        "${env.ECR_REGISTRY}/${env.BACKEND_REPOSITORY}"
-
-                    env.FRONTEND_IMAGE =
-                        "${env.ECR_REGISTRY}/${env.FRONTEND_REPOSITORY}"
-
-                    env.IMAGE_TAG = "${env.BUILD_NUMBER}"
-
-                    echo "AWS Account: ${env.AWS_ACCOUNT_ID}"
-                    echo "ECR Registry: ${env.ECR_REGISTRY}"
-                    echo "Image Tag: ${env.IMAGE_TAG}"
-                }
             }
         }
 
@@ -78,13 +40,11 @@ pipeline {
 
             steps {
 
-                echo "========================================"
-                echo "Building Backend"
-                echo "========================================"
+                echo "Building ICMS backend..."
 
                 sh """
                     docker build \
-                        -t ${BACKEND_IMAGE}:${IMAGE_TAG} \
+                        -t ${BACKEND_REPO}:${IMAGE_TAG} \
                         ./backend
                 """
             }
@@ -95,13 +55,11 @@ pipeline {
 
             steps {
 
-                echo "========================================"
-                echo "Building Frontend"
-                echo "========================================"
+                echo "Building ICMS frontend..."
 
                 sh """
                     docker build \
-                        -t ${FRONTEND_IMAGE}:${IMAGE_TAG} \
+                        -t ${FRONTEND_REPO}:${IMAGE_TAG} \
                         ./frontend
                 """
             }
@@ -112,141 +70,133 @@ pipeline {
 
             steps {
 
-                echo "========================================"
-                echo "Logging into ECR"
-                echo "========================================"
+                echo "Logging into Amazon ECR..."
+
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-ecr'
+                    ]
+                ]) {
+
+                    sh """
+                        aws ecr get-login-password \
+                            --region ${AWS_REGION} |
+                        docker login \
+                            --username AWS \
+                            --password-stdin \
+                            ${ECR_REGISTRY}
+                    """
+                }
+            }
+        }
+
+
+        stage('Tag Images') {
+
+            steps {
+
+                echo "Tagging Docker images..."
 
                 sh """
-                    aws ecr get-login-password \
-                        --region ${AWS_REGION} |
-                    docker login \
-                        --username AWS \
-                        --password-stdin ${ECR_REGISTRY}
+                    docker tag \
+                        ${BACKEND_REPO}:${IMAGE_TAG} \
+                        ${ECR_REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG}
+
+                    docker tag \
+                        ${FRONTEND_REPO}:${IMAGE_TAG} \
+                        ${ECR_REGISTRY}/${FRONTEND_REPO}:${IMAGE_TAG}
                 """
             }
         }
 
 
-        stage('Push Backend Image') {
+        stage('Push Backend') {
 
             steps {
 
-                echo "Pushing Backend image..."
+                echo "Pushing backend image to ECR..."
 
                 sh """
                     docker push \
-                        ${BACKEND_IMAGE}:${IMAGE_TAG}
+                        ${ECR_REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG}
                 """
             }
         }
 
 
-        stage('Push Frontend Image') {
+        stage('Push Frontend') {
 
             steps {
 
-                echo "Pushing Frontend image..."
+                echo "Pushing frontend image to ECR..."
 
                 sh """
                     docker push \
-                        ${FRONTEND_IMAGE}:${IMAGE_TAG}
+                        ${ECR_REGISTRY}/${FRONTEND_REPO}:${IMAGE_TAG}
                 """
             }
         }
 
 
-        stage('Prepare Application Server') {
+        stage('Deploy to Application EC2') {
 
             steps {
 
-                echo "Preparing Application EC2..."
+                echo "======================================="
+                echo "Deploying ICMS to Application EC2"
+                echo "======================================="
 
-                sshagent(credentials: [SSH_CREDENTIALS]) {
+                sshagent(credentials: ['app-server-ssh']) {
 
-                    sh """
-                        ssh \
-                            -o StrictHostKeyChecking=no \
-                            ${APPLICATION_SERVER} \
-                            "mkdir -p ${APPLICATION_DIRECTORY}"
-                    """
-                }
-            }
-        }
+                    withCredentials([
+                        [
+                            $class: 'AmazonWebServicesCredentialsBinding',
+                            credentialsId: 'aws-ecr'
+                        ]
+                    ]) {
 
+                        sh """
+                            ssh \
+                                -o StrictHostKeyChecking=no \
+                                ${APP_SERVER} \
+                                '
+                                set -e
 
-        stage('Copy Production Compose') {
+                                cd ${APP_DIR}
 
-            steps {
+                                echo "Logging Application EC2 into ECR..."
 
-                echo "Copying production Compose file..."
+                                aws ecr get-login-password \
+                                    --region ${AWS_REGION} |
+                                docker login \
+                                    --username AWS \
+                                    --password-stdin \
+                                    ${ECR_REGISTRY}
 
-                sshagent(credentials: [SSH_CREDENTIALS]) {
+                                echo "Pulling new ICMS images..."
 
-                    sh """
-                        scp \
-                            -o StrictHostKeyChecking=no \
-                            docker-compose.prod.yml \
-                            ${APPLICATION_SERVER}:${APPLICATION_DIRECTORY}/docker-compose.prod.yml
-                    """
-                }
-            }
-        }
+                                export BACKEND_IMAGE=${ECR_REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG}
+                                export FRONTEND_IMAGE=${ECR_REGISTRY}/${FRONTEND_REPO}:${IMAGE_TAG}
 
+                                docker compose \
+                                    -f docker-compose.prod.yml \
+                                    pull
 
-        stage('Login Application EC2 to ECR') {
+                                echo "Starting ICMS services..."
 
-            steps {
+                                docker compose \
+                                    -f docker-compose.prod.yml \
+                                    up -d
 
-                echo "Logging Application EC2 into ECR..."
+                                echo "Deployment completed."
 
-                sshagent(credentials: [SSH_CREDENTIALS]) {
-
-                    sh """
-                        ssh \
-                            -o StrictHostKeyChecking=no \
-                            ${APPLICATION_SERVER} \
-                            "
-                            aws ecr get-login-password \
-                                --region ${AWS_REGION} |
-                            docker login \
-                                --username AWS \
-                                --password-stdin ${ECR_REGISTRY}
-                            "
-                    """
-                }
-            }
-        }
-
-
-        stage('Deploy') {
-
-            steps {
-
-                echo "========================================"
-                echo "Deploying ICMS"
-                echo "========================================"
-
-                sshagent(credentials: [SSH_CREDENTIALS]) {
-
-                    sh """
-                        ssh \
-                            -o StrictHostKeyChecking=no \
-                            ${APPLICATION_SERVER} \
-                            "
-                            cd ${APPLICATION_DIRECTORY} &&
-
-                            export BACKEND_IMAGE=${BACKEND_IMAGE}:${IMAGE_TAG} &&
-                            export FRONTEND_IMAGE=${FRONTEND_IMAGE}:${IMAGE_TAG} &&
-
-                            docker compose \
-                                -f docker-compose.prod.yml \
-                                pull backend frontend &&
-
-                            docker compose \
-                                -f docker-compose.prod.yml \
-                                up -d db backend frontend
-                            "
-                    """
+                                docker compose \
+                                    -f docker-compose.prod.yml \
+                                    ps
+                                '
+                        """
+                    }
                 }
             }
         }
@@ -256,23 +206,34 @@ pipeline {
 
             steps {
 
-                echo "========================================"
-                echo "Verifying Deployment"
-                echo "========================================"
+                echo "Verifying ICMS deployment..."
 
-                sshagent(credentials: [SSH_CREDENTIALS]) {
+                sshagent(credentials: ['app-server-ssh']) {
 
                     sh """
                         ssh \
                             -o StrictHostKeyChecking=no \
-                            ${APPLICATION_SERVER} \
-                            "
-                            cd ${APPLICATION_DIRECTORY} &&
+                            ${APP_SERVER} \
+                            '
+                            cd ${APP_DIR}
+
+                            echo "======================================="
+                            echo "Container Status"
+                            echo "======================================="
 
                             docker compose \
                                 -f docker-compose.prod.yml \
                                 ps
-                            "
+
+                            echo "======================================="
+                            echo "Frontend Check"
+                            echo "======================================="
+
+                            curl -f http://localhost:8080/ \
+                                > /dev/null
+
+                            echo "Frontend is UP"
+                            '
                     """
                 }
             }
@@ -285,20 +246,22 @@ pipeline {
         success {
 
             echo """
-            ==========================================
-              ICMS DEPLOYMENT SUCCESSFUL
-            ==========================================
+            =======================================
+            ICMS DEPLOYMENT SUCCESSFUL
+            =======================================
+
+            Build Number : ${BUILD_NUMBER}
 
             Backend:
-            ${BACKEND_IMAGE}:${IMAGE_TAG}
+            ${ECR_REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG}
 
             Frontend:
-            ${FRONTEND_IMAGE}:${IMAGE_TAG}
+            ${ECR_REGISTRY}/${FRONTEND_REPO}:${IMAGE_TAG}
 
-            Application Server:
-            ${APPLICATION_SERVER}
+            Application:
+            ${APP_SERVER}
 
-            ==========================================
+            =======================================
             """
         }
 
@@ -306,26 +269,22 @@ pipeline {
         failure {
 
             echo """
-            ==========================================
-              ICMS DEPLOYMENT FAILED
-            ==========================================
+            =======================================
+            ICMS DEPLOYMENT FAILED
+            =======================================
 
-            Jenkins Build:
-            ${BUILD_NUMBER}
+            Build Number : ${BUILD_NUMBER}
 
             Check Jenkins Console Output.
 
-            ==========================================
+            =======================================
             """
         }
 
 
         always {
 
-            sh '''
-                docker logout ${ECR_REGISTRY} || true
-                docker image prune -f || true
-            '''
+            cleanWs()
         }
     }
 }
