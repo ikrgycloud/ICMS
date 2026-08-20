@@ -1,0 +1,25 @@
+# Development overlay: run together with docker-compose.yml.
+# Frontend source changes use Vite HMR; backend Python changes use Uvicorn reload.
+services:
+  backend:
+    volumes:
+      - ./backend:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build: !reset null
+    image: node:22-alpine
+    working_dir: /app
+    depends_on:
+      - backend
+    environment:
+      VITE_API_PROXY: http://backend:8000
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ./frontend:/app
+      - icms_frontend_node_modules:/app/node_modules
+    ports: !override ["5173:5173"]
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+
+volumes:
+  icms_frontend_node_modules:

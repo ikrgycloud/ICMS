@@ -11,7 +11,11 @@ export default function OfficeProfile({ user }: { user: any }) {
     <div className="fade-in">
       <div className="page-head">
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+<<<<<<< HEAD
           <span className="lvl-badge" style={{ background: LEVEL_COLORS[o.level], width: 40, height: 40, fontSize: 11 }}>L{o.level}</span>
+=======
+          <span className="lvl-badge" style={{ background: LEVEL_COLORS[o.level], width: 40, height: 40, fontSize: 15 }}>L{o.level}</span>
+>>>>>>> 22ee34d (updated code to branch)
           <div>
             <h1 style={{ marginBottom: 2 }}>{o.name}</h1>
             <p style={{ margin: 0 }}>{o.purpose}</p>
@@ -25,7 +29,11 @@ export default function OfficeProfile({ user }: { user: any }) {
           <div className="card-pad">
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
               {o.internal_roles.map((r: string, i: number) => (
+<<<<<<< HEAD
                 <span className="tag" key={r} style={i === 0 ? { background: '#fdf3dc', color: '#96701b', fontWeight: 600, fontSize: 9 } : { fontSize: 9 }}>{r}{i === 0 ? ' ★' : ''}</span>
+=======
+                <span className="tag" key={r} style={i === 0 ? { background: '#fdf3dc', color: '#96701b', fontWeight: 600, fontSize: 13 } : { fontSize: 13 }}>{r}{i === 0 ? ' ★' : ''}</span>
+>>>>>>> 22ee34d (updated code to branch)
               ))}
             </div>
           </div>

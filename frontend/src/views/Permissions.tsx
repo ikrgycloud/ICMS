@@ -37,15 +37,25 @@ export default function Permissions({ user }: { user: any }) {
             <div className="perm-grid">
               {perms.permissions.map((p: any) => (
                 <div key={p.verb} className="perm-item">
+<<<<<<< HEAD
                   <span className="mono" style={{ fontSize: 9 }}>{p.verb}</span>
+=======
+                  <span className="mono" style={{ fontSize: 13 }}>{p.verb}</span>
+>>>>>>> 22ee34d (updated code to branch)
                   <AuthChip v={p.authority} />
                 </div>
               ))}
             </div>
             <div style={{ marginTop: 18, paddingTop: 16, borderTop: '1px solid #f2efe8', display: 'flex', gap: 26, flexWrap: 'wrap' }}>
+<<<<<<< HEAD
               <div><div className="mini-lbl">Scope level</div><span className="mono" style={{ fontSize: 10 }}>{perms.scope_level}</span></div>
               <div><div className="mini-lbl">Auth level</div><span className="mono" style={{ fontSize: 10 }}>L{perms.level}</span></div>
               <div><div className="mini-lbl">Approval limit</div><span className="mono" style={{ fontSize: 10 }}>{perms.approval_limit != null ? '₹' + perms.approval_limit.toLocaleString('en-IN') : 'none set'}</span></div>
+=======
+              <div><div className="mini-lbl">Scope level</div><span className="mono" style={{ fontSize: 14 }}>{perms.scope_level}</span></div>
+              <div><div className="mini-lbl">Auth level</div><span className="mono" style={{ fontSize: 14 }}>L{perms.level}</span></div>
+              <div><div className="mini-lbl">Approval limit</div><span className="mono" style={{ fontSize: 14 }}>{perms.approval_limit != null ? '₹' + perms.approval_limit.toLocaleString('en-IN') : 'none set'}</span></div>
+>>>>>>> 22ee34d (updated code to branch)
             </div>
           </div>
         </div>
@@ -53,7 +63,11 @@ export default function Permissions({ user }: { user: any }) {
         <div className="card">
           <div className="card-h"><h3>Live authority check</h3><span className="hint">/api/authz/check</span></div>
           <div className="card-pad">
+<<<<<<< HEAD
             <p style={{ fontSize: 9.5, color: 'var(--txt-soft)', marginBottom: 16 }}>Simulate a decision the way the engine evaluates it in real time.</p>
+=======
+            <p style={{ fontSize: 13.5, color: 'var(--txt-soft)', marginBottom: 16 }}>Simulate a decision the way the engine evaluates it in real time.</p>
+>>>>>>> 22ee34d (updated code to branch)
             <div className="form-row"><label>Action</label>
               <select className="select" value={verb} onChange={e => setVerb(e.target.value)}>
                 {perms.all_verbs.map((v: string) => <option key={v}>{v}</option>)}
@@ -76,7 +90,11 @@ export default function Permissions({ user }: { user: any }) {
                   {result.authority && <AuthChip v={result.authority} />}
                   {result.escalate_to && <span className="tag" style={{ background: '#fdeee4', color: '#c05a1e' }}>→ {result.escalate_to}</span>}
                 </div>
+<<<<<<< HEAD
                 <div style={{ fontSize: 9.5, color: 'var(--txt-soft)', marginTop: 7 }}>{result.reason}</div>
+=======
+                <div style={{ fontSize: 13.5, color: 'var(--txt-soft)', marginTop: 7 }}>{result.reason}</div>
+>>>>>>> 22ee34d (updated code to branch)
               </div>
             )}
           </div>

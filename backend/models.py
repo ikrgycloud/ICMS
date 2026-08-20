@@ -116,6 +116,7 @@ class Delegation(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+<<<<<<< HEAD
 class DelegationPolicy(Base):
     """Catalog of delegation subjects and their authority mapping."""
     __tablename__ = "delegation_policies"
@@ -188,6 +189,8 @@ class DelegationContext(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
+=======
+>>>>>>> 22ee34d (updated code to branch)
 class ApprovalLimit(Base):
     __tablename__ = "approval_limits"
     id = Column(String, primary_key=True)
@@ -217,6 +220,7 @@ class WorkflowInstance(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
+<<<<<<< HEAD
 class WorkflowProfile(Base):
     """Presentation metadata used by approval dashboards and request forms."""
     __tablename__ = "workflow_profiles"
@@ -232,6 +236,8 @@ class WorkflowProfile(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
+=======
+>>>>>>> 22ee34d (updated code to branch)
 class Approval(Base):
     """Each decision on a workflow (Document §10)."""
     __tablename__ = "approvals"

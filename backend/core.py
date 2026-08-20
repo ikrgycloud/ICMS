@@ -8,12 +8,19 @@ Kept in one place so both routers behave identically and the audit chain stays
 single-writer-consistent.
 """
 import uuid
+<<<<<<< HEAD
 from datetime import datetime, timezone
+=======
+>>>>>>> 22ee34d (updated code to branch)
 from fastapi import Header, HTTPException
 from sqlalchemy import desc
 
 from database import SessionLocal, TENANT
+<<<<<<< HEAD
 from models import AuditLog, Notification, Delegation, DelegationPolicy, DelegationProfile
+=======
+from models import AuditLog, Notification, Delegation
+>>>>>>> 22ee34d (updated code to branch)
 from authority import decode_token, audit_hash
 
 
@@ -58,6 +65,7 @@ def notify(s, user_id, title, body, severity="info"):
     s.commit()
 
 
+<<<<<<< HEAD
 def _delegation_active_window(d):
     now = datetime.now(timezone.utc)
     start = d.start if getattr(d.start, "tzinfo", None) else d.start.replace(tzinfo=timezone.utc)
@@ -99,3 +107,13 @@ def active_delegations_for(s, user_id):
 def active_delegation_for(s, user_id):
     active = active_delegations_for(s, user_id)
     return active[0] if active else None
+=======
+def active_delegation_for(s, user_id):
+    d = (s.query(Delegation)
+         .filter(Delegation.to_user == user_id, Delegation.status == "active")
+         .order_by(desc(Delegation.created_at)).first())
+    if not d:
+        return None
+    return {"status": d.status, "authority": d.authority, "limit": d.limit,
+            "start": d.start.isoformat(), "end": d.end.isoformat()}
+>>>>>>> 22ee34d (updated code to branch)

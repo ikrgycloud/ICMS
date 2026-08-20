@@ -140,6 +140,17 @@ def seed():
                 s.add(UserRole(id=urid, user_id=uid, role_id=f"role_{n}_0",
                                org_scope_id="scope_global"))
 
+<<<<<<< HEAD
+=======
+        # The demo Principal is a campus role.  Older databases were seeded
+        # with the global scope for every demo account, which let this account
+        # see students belonging to other campuses.  Keep the scope explicit
+        # and in the same human-readable form used by Student.campus.
+        principal = s.get(User, "user_4")
+        if principal and principal.scope_ref == "scope_global":
+            principal.scope_ref = CAMPUS_SCOPES[0]
+
+>>>>>>> 22ee34d (updated code to branch)
         s.commit()
         return {"status": "seeded", "offices": len(OFFICES),
                 "campuses": len(CAMPUS_SCOPES),

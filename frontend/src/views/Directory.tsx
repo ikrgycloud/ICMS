@@ -35,7 +35,11 @@ export default function Directory() {
         <div key={lvl} style={{ marginBottom: 28 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
             <span className="lvl-badge" style={{ background: LEVEL_COLORS[lvl] }}>L{lvl}</span>
+<<<<<<< HEAD
             <h2 style={{ fontSize: 13, fontFamily: 'var(--ff-display)' }}>{LEVEL_NAMES[lvl]}</h2>
+=======
+            <h2 style={{ fontSize: 17, fontFamily: 'var(--ff-display)' }}>{LEVEL_NAMES[lvl]}</h2>
+>>>>>>> 22ee34d (updated code to branch)
             <span className="hint">{byLevel[lvl].length} offices</span>
           </div>
           <div className="office-grid">
@@ -73,7 +77,11 @@ function OfficeModal({ n, onClose }: { n: number; onClose: () => void }) {
                   <span className="lvl-badge" style={{ background: LEVEL_COLORS[o.level] }}>L{o.level}</span>
                   <h3>{o.name}</h3>
                 </div>
+<<<<<<< HEAD
                 <div style={{ fontSize: 9, color: 'var(--txt-soft)', marginTop: 6 }}>{o.purpose}</div>
+=======
+                <div style={{ fontSize: 13, color: 'var(--txt-soft)', marginTop: 6 }}>{o.purpose}</div>
+>>>>>>> 22ee34d (updated code to branch)
               </div>
               <button className="close-x" onClick={onClose}>×</button>
             </div>
@@ -95,8 +103,13 @@ function OfficeModal({ n, onClose }: { n: number; onClose: () => void }) {
                 <Section title="Modules">
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>{o.modules.map((m: string) => <span className="tag" key={m}>{m}</span>)}</div>
                 </Section>
+<<<<<<< HEAD
                 <Section title="Scope"><span className="mono" style={{ fontSize: 9 }}>{o.scope}</span></Section>
                 <Section title="Reports to"><span style={{ fontSize: 9.5 }}>{o.reports_to}</span></Section>
+=======
+                <Section title="Scope"><span className="mono" style={{ fontSize: 13 }}>{o.scope}</span></Section>
+                <Section title="Reports to"><span style={{ fontSize: 13.5 }}>{o.reports_to}</span></Section>
+>>>>>>> 22ee34d (updated code to branch)
               </div>
             </div>
           </>
@@ -109,7 +122,11 @@ function OfficeModal({ n, onClose }: { n: number; onClose: () => void }) {
 function Section({ title, children }: any) {
   return (
     <div style={{ marginBottom: 20 }}>
+<<<<<<< HEAD
       <div style={{ fontFamily: 'var(--ff-mono)', fontSize: 8, color: 'var(--txt-mute)', textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 10 }}>{title}</div>
+=======
+      <div style={{ fontFamily: 'var(--ff-mono)', fontSize: 11, color: 'var(--txt-mute)', textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 10 }}>{title}</div>
+>>>>>>> 22ee34d (updated code to branch)
       {children}
     </div>
   )

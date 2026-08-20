@@ -32,12 +32,20 @@ export default function AuditView() {
       {verify && (
         <div style={{ borderRadius: 12, padding: '14px 18px', marginBottom: 18, background: verify.intact ? '#e8f6f1' : '#fbe9e4', border: `1.5px solid ${verify.intact ? 'var(--teal)' : 'var(--rose)'}` }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+<<<<<<< HEAD
             <span style={{ fontSize: 16 }}>{verify.intact ? '✓' : '✕'}</span>
+=======
+            <span style={{ fontSize: 20 }}>{verify.intact ? '✓' : '✕'}</span>
+>>>>>>> 22ee34d (updated code to branch)
             <div>
               <div style={{ fontWeight: 600, color: verify.intact ? 'var(--teal-dk)' : 'var(--rose)' }}>
                 {verify.intact ? 'Chain intact' : 'Chain broken'}
               </div>
+<<<<<<< HEAD
               <div style={{ fontSize: 9, color: 'var(--txt-soft)' }}>
+=======
+              <div style={{ fontSize: 13, color: 'var(--txt-soft)' }}>
+>>>>>>> 22ee34d (updated code to branch)
                 {verify.count} entries verified{verify.intact ? ' — no tampering detected.' : ` — break at entry ${verify.broken_at}.`}
               </div>
             </div>
@@ -55,12 +63,21 @@ export default function AuditView() {
                   {rows.map((e, i) => (
                     <tr key={e.id}>
                       <td className="mono" style={{ color: 'var(--txt-mute)' }}>{rows.length - i}</td>
+<<<<<<< HEAD
                       <td className="mono" style={{ fontSize: 8 }}>{new Date(e.at).toLocaleString()}</td>
                       <td>{e.actor}</td>
                       <td><span className="mono" style={{ fontSize: 8 }}>{e.action}</span></td>
                       <td><span className="mono" style={{ fontWeight: 700, fontSize: 8, color: outColor(e.outcome) }}>{e.outcome}</span></td>
                       <td style={{ color: 'var(--txt-soft)', fontSize: 8.5, maxWidth: 260 }}>{e.reason}</td>
                       <td className="mono" style={{ fontSize: 8, color: 'var(--txt-mute)' }} title={e.hash}>{e.hash?.slice(0, 10)}…</td>
+=======
+                      <td className="mono" style={{ fontSize: 11.5 }}>{new Date(e.at).toLocaleString()}</td>
+                      <td>{e.actor}</td>
+                      <td><span className="mono" style={{ fontSize: 12 }}>{e.action}</span></td>
+                      <td><span className="mono" style={{ fontWeight: 700, fontSize: 12, color: outColor(e.outcome) }}>{e.outcome}</span></td>
+                      <td style={{ color: 'var(--txt-soft)', fontSize: 12.5, maxWidth: 260 }}>{e.reason}</td>
+                      <td className="mono" style={{ fontSize: 10.5, color: 'var(--txt-mute)' }} title={e.hash}>{e.hash?.slice(0, 10)}…</td>
+>>>>>>> 22ee34d (updated code to branch)
                     </tr>
                   ))}
                 </tbody>

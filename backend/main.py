@@ -12,12 +12,20 @@ import os
 import sys
 import uuid
 import time
+<<<<<<< HEAD
 from datetime import datetime, timedelta, timezone
+=======
+from datetime import datetime, timedelta
+>>>>>>> 22ee34d (updated code to branch)
 
 from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+<<<<<<< HEAD
 from sqlalchemy import desc, func, or_
+=======
+from sqlalchemy import desc, func
+>>>>>>> 22ee34d (updated code to branch)
 
 import authority as A
 from authority import (issue_token, decode_token, pwhash, audit_hash, authorize,
@@ -27,11 +35,17 @@ import matrices as M
 from matrices import (APPROVAL_MATRIX, WF_VALID, WF_STATES, approval_limit_for,
                       APPROVAL_LIMITS, rbac_for, scope_for)
 from database import (SessionLocal, seed, CATALOG, OFFICES, LEVELS, office,
+<<<<<<< HEAD
                       DEMO_USERNAMES, TENANT, slug)
 from models import (User, Person, Role, RolePermission, Delegation, WorkflowInstance,
                     WorkflowProfile, Approval, Notification, AuditLog, ApprovalLimit,
                     DelegationPolicy, DelegationProfile, DelegationOption,
                     DelegationContext)
+=======
+                      DEMO_USERNAMES, TENANT)
+from models import (User, Person, Role, RolePermission, Delegation, WorkflowInstance,
+                    Approval, Notification, AuditLog, ApprovalLimit)
+>>>>>>> 22ee34d (updated code to branch)
 
 from domain_api import router as domain_router
 from portal_api import router as portal_router
@@ -107,6 +121,7 @@ def rbac_authority(s, office_n, level, verb) -> str:
     return rbac_for(office_n, level, verb)
 
 
+<<<<<<< HEAD
 def _utc_now():
     return datetime.now(timezone.utc)
 
@@ -445,6 +460,16 @@ def _delegation_recipient_options(s):
             "delegated_to_type": "Office" if row.office_n <= 10 else "Individual",
         })
     return options
+=======
+def active_delegation_for(s, user_id):
+    d = (s.query(Delegation)
+         .filter(Delegation.to_user == user_id, Delegation.status == "active")
+         .order_by(desc(Delegation.created_at)).first())
+    if not d:
+        return None
+    return {"status": d.status, "authority": d.authority, "limit": d.limit,
+            "start": d.start.isoformat(), "end": d.end.isoformat()}
+>>>>>>> 22ee34d (updated code to branch)
 
 
 # --------------------------------------------------------------------------- #
@@ -464,6 +489,7 @@ def login(body: LoginIn, s=Depends(db)):
     tok = issue_token(u.id, u.tenant_id, u.office_n, u.role, u.scope_level,
                       u.scope_ref, "mfa" if u.mfa_enabled else "password")
     p = s.query(Person).get(u.person_id)
+<<<<<<< HEAD
     active_delegations = active_delegations_for(s, u.id)
     write_audit(s, u.id, p.name if p else u.username, u.office_n, "auth.login",
                 "session", "", "active", "login ok")
@@ -473,6 +499,11 @@ def login(body: LoginIn, s=Depends(db)):
         "active_delegation": active_delegations[0] if active_delegations else None,
         "active_delegations": active_delegations,
     }
+=======
+    write_audit(s, u.id, p.name if p else u.username, u.office_n, "auth.login",
+                "session", "", "active", "login ok")
+    return {"token": tok, "user": _user_payload(u, p, o)}
+>>>>>>> 22ee34d (updated code to branch)
 
 
 def _persona_for(office_n):
@@ -494,8 +525,12 @@ def _persona_for(office_n):
     return "staff"
 
 
+<<<<<<< HEAD
 def _user_payload(u, p, o, active_role=None, active_delegations=None):
     active_delegations = active_delegations or []
+=======
+def _user_payload(u, p, o, active_role=None):
+>>>>>>> 22ee34d (updated code to branch)
     return {
         "id": u.id, "username": u.username, "name": p.name if p else u.username,
         "office_n": u.office_n, "office": o["name"], "level": o["level"],
@@ -508,9 +543,12 @@ def _user_payload(u, p, o, active_role=None, active_delegations=None):
         "workflows": o["workflows"], "purpose": o["purpose"],
         "reports_to": o["reports_to"], "internal_roles": o["internal_roles"],
         "scope": o["scope"],
+<<<<<<< HEAD
         "active_delegation_count": len(active_delegations),
         "active_delegation": active_delegations[0] if active_delegations else None,
         "active_delegations": active_delegations,
+=======
+>>>>>>> 22ee34d (updated code to branch)
     }
 
 
@@ -519,6 +557,7 @@ def me(ctx=Depends(auth), s=Depends(db)):
     u = s.query(User).get(ctx["sub"])
     p = s.query(Person).get(u.person_id)
     o = office(u.office_n)
+<<<<<<< HEAD
     active_delegations = active_delegations_for(s, u.id)
     return {
         "user": _user_payload(u, p, o, ctx.get("role"), active_delegations=active_delegations),
@@ -526,6 +565,10 @@ def me(ctx=Depends(auth), s=Depends(db)):
         "active_delegation": active_delegations[0] if active_delegations else None,
         "active_delegations": active_delegations,
     }
+=======
+    return {"user": _user_payload(u, p, o, ctx.get("role")), "auth_context": ctx,
+            "active_delegation": active_delegation_for(s, u.id)}
+>>>>>>> 22ee34d (updated code to branch)
 
 
 class SwitchRoleIn(BaseModel):
@@ -542,17 +585,24 @@ def switch_role(body: SwitchRoleIn, ctx=Depends(auth), s=Depends(db)):
     if body.role not in o["internal_roles"]:
         raise HTTPException(400, "Role not available for this office")
     p = s.query(Person).get(u.person_id)
+<<<<<<< HEAD
     active_delegations = active_delegations_for(s, u.id)
+=======
+>>>>>>> 22ee34d (updated code to branch)
     tok = issue_token(u.id, u.tenant_id, u.office_n, body.role, u.scope_level,
                       u.scope_ref, "mfa" if u.mfa_enabled else "password")
     write_audit(s, u.id, p.name if p else u.username, u.office_n, "auth.switch_role",
                 "session", u.role, body.role, f"Assumed role: {body.role}")
+<<<<<<< HEAD
     return {
         "token": tok,
         "user": _user_payload(u, p, o, body.role, active_delegations=active_delegations),
         "active_delegation": active_delegations[0] if active_delegations else None,
         "active_delegations": active_delegations,
     }
+=======
+    return {"token": tok, "user": _user_payload(u, p, o, body.role)}
+>>>>>>> 22ee34d (updated code to branch)
 
 
 # --------------------------------------------------------------------------- #
@@ -650,6 +700,7 @@ def workflow_processes(ctx=Depends(auth)):
     return {"processes": APPROVAL_MATRIX}
 
 
+<<<<<<< HEAD
 PROCESS_CATEGORY_MAP = {
     "branch_creation": "Administrative",
     "purchase_request": "Finance",
@@ -851,6 +902,8 @@ def _start_workflow_record(
     return wf, proc
 
 
+=======
+>>>>>>> 22ee34d (updated code to branch)
 class StartWF(BaseModel):
     process_key: str
     title: str
@@ -859,8 +912,11 @@ class StartWF(BaseModel):
 
 @app.post("/api/workflows/start")
 def start_workflow(body: StartWF, ctx=Depends(auth), s=Depends(db)):
+<<<<<<< HEAD
     wf, proc = _start_workflow_record(s, ctx, body.process_key, body.title, body.amount)
     return _wf_payload(s, wf, proc)
+=======
+>>>>>>> 22ee34d (updated code to branch)
     proc = next((p for p in APPROVAL_MATRIX if p["key"] == body.process_key), None)
     if not proc:
         raise HTTPException(404, "Unknown process")
@@ -892,6 +948,7 @@ def _notify_stage(s, wf, proc):
     if stage >= len(proc["chain"]):
         return
     label = proc["chain"][stage]
+<<<<<<< HEAD
     recipients = []
     owner = s.query(User).filter(User.office_n == proc["office_n"]).first()
     if owner:
@@ -906,6 +963,8 @@ def _notify_stage(s, wf, proc):
         notify(s, recipient.id, f"Action needed: {proc['label']}",
                f"{wf.title} - awaiting {label}", severity="action")
     return
+=======
+>>>>>>> 22ee34d (updated code to branch)
     # Notify the owning office head as a representative approver.
     owner = s.query(User).filter(User.office_n == proc["office_n"]).first()
     if owner:
@@ -948,7 +1007,11 @@ def decide_workflow(body: DecideWF, ctx=Depends(auth), s=Depends(db)):
         workflow_valid_states=WF_VALID.get(body.action),
         amount=wf.amount, approval_limit=limit,
         requester_id=wf.initiator_id,
+<<<<<<< HEAD
         active_delegation=active_delegations_for(s, u.id),
+=======
+        active_delegation=active_delegation_for(s, u.id),
+>>>>>>> 22ee34d (updated code to branch)
         target_scope_level=wf.scope_level,
         escalate_to=proc["escalation"] if proc else None,
     )
@@ -1006,7 +1069,10 @@ def decide_workflow(body: DecideWF, ctx=Depends(auth), s=Depends(db)):
 def _wf_payload(s, wf, proc):
     approvals = (s.query(Approval).filter(Approval.workflow_id == wf.id)
                  .order_by(Approval.created_at).all())
+<<<<<<< HEAD
     profile = s.query(WorkflowProfile).filter(WorkflowProfile.workflow_id == wf.id).first()
+=======
+>>>>>>> 22ee34d (updated code to branch)
     return {
         "id": wf.id, "process_key": wf.process_key, "label": wf.label,
         "office_n": wf.office_n, "title": wf.title, "state": wf.state,
@@ -1016,6 +1082,7 @@ def _wf_payload(s, wf, proc):
         "chain": proc["chain"] if proc else [],
         "escalation": proc["escalation"] if proc else "",
         "created_at": wf.created_at.isoformat(),
+<<<<<<< HEAD
         "profile": {
             "semester_key": profile.semester_key if profile else "",
             "semester_label": profile.semester_label if profile else "",
@@ -1023,12 +1090,15 @@ def _wf_payload(s, wf, proc):
             "reference_code": profile.reference_code if profile else _generate_reference_code(s, wf.process_key, wf.label, wf.created_at),
             "notes": profile.notes if profile else "",
         },
+=======
+>>>>>>> 22ee34d (updated code to branch)
         "history": [{"stage": a.stage, "stage_label": a.stage_label, "actor": a.actor_name,
                      "decision": a.decision, "authority": a.authority, "reason": a.reason,
                      "at": a.created_at.isoformat()} for a in approvals],
     }
 
 
+<<<<<<< HEAD
 def _workflow_stage_meta(wf, proc):
     total = max(len(proc["chain"]) if proc else 4, 1)
     step = min(max(wf.current_stage or 1, 1), total)
@@ -1139,6 +1209,18 @@ def list_workflows(scope: str = "all", ctx=Depends(auth), s=Depends(db)):
             rows = sorted(rows, key=lambda item: item.updated_at or item.created_at, reverse=True)[:100]
     else:
         rows = q.order_by(desc(WorkflowInstance.updated_at)).limit(100).all()
+=======
+@app.get("/api/workflows")
+def list_workflows(scope: str = "all", ctx=Depends(auth), s=Depends(db)):
+    q = s.query(WorkflowInstance)
+    if scope == "mine":
+        q = q.filter(WorkflowInstance.initiator_id == ctx["sub"])
+    elif scope == "inbox":
+        # Items owned by this office awaiting action.
+        q = q.filter(WorkflowInstance.office_n == ctx["office_n"],
+                     WorkflowInstance.state.in_(["submitted", "under_review", "reviewed", "escalated"]))
+    rows = q.order_by(desc(WorkflowInstance.updated_at)).limit(100).all()
+>>>>>>> 22ee34d (updated code to branch)
     out = []
     for wf in rows:
         proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
@@ -1155,6 +1237,7 @@ def get_workflow(wid: str, ctx=Depends(auth), s=Depends(db)):
     return _wf_payload(s, wf, proc)
 
 
+<<<<<<< HEAD
 class ChairmanStartWF(BaseModel):
     process_key: str
     title: str
@@ -1337,6 +1420,8 @@ def initiate_chairman_request(body: ChairmanStartWF, ctx=Depends(auth), s=Depend
     return {"workflow": _wf_payload(s, wf, proc)}
 
 
+=======
+>>>>>>> 22ee34d (updated code to branch)
 # --------------------------------------------------------------------------- #
 #  Delegation (Document §2, §12) — time-bound, scoped, revocable, audited      #
 # --------------------------------------------------------------------------- #
@@ -1377,7 +1462,11 @@ def create_delegation(body: DelegateIn, ctx=Depends(auth), s=Depends(db)):
 @app.get("/api/delegations")
 def list_delegations(ctx=Depends(auth), s=Depends(db)):
     rows = (s.query(Delegation)
+<<<<<<< HEAD
             .filter(or_(Delegation.from_user == ctx["sub"], Delegation.to_user == ctx["sub"]))
+=======
+            .filter((Delegation.from_user == ctx["sub"]) | (Delegation.to_user == ctx["sub"]))
+>>>>>>> 22ee34d (updated code to branch)
             .order_by(desc(Delegation.created_at)).all())
     return {"delegations": [_deleg_payload(s, d) for d in rows]}
 
@@ -1400,12 +1489,24 @@ def revoke_delegation(did: str, ctx=Depends(auth), s=Depends(db)):
 
 
 def _deleg_payload(s, d):
+<<<<<<< HEAD
     return _delegation_payload(s, d)
+=======
+    fu = s.query(User).get(d.from_user)
+    tu = s.query(User).get(d.to_user)
+    return {"id": d.id, "from": fu.username if fu else d.from_user,
+            "to": tu.username if tu else d.to_user, "authority": d.authority,
+            "limit": d.limit, "status": d.status,
+            "start": d.start.isoformat(), "end": d.end.isoformat(),
+            "reason": d.reason,
+            "active": d.status == "active" and d.end > datetime.utcnow()}
+>>>>>>> 22ee34d (updated code to branch)
 
 
 # --------------------------------------------------------------------------- #
 #  Authority check (Document §7 step 8) — live "may I?" probe for the UI       #
 # --------------------------------------------------------------------------- #
+<<<<<<< HEAD
 class DelegationAttachmentIn(BaseModel):
     name: str = ""
     mime_type: str = ""
@@ -1764,6 +1865,8 @@ def create_chairman_delegation(body: ChairmanDelegationIn, ctx=Depends(auth), s=
     return {"delegation": payload}
 
 
+=======
+>>>>>>> 22ee34d (updated code to branch)
 class CheckIn(BaseModel):
     action: str
     resource: str = "*"
@@ -1776,7 +1879,11 @@ def authz_check(body: CheckIn, ctx=Depends(auth), s=Depends(db)):
     rbac = rbac_for(ctx["office_n"], o["level"], body.action if body.action in VERBS else "view")
     dec = authorize(ctx=ctx, action=body.action, resource=body.resource,
                     rbac_authority=rbac, amount=body.amount,
+<<<<<<< HEAD
                     active_delegation=active_delegations_for(s, ctx["sub"]),
+=======
+                    active_delegation=active_delegation_for(s, ctx["sub"]),
+>>>>>>> 22ee34d (updated code to branch)
                     target_scope_level=ctx.get("scope_level", "individual"))
     d = dec.as_dict()
     return {"rbac_authority": rbac, **d}

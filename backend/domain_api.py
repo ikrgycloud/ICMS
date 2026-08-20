@@ -9,12 +9,19 @@ return 403 with the engine's reason — the same verdict the UI uses to disable
 the control.
 """
 from datetime import date, datetime, timedelta
+<<<<<<< HEAD
 import re
+=======
+>>>>>>> 22ee34d (updated code to branch)
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import desc, func
 
+<<<<<<< HEAD
 from core import db, auth, uid, write_audit, notify, active_delegations_for
+=======
+from core import db, auth, uid, write_audit, notify, active_delegation_for
+>>>>>>> 22ee34d (updated code to branch)
 from database import office, TENANT, slug
 from authority import authorize, ALLOW
 from matrices import rbac_for, scope_for, approval_limit_for, APPROVAL_LIMITS
@@ -53,7 +60,11 @@ def gate(s, ctx, module: str, action: str, amount=None):
             approval_limit = approval_limit_for(scope_level, proc)
     dec = authorize(ctx=ctx, action=verb, resource=module, rbac_authority=rbac,
                     amount=amount, approval_limit=approval_limit,
+<<<<<<< HEAD
                     active_delegation=active_delegations_for(s, ctx["sub"]),
+=======
+                    active_delegation=active_delegation_for(s, ctx["sub"]),
+>>>>>>> 22ee34d (updated code to branch)
                     target_scope_level=ctx.get("scope_level", "individual"),
                     escalate_to=escalate_to)
     return dec, verb
@@ -123,6 +134,68 @@ def overview(ctx=Depends(auth), s=Depends(db)):
     return {"stats": stats, "dept_distribution": dept_counts}
 
 
+<<<<<<< HEAD
+=======
+@router.get("/overview/principal")
+def principal_overview(academic_year: str = "", student_semester: str = "", ctx=Depends(auth), s=Depends(db)):
+    """Branch-leadership dashboard aggregates, calculated only from domain records."""
+    require(gate(s, ctx, "analytics", "view")[0])
+    terms = [row[0] for row in s.query(D.AcademicCalendarEntry.term).distinct().all() if row[0]]
+    def academic_year_for(term):
+        try:
+            y = int(str(term)[:4])
+            return f"{y - 1 if str(term).lower().endswith('even') else y}-{str((y if str(term).lower().endswith('even') else y + 1))[-2:]}"
+        except (TypeError, ValueError): return ""
+    years = sorted(set(filter(None, (academic_year_for(t) for t in terms))), reverse=True)
+    selected_year = academic_year if academic_year in years else (years[0] if years else "")
+    student_query = s.query(D.Student).filter(D.Student.status == "active")
+    try:
+        selected_student_semester = int(student_semester) if student_semester else 0
+    except (TypeError, ValueError):
+        selected_student_semester = 0
+    selected_student_semester = selected_student_semester if selected_student_semester in range(1, 9) else 0
+    if selected_student_semester: student_query = student_query.filter(D.Student.semester == selected_student_semester)
+    students = student_query.all()
+    student_ids = [row.id for row in students]
+    attendance = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.student_id.in_(student_ids)).all() if student_ids else []
+    today = date.today()
+    today_rows = [row for row in attendance if row.on_date == today]
+    attendance_pct = round(100 * sum(1 for row in today_rows if row.present) / len(today_rows), 1) if today_rows else None
+    # Monthly points use actual recorded attendance; no synthetic graph values.
+    trend = []
+    month_cursor = today.replace(day=1)
+    months = []
+    for _ in range(6):
+        months.append(month_cursor)
+        month_cursor = (month_cursor - timedelta(days=1)).replace(day=1)
+    months.reverse()
+    for month in months:
+        next_month = (month.replace(day=28) + timedelta(days=4)).replace(day=1)
+        rows = [r for r in attendance if month <= r.on_date < next_month]
+        trend.append({"label": month.strftime("%b"), "value": round(100 * sum(1 for r in rows if r.present) / len(rows), 1) if rows else None})
+    cgpas = [row.cgpa or 0 for row in students]
+    avg_cgpa = round(sum(cgpas) / len(cgpas), 2) if cgpas else 0
+    pass_rate = round(100 * sum(1 for x in cgpas if x >= 4.5) / len(cgpas), 1) if cgpas else None
+    bands = {"distinction": sum(1 for x in cgpas if x >= 7.5), "first": sum(1 for x in cgpas if 6 <= x < 7.5), "second": sum(1 for x in cgpas if 4.5 <= x < 6), "others": sum(1 for x in cgpas if x < 4.5)}
+    open_complaints = s.query(D.Complaint).filter(D.Complaint.status != "resolved").count()
+    pending_workflows = s.query(WorkflowInstance).filter(WorkflowInstance.office_n == ctx["office_n"], WorkflowInstance.state.in_(["submitted", "under_review", "reviewed", "escalated"])).all()
+    assessments = s.query(D.Assessment).count(); marks = s.query(D.Mark).count()
+    asset_maintenance = s.query(D.Asset).filter(D.Asset.status == "maintenance").count()
+    notifications = s.query(Notification).filter(Notification.user_id == ctx["sub"]).order_by(desc(Notification.created_at)).limit(6).all()
+    return {
+        "filters": {"academic_years": years, "selected_year": selected_year, "selected_student_semester": selected_student_semester, "student_semesters": list(range(1, 9))},
+        "kpis": {"students": len(students), "faculty": s.query(D.StaffMember).filter(D.StaffMember.status == "active").count(), "attendance": attendance_pct, "decisions": len(pending_workflows), "risk_students": sum(1 for x in cgpas if x < 6), "critical_alerts": sum(1 for n in notifications if n.severity == "critical")},
+        "attendance": {"today": attendance_pct, "today_records": len(today_rows), "trend": trend},
+        "performance": {"average_cgpa": avg_cgpa, "pass_rate": pass_rate, "bands": bands, "at_risk": sum(1 for x in cgpas if x < 6), "backlogs": sum(1 for x in cgpas if x < 4.5)},
+        "examinations": {"sections": s.query(D.Section).count(), "assessments": assessments, "marks_submitted": marks, "pending_moderation": s.query(D.ResultSheet).filter(D.ResultSheet.status != "published").count()},
+        "welfare": {"at_risk": sum(1 for x in cgpas if x < 6), "grievances": s.query(D.Complaint).filter(D.Complaint.kind == "Grievance", D.Complaint.status != "resolved").count(), "discipline": s.query(D.Complaint).filter(D.Complaint.kind == "Discipline", D.Complaint.status != "resolved").count(), "critical": s.query(D.Complaint).filter(D.Complaint.severity == "high", D.Complaint.status != "resolved").count()},
+        "operations": {"maintenance": asset_maintenance, "procurement": 0, "asset_requests": asset_maintenance, "facilities": asset_maintenance},
+        "workflows": [{"id": w.id, "title": w.title, "label": w.process_key.replace('_', ' ').title(), "state": w.state, "initiator": w.initiator_name or "Request"} for w in pending_workflows[:5]],
+        "notifications": [{"id": n.id, "title": n.title, "severity": n.severity, "created_at": n.created_at.isoformat()} for n in notifications],
+    }
+
+
+>>>>>>> 22ee34d (updated code to branch)
 def _month_start(d: date) -> date:
     return d.replace(day=1)
 
@@ -163,6 +236,7 @@ def _percent_delta(current: float, previous: float) -> dict:
     }
 
 
+<<<<<<< HEAD
 def _normalize_period(start: str = "", end: str = "", fallback: date | None = None):
     anchor = fallback or _month_start(date.today())
     selected_start = date.fromisoformat(start) if start else anchor
@@ -181,6 +255,8 @@ def _latest_snapshot_within_range(snapshots, start: date, end: date):
     return next((row for row in snapshots if row.snapshot_month <= end_month), None)
 
 
+=======
+>>>>>>> 22ee34d (updated code to branch)
 @router.get("/overview/chairman")
 def chairman_overview(start: str = "", end: str = "", ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "governance", "view")[0])
@@ -188,6 +264,7 @@ def chairman_overview(start: str = "", end: str = "", ctx=Depends(auth), s=Depen
     available_snapshots = (s.query(D.InstitutionSnapshot)
                            .order_by(D.InstitutionSnapshot.snapshot_month.desc()).all())
     latest_snapshot = available_snapshots[0] if available_snapshots else None
+<<<<<<< HEAD
     selected_start, selected_end = _normalize_period(
         start, end, latest_snapshot.snapshot_month if latest_snapshot else None
     )
@@ -200,6 +277,20 @@ def chairman_overview(start: str = "", end: str = "", ctx=Depends(auth), s=Depen
     previous_snapshot = (s.query(D.InstitutionSnapshot)
                          .filter(D.InstitutionSnapshot.snapshot_month < snapshot_month)
                          .order_by(D.InstitutionSnapshot.snapshot_month.desc()).first())
+=======
+    selected_start = date.fromisoformat(start) if start else (
+        latest_snapshot.snapshot_month if latest_snapshot else _month_start(date.today())
+    )
+    selected_start = _month_start(selected_start)
+    selected_end = date.fromisoformat(end) if end else _month_end(selected_start)
+    previous_start = _month_start(_previous_month(selected_start))
+    previous_end = _month_end(previous_start)
+
+    snapshot = (s.query(D.InstitutionSnapshot)
+                .filter(D.InstitutionSnapshot.snapshot_month == selected_start).first())
+    previous_snapshot = (s.query(D.InstitutionSnapshot)
+                         .filter(D.InstitutionSnapshot.snapshot_month == previous_start).first())
+>>>>>>> 22ee34d (updated code to branch)
 
     current_outstanding = snapshot.outstanding_fees if snapshot else 0
     previous_outstanding = previous_snapshot.outstanding_fees if previous_snapshot else 0
@@ -367,12 +458,17 @@ def chairman_overview(start: str = "", end: str = "", ctx=Depends(auth), s=Depen
 
 
 @router.get("/overview/chairman/outstanding-fees")
+<<<<<<< HEAD
 def chairman_outstanding_fees(start: str = "", end: str = "", ctx=Depends(auth), s=Depends(db)):
+=======
+def chairman_outstanding_fees(start: str = "", ctx=Depends(auth), s=Depends(db)):
+>>>>>>> 22ee34d (updated code to branch)
     require(gate(s, ctx, "governance", "view")[0])
 
     available = (s.query(D.OutstandingFeeSnapshot)
                  .order_by(D.OutstandingFeeSnapshot.snapshot_month.desc()).all())
     latest = available[0] if available else None
+<<<<<<< HEAD
     selected_start, selected_end = _normalize_period(
         start, end, latest.snapshot_month if latest else None
     )
@@ -389,6 +485,21 @@ def chairman_outstanding_fees(start: str = "", end: str = "", ctx=Depends(auth),
                 "end": selected_end.isoformat(),
                 "label": _fmt_range(selected_start, selected_end),
             },
+=======
+    selected_start = date.fromisoformat(start) if start else (
+        latest.snapshot_month if latest else _month_start(date.today())
+    )
+    selected_start = _month_start(selected_start)
+
+    current = (s.query(D.OutstandingFeeSnapshot)
+               .filter(D.OutstandingFeeSnapshot.snapshot_month == selected_start).first())
+    if not current and latest:
+        current = latest
+        selected_start = latest.snapshot_month
+    if not current:
+        return {
+            "range": {"start": selected_start.isoformat(), "label": _month_label(selected_start)},
+>>>>>>> 22ee34d (updated code to branch)
             "summary": {
                 "total_outstanding": {"value": 0, "delta_pct": 0, "direction": "up"},
                 "students_with_dues": {"value": 0, "delta_pct": 0, "direction": "up"},
@@ -399,19 +510,32 @@ def chairman_outstanding_fees(start: str = "", end: str = "", ctx=Depends(auth),
         }
 
     previous = (s.query(D.OutstandingFeeSnapshot)
+<<<<<<< HEAD
                 .filter(D.OutstandingFeeSnapshot.snapshot_month < current.snapshot_month)
                 .order_by(D.OutstandingFeeSnapshot.snapshot_month.desc()).first())
 
     trend_rows = (s.query(D.OutstandingFeeSnapshot)
                   .filter(D.OutstandingFeeSnapshot.snapshot_month <= current.snapshot_month)
+=======
+                .filter(D.OutstandingFeeSnapshot.snapshot_month < selected_start)
+                .order_by(D.OutstandingFeeSnapshot.snapshot_month.desc()).first())
+
+    trend_rows = (s.query(D.OutstandingFeeSnapshot)
+                  .filter(D.OutstandingFeeSnapshot.snapshot_month <= selected_start)
+>>>>>>> 22ee34d (updated code to branch)
                   .order_by(D.OutstandingFeeSnapshot.snapshot_month.desc()).limit(6).all())
     trend_rows = list(reversed(trend_rows))
 
     return {
         "range": {
             "start": selected_start.isoformat(),
+<<<<<<< HEAD
             "end": selected_end.isoformat(),
             "label": _fmt_range(selected_start, selected_end),
+=======
+            "end": _month_end(selected_start).isoformat(),
+            "label": _fmt_range(selected_start, _month_end(selected_start)),
+>>>>>>> 22ee34d (updated code to branch)
         },
         "summary": {
             "total_outstanding": {
@@ -1036,6 +1160,7 @@ class StudentIn(BaseModel):
     program_level: str = "UG"
 
 
+<<<<<<< HEAD
 @router.get("/students")
 def list_students(q: str = "", dept: str = "", ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "students", "view")[0])
@@ -1043,10 +1168,67 @@ def list_students(q: str = "", dept: str = "", ctx=Depends(auth), s=Depends(db))
     if q:
         like = f"%{q}%"
         query = query.filter((D.Student.name.ilike(like)) | (D.Student.roll_no.ilike(like)))
+=======
+def _student_scope(query, ctx):
+    """Apply the authenticated campus scope; never accept campus from the browser."""
+    scope = (ctx.get("scope_ref") or "").strip()
+    if ctx.get("scope_level") == "campus" and scope and not scope.startswith("scope_"):
+        return query.filter(D.Student.campus == scope)
+    return query
+
+
+def _academic_year_label(batch):
+    """Represent a student's admission batch as the academic-year filter label."""
+    try:
+        start = int(str(batch)[:4])
+        return f"{start}-{str(start + 1)[-2:]}"
+    except (TypeError, ValueError):
+        return str(batch or "")
+
+
+def _attendance_totals(s, student_ids):
+    rows = (s.query(D.AttendanceRecord.student_id, D.AttendanceRecord.present)
+            .filter(D.AttendanceRecord.student_id.in_(student_ids)).all()) if student_ids else []
+    totals = {}
+    for student_id, present in rows:
+        bucket = totals.setdefault(student_id, [0, 0])
+        bucket[0] += 1
+        bucket[1] += int(bool(present))
+    return totals
+
+
+def _backlog_summary(s, student_ids):
+    rows = (s.query(D.StudentSubjectResult).filter(D.StudentSubjectResult.student_id.in_(student_ids))
+            .order_by(D.StudentSubjectResult.student_id, D.StudentSubjectResult.subject_code, D.StudentSubjectResult.attempt).all()) if student_ids else []
+    latest = {}
+    history = {}
+    for row in rows:
+        latest[(row.student_id, row.subject_code)] = row
+        history.setdefault(row.student_id, []).append(row)
+    output = {}
+    for student_id in student_ids:
+        student_latest = [row for (sid, _), row in latest.items() if sid == student_id]
+        outstanding = [row for row in student_latest if row.outcome == "failed"]
+        cleared = [row for row in student_latest if row.outcome == "passed" and any(h.subject_code == row.subject_code and h.outcome == "failed" and h.attempt < row.attempt for h in history.get(student_id, []))]
+        output[student_id] = {"current": len(outstanding), "cleared": len(cleared), "subjects": [row.subject_title for row in outstanding], "history": history.get(student_id, [])}
+    return output
+
+
+@router.get("/students")
+def list_students(q: str = "", dept: str = "", program: str = "", academic_year: str = "", study_year: int = Query(0, ge=0), semester: int = Query(0, ge=0), section: str = "", risk: str = "", page: int = Query(1, ge=1), page_size: int = Query(25, ge=10, le=100), ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "students", "view")[0])
+    base_query = _student_scope(s.query(D.Student), ctx)
+    scoped_students = base_query.all()
+    query = base_query
+    if q:
+        like = f"%{q}%"
+        query = query.filter((D.Student.name.ilike(like)) | (D.Student.roll_no.ilike(like)) | (D.Student.email.ilike(like)))
+>>>>>>> 22ee34d (updated code to branch)
     if dept:
         d = s.query(D.Department).filter(D.Department.code == dept).first()
         if d:
             query = query.filter(D.Student.dept_id == d.id)
+<<<<<<< HEAD
     rows = query.order_by(D.Student.roll_no).limit(300).all()
     dept_map = {d.id: d.code for d in s.query(D.Department).all()}
     return {"students": [{
@@ -1054,10 +1236,120 @@ def list_students(q: str = "", dept: str = "", ctx=Depends(auth), s=Depends(db))
         "batch": r.batch, "semester": r.semester, "section": r.section, "cgpa": r.cgpa,
         "status": r.status, "hosteller": r.hosteller, "scholarship": r.scholarship,
     } for r in rows], "total": query.count(),
+=======
+    if program:
+        query = query.join(D.Program, D.Student.program_id == D.Program.id).filter((D.Program.code == program) | (D.Program.name == program))
+    if academic_year:
+        matching_batches = [student.batch for student in scoped_students if _academic_year_label(student.batch) == academic_year]
+        query = query.filter(D.Student.batch.in_(matching_batches)) if matching_batches else query.filter(False)
+    if semester:
+        query = query.filter(D.Student.semester == semester)
+    if study_year:
+        query = query.filter(D.Student.semester.between((study_year - 1) * 2 + 1, study_year * 2))
+    if section:
+        query = query.filter(D.Student.section == section)
+    if risk == "academic":
+        query = query.filter(D.Student.cgpa < 6.5)
+    if risk in {"backlogs", "no-backlogs", "at-risk"}:
+        scoped_ids = [row[0] for row in query.with_entities(D.Student.id).all()]
+        summaries = _backlog_summary(s, scoped_ids)
+        if risk == "backlogs":
+            query = query.filter(D.Student.id.in_([sid for sid, item in summaries.items() if item["current"] > 0]))
+        elif risk == "no-backlogs":
+            query = query.filter(D.Student.id.in_([sid for sid, item in summaries.items() if item["current"] == 0]))
+        else:
+            attendance = _attendance_totals(s, scoped_ids)
+            at_risk_ids = [sid for sid, item in summaries.items()
+                           if item["current"] > 0
+                           or (s.query(D.Student.cgpa).filter(D.Student.id == sid).scalar() or 0) < 6.5
+                           or (sid in attendance and 100 * attendance[sid][1] / attendance[sid][0] < 75)]
+            query = query.filter(D.Student.id.in_(at_risk_ids))
+    total = query.count()
+    rows = (query.order_by(D.Student.roll_no)
+            .offset((page - 1) * page_size)
+            .limit(page_size).all())
+    dept_map = {d.id: d for d in s.query(D.Department).all()}
+    program_map = {p.id: p for p in s.query(D.Program).all()}
+    student_ids = [row.id for row in rows]
+    backlogs = _backlog_summary(s, student_ids)
+    attendance_by_student = _attendance_totals(s, student_ids)
+    all_students = query.all()
+    all_backlogs = _backlog_summary(s, [student.id for student in all_students])
+    attendance_totals = _attendance_totals(s, [student.id for student in all_students])
+    risk_summary = {"at_risk": 0, "academic_risk": 0, "attendance_risk": 0, "attendance_available": len(attendance_totals), "average_attendance": None, "average_cgpa": None,
+                    "backlogs": 0, "no_backlogs": 0}
+    attendance_values = []
+    cgpas = []
+    for student in all_students:
+        academic = (student.cgpa or 0) < 6.5
+        current_backlogs = all_backlogs[student.id]["current"]
+        if academic: risk_summary["academic_risk"] += 1
+        if current_backlogs: risk_summary["backlogs"] += 1
+        else: risk_summary["no_backlogs"] += 1
+        if student.id in attendance_totals:
+            pct = 100 * attendance_totals[student.id][1] / attendance_totals[student.id][0]
+            attendance_values.append(pct)
+            if pct < 75: risk_summary["attendance_risk"] += 1
+        if student.cgpa is not None: cgpas.append(student.cgpa)
+        if academic or current_backlogs or (student.id in attendance_totals and 100 * attendance_totals[student.id][1] / attendance_totals[student.id][0] < 75): risk_summary["at_risk"] += 1
+    if attendance_values: risk_summary["average_attendance"] = round(sum(attendance_values) / len(attendance_values), 1)
+    if cgpas: risk_summary["average_cgpa"] = round(sum(cgpas) / len(cgpas), 2)
+    return {"students": [{
+        "id": r.id, "roll_no": r.roll_no, "name": r.name, "email": r.email, "dept": dept_map.get(r.dept_id).code if r.dept_id in dept_map else "", "department_name": dept_map.get(r.dept_id).name if r.dept_id in dept_map else "",
+        "program": program_map.get(r.program_id).name if r.program_id in program_map else "", "program_code": program_map.get(r.program_id).code if r.program_id in program_map else "",
+        "batch": r.batch, "semester": r.semester, "section": r.section, "cgpa": r.cgpa,
+        "status": r.status, "hosteller": r.hosteller, "scholarship": r.scholarship,
+        "attendance_pct": round(100 * attendance_by_student[r.id][1] / attendance_by_student[r.id][0], 1) if r.id in attendance_by_student else None,
+        "current_backlogs": backlogs[r.id]["current"], "backlog_status": "Outstanding" if backlogs[r.id]["current"] else ("Cleared" if backlogs[r.id]["cleared"] else "No history"),
+    } for r in rows], "total": total, "page": page, "page_size": page_size,
+        "total_pages": max(1, (total + page_size - 1) // page_size),
+        "filter_options": {
+            "academic_years": sorted({_academic_year_label(row.batch) for row in scoped_students if row.batch}, reverse=True),
+            "programs": sorted({(program_map[row.program_id].code, program_map[row.program_id].name) for row in scoped_students if row.program_id in program_map}, key=lambda item: item[1]),
+            "departments": sorted({(dept_map[row.dept_id].code, dept_map[row.dept_id].name) for row in scoped_students if row.dept_id in dept_map}, key=lambda item: item[1]),
+            "study_years": sorted({(row.semester + 1) // 2 for row in scoped_students if row.semester}),
+            "semesters": sorted({row.semester for row in scoped_students if row.semester}),
+            "sections": sorted({row.section for row in scoped_students if row.section}),
+        },
+        "departments": [
+            {"code": code, "name": name, "count": sum(1 for student in scoped_students if student.dept_id in dept_map and dept_map[student.dept_id].code == code)}
+            for code, name in sorted({(dept_map[row.dept_id].code, dept_map[row.dept_id].name) for row in scoped_students if row.dept_id in dept_map}, key=lambda item: item[1])
+        ],
+        "summary": {"all_students": total, **risk_summary},
+>>>>>>> 22ee34d (updated code to branch)
         "can_add": can(s, ctx, "students", "add"),
         "can_edit": can(s, ctx, "students", "edit")}
 
 
+<<<<<<< HEAD
+=======
+@router.get("/students/{student_id}/profile")
+def student_profile(student_id: str, ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "students", "view")[0])
+    student = _student_scope(s.query(D.Student), ctx).filter(D.Student.id == student_id).first()
+    if not student:
+        raise HTTPException(404, "Student was not found in your authorized campus")
+    department = s.query(D.Department).get(student.dept_id)
+    program = s.query(D.Program).get(student.program_id)
+    attendance = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.student_id == student.id).all()
+    attendance_pct = round(100 * sum(1 for row in attendance if row.present) / len(attendance), 1) if attendance else None
+    enrollments = s.query(D.Enrollment).filter(D.Enrollment.student_id == student.id).all()
+    sections = {row.id: row for row in s.query(D.Section).filter(D.Section.id.in_([e.section_id for e in enrollments])).all()} if enrollments else {}
+    marks = s.query(D.Mark).filter(D.Mark.student_id == student.id).all()
+    backlog = _backlog_summary(s, [student.id])[student.id]
+    return {"student": {"id": student.id, "name": student.name, "roll_no": student.roll_no, "email": student.email,
+            "campus": student.campus, "department": department.name if department else "", "department_code": department.code if department else "",
+            "program": program.name if program else "", "program_code": program.code if program else "", "semester": student.semester,
+            "study_year": (student.semester + 1) // 2, "section": student.section, "status": student.status, "cgpa": student.cgpa,
+            "attendance_pct": attendance_pct, "current_backlogs": backlog["current"], "cleared_backlogs": backlog["cleared"]},
+            "attendance": [{"date": row.on_date.isoformat(), "present": row.present} for row in attendance],
+            "enrollments": [{"section": sections[e.section_id].section_code if e.section_id in sections else "", "term": sections[e.section_id].term if e.section_id in sections else "", "status": e.status, "grade": e.grade} for e in enrollments],
+            "marks": [{"assessment_id": row.assessment_id, "score": row.score, "entered_at": row.entered_at.isoformat() if row.entered_at else None} for row in marks],
+            "backlog_history": [{"academic_year": row.academic_year, "semester": row.semester, "subject_code": row.subject_code, "subject_title": row.subject_title, "attempt": row.attempt, "outcome": row.outcome, "source": row.source} for row in backlog["history"]],
+            "limitations": {"backlogs": "Development sample results are included only where labelled development_sample.", "welfare": "Unavailable: student-linked welfare records are not modelled."}}
+
+
+>>>>>>> 22ee34d (updated code to branch)
 @router.post("/students")
 def add_student(body: StudentIn, ctx=Depends(auth), s=Depends(db)):
     dec, verb = gate(s, ctx, "students", "add")
@@ -1515,7 +1807,46 @@ def list_jobs(ctx=Depends(auth), s=Depends(db)):
     rows = s.query(D.JobPosting).all()
     return {"jobs": [{"id": j.id, "title": j.title, "dept": j.dept, "kind": j.kind,
                       "openings": j.openings, "status": j.status} for j in rows],
+<<<<<<< HEAD
             "can_post": can(s, ctx, "hr", "post_job")}
+=======
+              "can_post": can(s, ctx, "hr", "post_job")}
+
+
+@router.get("/faculty-staff")
+def faculty_staff(q: str = "", dept: str = "", kind: str = "", designation: str = "", status: str = "", page: int = Query(1, ge=1), page_size: int = Query(20, ge=10, le=100), ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "hr", "view")[0])
+    query = s.query(D.StaffMember)
+    if q:
+        like = f"%{q}%"; query = query.filter((D.StaffMember.name.ilike(like)) | (D.StaffMember.emp_id.ilike(like)) | (D.StaffMember.email.ilike(like)))
+    if dept:
+        department = s.query(D.Department).filter(D.Department.code == dept).first()
+        if department: query = query.filter(D.StaffMember.dept_id == department.id)
+    today = date.today()
+    on_leave_ids = [row[0] for row in s.query(D.LeaveRequest.staff_id).filter(D.LeaveRequest.status == "approved", D.LeaveRequest.from_date <= today, D.LeaveRequest.to_date >= today).all()]
+    if kind == "teaching": query = query.filter(D.StaffMember.designation.ilike("%professor%"))
+    if kind == "non_teaching": query = query.filter(~D.StaffMember.designation.ilike("%professor%"))
+    if kind == "on_leave": query = query.filter(D.StaffMember.id.in_(on_leave_ids))
+    if designation: query = query.filter(D.StaffMember.designation == designation)
+    if status: query = query.filter(D.StaffMember.status == status)
+    total = query.count(); rows = query.order_by(D.StaffMember.emp_id).offset((page - 1) * page_size).limit(page_size).all()
+    departments = {row.id: row for row in s.query(D.Department).all()}
+    all_rows = s.query(D.StaffMember).all()
+    teaching = sum(1 for row in all_rows if "professor" in (row.designation or "").lower())
+    return {"staff": [{"id": row.id, "employee_id": row.emp_id, "name": row.name, "email": row.email, "department": departments[row.dept_id].name if row.dept_id in departments else "Administration", "department_code": departments[row.dept_id].code if row.dept_id in departments else "", "designation": row.designation, "type": "Teaching" if "professor" in (row.designation or "").lower() else "Non-Teaching", "status": row.status, "campus": row.campus, "on_leave": row.id in on_leave_ids} for row in rows], "total": total, "page": page, "page_size": page_size, "total_pages": max(1, (total + page_size - 1) // page_size), "summary": {"total": len(all_rows), "teaching": teaching, "non_teaching": len(all_rows)-teaching, "on_leave": len(on_leave_ids), "vacancies": sum(job.openings for job in s.query(D.JobPosting).filter(D.JobPosting.status == "open").all())}, "departments": [{"code": d.code, "name": d.name} for d in departments.values() if s.query(D.StaffMember).filter(D.StaffMember.dept_id == d.id).count()], "designations": sorted(set(row.designation for row in all_rows if row.designation)), "statuses": sorted(set(row.status for row in all_rows if row.status))}
+
+
+@router.get("/faculty-staff/{staff_id}")
+def faculty_profile(staff_id: str, ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "hr", "view")[0])
+    row = s.query(D.StaffMember).get(staff_id)
+    if not row: raise HTTPException(404, "Faculty or staff member not found")
+    department = s.query(D.Department).get(row.dept_id)
+    sections = s.query(D.Section).filter(D.Section.faculty_person_id == row.id).all()
+    students = sum(s.query(D.Enrollment).filter(D.Enrollment.section_id == section.id, D.Enrollment.status == "enrolled").count() for section in sections)
+    leave = s.query(D.LeaveRequest).filter(D.LeaveRequest.staff_id == row.id).order_by(D.LeaveRequest.from_date.desc()).all()
+    return {"staff": {"id": row.id, "employee_id": row.emp_id, "name": row.name, "email": row.email, "department": department.name if department else "Administration", "designation": row.designation, "type": "Teaching" if "professor" in (row.designation or "").lower() else "Non-Teaching", "status": row.status, "campus": row.campus, "date_joined": row.date_joined.isoformat() if row.date_joined else None, "classes": len(sections), "students": students}, "sections": [{"code": section.section_code, "term": section.term, "schedule": section.schedule, "room": section.room} for section in sections], "leave": [{"kind": item.kind, "from": item.from_date.isoformat(), "to": item.to_date.isoformat(), "days": item.days, "status": item.status, "reason": item.reason} for item in leave]}
+>>>>>>> 22ee34d (updated code to branch)
 
 
 class LeaveDecisionIn(BaseModel):
@@ -1695,6 +2026,7 @@ def _governance_rating(score: float) -> str:
     return "Needs Attention"
 
 
+<<<<<<< HEAD
 _GOVERNANCE_SEMESTER_KEY_RE = re.compile(r"^(odd|even)_(\d{4})_(\d{2})$")
 
 
@@ -1755,6 +2087,8 @@ def _governance_snapshot_for_period(snapshots, start: date, end: date):
     return None
 
 
+=======
+>>>>>>> 22ee34d (updated code to branch)
 def _governance_snapshots(s):
     return (
         s.query(D.GovernanceDashboardSnapshot)
@@ -1765,6 +2099,7 @@ def _governance_snapshots(s):
     )
 
 
+<<<<<<< HEAD
 def _governance_snapshot_bundle(s, semester: str = "", start: str = "", end: str = ""):
     snapshots = _governance_snapshots(s)
     if not snapshots:
@@ -1785,6 +2120,18 @@ def _governance_snapshot_bundle(s, semester: str = "", start: str = "", end: str
         selected = next((row for row in snapshots if row.is_default), snapshots[0])
     if query_start is None or query_end is None:
         query_start, query_end = _governance_snapshot_window(selected)
+=======
+def _governance_snapshot_bundle(s, semester: str = ""):
+    snapshots = _governance_snapshots(s)
+    if not snapshots:
+        return None, [], [], []
+
+    selected = None
+    if semester:
+        selected = next((row for row in snapshots if row.semester_key == semester), None)
+    if selected is None:
+        selected = next((row for row in snapshots if row.is_default), snapshots[0])
+>>>>>>> 22ee34d (updated code to branch)
 
     compliance_rows = (
         s.query(D.GovernanceComplianceMetric)
@@ -1798,6 +2145,7 @@ def _governance_snapshot_bundle(s, semester: str = "", start: str = "", end: str
         .order_by(D.GovernancePerformanceMetric.sort_order, D.GovernancePerformanceMetric.area)
         .all()
     )
+<<<<<<< HEAD
     range_payload = {
         "start": query_start.isoformat(),
         "end": query_end.isoformat(),
@@ -1808,6 +2156,12 @@ def _governance_snapshot_bundle(s, semester: str = "", start: str = "", end: str
 
 
 def _governance_payload_from_snapshot(snapshot, compliance_rows, performance_rows, semesters, range_payload=None):
+=======
+    return selected, snapshots, compliance_rows, performance_rows
+
+
+def _governance_payload_from_snapshot(snapshot, compliance_rows, performance_rows, semesters):
+>>>>>>> 22ee34d (updated code to branch)
     total_budget = snapshot.total_budget or 0
     utilized_budget = snapshot.utilized_budget or 0
     utilization_pct = round(100 * utilized_budget / total_budget, 1) if total_budget else 0
@@ -1826,7 +2180,10 @@ def _governance_payload_from_snapshot(snapshot, compliance_rows, performance_row
         "subtitle": "Institution-wide performance for leadership and trustees",
         "selected_semester": {"key": snapshot.semester_key, "label": snapshot.semester_label},
         "semesters": semesters,
+<<<<<<< HEAD
         "range": range_payload or {"start": "", "end": "", "label": "", "available_ranges": []},
+=======
+>>>>>>> 22ee34d (updated code to branch)
         "kpis": {
             "students": snapshot.student_count,
             "faculty": snapshot.faculty_count,
@@ -1894,6 +2251,7 @@ def _governance_live_fallback(s, can_edit_dashboard=False):
     open_risk = s.query(D.Complaint).filter(D.Complaint.status != "resolved").count()
     compliance_score = max(80, min(98, round((100 + min(active_accreditations * 6, 96) + 88 + max(82, 96 - open_risk)) / 4)))
 
+<<<<<<< HEAD
     today = date.today()
     if today.month >= 7:
         live_start = date(today.year, 7, 1)
@@ -1901,11 +2259,14 @@ def _governance_live_fallback(s, can_edit_dashboard=False):
     else:
         live_start = date(today.year, 1, 1)
         live_end = date(today.year, 6, 30)
+=======
+>>>>>>> 22ee34d (updated code to branch)
     return {
         "title": "Governance dashboard",
         "subtitle": "Institution-wide performance for leadership and trustees",
         "selected_semester": {"key": "live", "label": "Live Institution View"},
         "semesters": [{"key": "live", "label": "Live Institution View"}],
+<<<<<<< HEAD
         "range": {
             "start": live_start.isoformat(),
             "end": live_end.isoformat(),
@@ -1918,6 +2279,8 @@ def _governance_live_fallback(s, can_edit_dashboard=False):
                 "label": _fmt_range(live_start, live_end),
             }],
         },
+=======
+>>>>>>> 22ee34d (updated code to branch)
         "kpis": {
             "students": students,
             "faculty": faculty,
@@ -1962,6 +2325,7 @@ def _governance_live_fallback(s, can_edit_dashboard=False):
 
 
 @router.get("/governance")
+<<<<<<< HEAD
 def governance(semester: str = Query("", description="Semester key"),
                start: str = Query("", description="Period start date"),
                end: str = Query("", description="Period end date"),
@@ -1969,11 +2333,21 @@ def governance(semester: str = Query("", description="Semester key"),
     require(gate(s, ctx, "governance", "view")[0])
     can_edit_dashboard = can(s, ctx, "governance", "edit_dashboard")
     selected, snapshots, compliance_rows, performance_rows, range_payload = _governance_snapshot_bundle(s, semester, start, end)
+=======
+def governance(semester: str = Query("", description="Semester key"), ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "governance", "view")[0])
+    can_edit_dashboard = can(s, ctx, "governance", "edit_dashboard")
+    selected, snapshots, compliance_rows, performance_rows = _governance_snapshot_bundle(s, semester)
+>>>>>>> 22ee34d (updated code to branch)
     if not snapshots or not selected:
         return _governance_live_fallback(s, can_edit_dashboard)
 
     semesters = [{"key": row.semester_key, "label": row.semester_label} for row in snapshots]
+<<<<<<< HEAD
     payload = _governance_payload_from_snapshot(selected, compliance_rows, performance_rows, semesters, range_payload)
+=======
+    payload = _governance_payload_from_snapshot(selected, compliance_rows, performance_rows, semesters)
+>>>>>>> 22ee34d (updated code to branch)
     payload["can_edit"] = can_edit_dashboard
     return payload
 
@@ -2033,7 +2407,11 @@ def update_governance_dashboard(semester_key: str, body: GovernanceDashboardUpda
     dec, _ = gate(s, ctx, "governance", "edit_dashboard")
     require(dec)
 
+<<<<<<< HEAD
     selected, snapshots, compliance_rows, performance_rows, _ = _governance_snapshot_bundle(s, semester_key)
+=======
+    selected, snapshots, compliance_rows, performance_rows = _governance_snapshot_bundle(s, semester_key)
+>>>>>>> 22ee34d (updated code to branch)
     if not snapshots or not selected:
         raise HTTPException(404, "Governance semester snapshot not found")
 
@@ -2117,9 +2495,15 @@ def update_governance_dashboard(semester_key: str, body: GovernanceDashboardUpda
         ctx.get("auth_level", "mfa"),
     )
 
+<<<<<<< HEAD
     selected, snapshots, compliance_rows, performance_rows, range_payload = _governance_snapshot_bundle(s, semester_key)
     semesters = [{"key": row.semester_key, "label": row.semester_label} for row in snapshots]
     payload = _governance_payload_from_snapshot(selected, compliance_rows, performance_rows, semesters, range_payload)
+=======
+    selected, snapshots, compliance_rows, performance_rows = _governance_snapshot_bundle(s, semester_key)
+    semesters = [{"key": row.semester_key, "label": row.semester_label} for row in snapshots]
+    payload = _governance_payload_from_snapshot(selected, compliance_rows, performance_rows, semesters)
+>>>>>>> 22ee34d (updated code to branch)
     payload["can_edit"] = can(s, ctx, "governance", "edit_dashboard")
     return payload
 

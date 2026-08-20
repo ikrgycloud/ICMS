@@ -178,6 +178,25 @@ class ResultSheet(Base):
     published_at = Column(DateTime, nullable=True)
 
 
+<<<<<<< HEAD
+=======
+class StudentSubjectResult(Base):
+    """Subject-level published outcomes; backlog state is derived, never manually cleared."""
+    __tablename__ = "student_subject_results"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    student_id = Column(String, ForeignKey("students.id"), index=True)
+    academic_year = Column(String, index=True)
+    semester = Column(Integer, index=True)
+    subject_code = Column(String)
+    subject_title = Column(String)
+    attempt = Column(Integer, default=1)
+    outcome = Column(String)  # passed / failed / result_pending
+    published_at = Column(DateTime, nullable=True)
+    source = Column(String, default="examination")  # examination / development_sample
+
+
+>>>>>>> 22ee34d (updated code to branch)
 # --------------------------------------------------------------------------- #
 #  Admissions
 # --------------------------------------------------------------------------- #

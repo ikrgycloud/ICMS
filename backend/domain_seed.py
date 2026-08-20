@@ -11,9 +11,14 @@ from datetime import date, datetime, timedelta
 from database import (SessionLocal, TENANT, engine, DEMO_USERNAMES, CAMPUS_SCOPES,
                       slug)
 from matrices import APPROVAL_MATRIX
+<<<<<<< HEAD
 from models import (Base, User, Delegation, DelegationPolicy, DelegationProfile,
                     WorkflowInstance, WorkflowProfile, Approval, Notification,
                     DelegationOption, DelegationContext)
+=======
+from models import (Base, User, Delegation, WorkflowInstance, Approval,
+                    Notification)
+>>>>>>> 22ee34d (updated code to branch)
 import domain_models as D
 
 R = random.Random(42)
@@ -971,6 +976,7 @@ def _seed_chairman_workflows(s):
 
     s.flush()
 
+<<<<<<< HEAD
     def semester_meta(created_at: datetime):
         year = created_at.year
         if created_at.month >= 7:
@@ -1018,6 +1024,8 @@ def _seed_chairman_workflows(s):
             ),
         )
 
+=======
+>>>>>>> 22ee34d (updated code to branch)
     approval_rows = [
         ("app_exec_01", "wf_exec_01", "user_29", "Facilities Director", 1, "Maintenance/Facilities", "ALLOW", "LIMITED", "Initial review completed", datetime(2026, 8, 4, 12, 0)),
         ("app_exec_02", "wf_exec_03", "user_4", "Principal", 3, "Principal", "ESCALATE", "FULL", "Capex exceeds branch authority", datetime(2026, 7, 25, 18, 0)),
@@ -1043,6 +1051,7 @@ def _seed_chairman_workflows(s):
             ),
         )
 
+<<<<<<< HEAD
     delegation_option_rows = [
         {"id": "deleg_opt_type_finance", "group_key": "policy_type", "option_key": "finance", "label": "Finance", "description": "Financial approvals, budgets and fund controls", "sort_order": 1},
         {"id": "deleg_opt_type_hr", "group_key": "policy_type", "option_key": "human_resources", "label": "Human Resources", "description": "People, hiring and staffing decisions", "sort_order": 2},
@@ -1364,6 +1373,17 @@ def _seed_chairman_workflows(s):
         context.attachment_size = None
         context.attachment_data = ""
         context.updated_at = datetime.utcnow()
+=======
+    _ensure(
+        s, Delegation, "deleg_exec_01",
+        lambda: Delegation(
+            id="deleg_exec_01", tenant_id=TENANT, from_user="user_1", to_user="user_2",
+            authority="approve:strategic", scope_ref="scope_global", limit=50000000,
+            start=datetime(2026, 8, 1, 9, 0), end=datetime(2026, 8, 31, 18, 0),
+            status="active", reason="Acting authority during external board meetings"
+        ),
+    )
+>>>>>>> 22ee34d (updated code to branch)
 
     chairman = s.get(User, "user_1")
     if chairman:
@@ -1548,6 +1568,181 @@ def _bind_portal_accounts(s):
     s.commit()
 
 
+<<<<<<< HEAD
+=======
+def _seed_principal_dashboard_data(s):
+    """Populate idempotent, date-distributed demo records for the Principal view.
+
+    These are normal AttendanceRecord/Notification/WorkflowInstance rows, not
+    frontend fixtures, so the dashboard always uses the same API and database
+    path as live deployments.
+    """
+    enrollments = s.query(D.Enrollment).filter(D.Enrollment.status == "enrolled").limit(90).all()
+    today = date.today()
+    for index, enrollment in enumerate(enrollments):
+        for months_back in range(6):
+            month = (today.replace(day=1) - timedelta(days=months_back * 31)).replace(day=1)
+            day_offsets = (3, 11, 19, today.day) if months_back == 0 else (3, 11, 19)
+            for day_offset in day_offsets:
+                on_date = month + timedelta(days=day_offset)
+                if on_date > today:
+                    continue
+                record_id = f"att_principal_{enrollment.id}_{on_date.isoformat()}"
+                _ensure(
+                    s, D.AttendanceRecord, record_id,
+                    lambda record_id=record_id, enrollment=enrollment, on_date=on_date, index=index, day_offset=day_offset:
+                        D.AttendanceRecord(
+                            id=record_id, tenant_id=TENANT, section_id=enrollment.section_id,
+                            student_id=enrollment.student_id, on_date=on_date,
+                            present=((index + day_offset + on_date.month) % 11 != 0), marked_by="Faculty"
+                        ),
+                )
+
+    principal = s.query(User).filter(User.username == "principal").first()
+    if principal:
+        notification_rows = [
+            ("notif_principal_01", "critical", "Attendance threshold breach", "One section recorded attendance below the campus threshold.", False),
+            ("notif_principal_02", "action", "Faculty leave request awaiting review", "A faculty leave request has reached the Principal review stage.", False),
+            ("notif_principal_03", "action", "Maintenance escalation", "A laboratory equipment maintenance request requires campus attention.", False),
+        ]
+        for nid, severity, title, body, read in notification_rows:
+            _ensure(s, Notification, nid, lambda nid=nid, severity=severity, title=title, body=body, read=read:
+                    Notification(id=nid, tenant_id=TENANT, user_id=principal.id, severity=severity,
+                                 title=title, body=body, read=read, created_at=datetime.utcnow()))
+        _ensure(
+            s, WorkflowInstance, "wf_principal_01",
+            lambda: WorkflowInstance(id="wf_principal_01", tenant_id=TENANT,
+                process_key="disciplinary_action", label="Disciplinary action",
+                office_n=4, title="Faculty leave approval exception", state="under_review",
+                amount=None, initiator_id="user_24", initiator_name="HR Manager",
+                current_stage=3, scope_level="campus", escalated=False,
+                created_at=datetime.utcnow(), updated_at=datetime.utcnow()),
+        )
+    s.commit()
+
+
+def _seed_principal_schedule_events(s):
+    """Personal agenda data for the Principal schedule; separate from the timetable."""
+    today = date.today()
+    def at(offset, hour, minute, duration=60):
+        start = datetime.combine(today + timedelta(days=offset), datetime.min.time()).replace(hour=hour, minute=minute)
+        return start, start + timedelta(minutes=duration)
+    specs = [
+        ("psched_01", "HOD Review Meeting", "Meetings", 0, 9, 30, 60, "Conference Room A", "#2878e6", "published"),
+        ("psched_02", "Purchase Request Approval Review", "Approvals", 0, 11, 0, 60, "Principal Office", "#f28a16", "action"),
+        ("psched_03", "Student Grievance Hearing", "Student Affairs", 0, 14, 0, 60, "Principal Office", "#8d48d7", "action"),
+        ("psched_04", "IQAC Review Meeting", "Meetings", 0, 16, 0, 60, "IQAC Cell", "#159e9d", "published"),
+        ("psched_05", "Recruitment Panel Interview", "HR", 1, 10, 0, 90, "Board Room", "#ed657e", "published"),
+        ("psched_06", "Maintenance Review Meeting", "Operations", 1, 14, 30, 60, "Admin Block", "#d69e27", "published"),
+        ("psched_07", "Dean Academics Meeting", "Meetings", 2, 9, 0, 60, "Conference Room B", "#2878e6", "published"),
+        ("psched_08", "Academic Council Meeting", "Academics", 2, 11, 30, 60, "Seminar Hall", "#269a55", "published"),
+        ("psched_09", "Faculty Leave Approvals", "Approvals", 2, 15, 0, 60, "Principal Office", "#e27f37", "action"),
+        ("psched_10", "Exam Readiness Review", "Exams", 3, 9, 30, 60, "Exam Cell", "#1b9aa2", "published"),
+        ("psched_11", "Disciplinary Committee Meeting", "Student Affairs", 3, 14, 0, 60, "Conference Room A", "#8d48d7", "action"),
+        ("psched_12", "Personal Time (Planning & Review)", "Personal", 3, 16, 30, 60, "Principal Office", "#718096", "published"),
+        ("psched_13", "Vendor Payment Approval Review", "Approvals", 4, 11, 0, 60, "Finance Office", "#e27f37", "action"),
+        ("psched_14", "HOD – CSE Department Review", "Meetings", 4, 15, 0, 60, "CSE Department Office", "#2878e6", "published"),
+        ("psched_15", "Campus Safety Walkthrough", "Operations", 5, 10, 0, 60, "North Gate", "#d69e27", "published"),
+    ]
+    for event_id, title, category, offset, hour, minute, duration, location, color, status in specs:
+        start_at, end_at = at(offset, hour, minute, duration)
+        _ensure(s, D.CalendarEvent, event_id, lambda event_id=event_id, title=title, category=category,
+                start_at=start_at, end_at=end_at, location=location, color=color, status=status:
+                D.CalendarEvent(id=event_id, tenant_id=TENANT, title=title, category=category,
+                    audience="leadership", start_at=start_at, end_at=end_at, all_day=False,
+                    location=location, description=f"Principal agenda item: {title}.", owner_office_n=4,
+                    source_type="manual", source_ref="principal_schedule", color=color, status=status,
+                    created_by="user_4", updated_by="user_4"))
+    s.commit()
+
+
+def _seed_development_backlog_history(s):
+    """Clearly marked local-development sample records for backlog UI development.
+
+    Replace these with published Examination data before any production use.
+    """
+    students = s.query(D.Student).order_by(D.Student.roll_no).limit(12).all()
+    subjects = [("MAT301", "Engineering Mathematics III"), ("CSE302", "Data Structures"), ("ECE303", "Digital Systems")]
+    for index, student in enumerate(students):
+        if index % 3 == 0:
+            code, title = subjects[index % len(subjects)]
+            _ensure(s, D.StudentSubjectResult, f"dev_result_{student.id}_a1", lambda student=student, code=code, title=title:
+                    D.StudentSubjectResult(id=f"dev_result_{student.id}_a1", tenant_id=TENANT, student_id=student.id,
+                        academic_year="2025-26", semester=max(1, student.semester - 1), subject_code=code,
+                        subject_title=title, attempt=1, outcome="failed", published_at=datetime.utcnow(), source="development_sample"))
+        if index % 6 == 0:
+            code, title = subjects[index % len(subjects)]
+            _ensure(s, D.StudentSubjectResult, f"dev_result_{student.id}_a2", lambda student=student, code=code, title=title:
+                    D.StudentSubjectResult(id=f"dev_result_{student.id}_a2", tenant_id=TENANT, student_id=student.id,
+                        academic_year="2026-27", semester=student.semester, subject_code=code,
+                        subject_title=title, attempt=2, outcome="passed", published_at=datetime.utcnow(), source="development_sample"))
+        elif index % 3 == 0:
+            code, title = subjects[(index + 1) % len(subjects)]
+            _ensure(s, D.StudentSubjectResult, f"dev_result_{student.id}_current", lambda student=student, code=code, title=title:
+                    D.StudentSubjectResult(id=f"dev_result_{student.id}_current", tenant_id=TENANT, student_id=student.id,
+                        academic_year="2026-27", semester=student.semester, subject_code=code,
+                        subject_title=title, attempt=1, outcome="failed", published_at=datetime.utcnow(), source="development_sample"))
+    s.commit()
+
+
+def _seed_development_principal_coverage(s):
+    """Fill missing development-only data coverage for Principal reporting.
+
+    These rows are intentionally tagged ``development_sample`` where the
+    model supports provenance.  They are idempotent and do not alter existing
+    attendance or examination rows.  Replace them with imported records before
+    any production deployment.
+    """
+    students = s.query(D.Student).order_by(D.Student.roll_no).all()
+    enrolled_sections = {}
+    for enrollment in s.query(D.Enrollment).filter(D.Enrollment.status == "enrolled").all():
+        enrolled_sections.setdefault(enrollment.student_id, enrollment.section_id)
+    department_sections = {}
+    for section in s.query(D.Section).order_by(D.Section.id).all():
+        department_sections.setdefault(section.dept_id, section.id)
+
+    existing_attendance = {row[0] for row in s.query(D.AttendanceRecord.student_id).distinct().all()}
+    today = date.today()
+    for index, student in enumerate(students):
+        # Do not overwrite real or previously seeded attendance.  Students
+        # without records receive ten dated entries, with a controlled subset
+        # below 75% so attendance-risk functionality can be exercised.
+        attendance_section = enrolled_sections.get(student.id) or department_sections.get(student.dept_id)
+        if student.id not in existing_attendance and attendance_section:
+            present_days = 7 if index % 5 == 0 else 9
+            for offset in range(10):
+                record_id = f"dev_attendance_{student.id}_{offset}"
+                _ensure(s, D.AttendanceRecord, record_id,
+                        lambda record_id=record_id, student=student, offset=offset, present_days=present_days:
+                        D.AttendanceRecord(id=record_id, tenant_id=TENANT,
+                            section_id=attendance_section, student_id=student.id,
+                            on_date=today - timedelta(days=10 - offset),
+                            present=offset < present_days, marked_by="development_sample"))
+
+        # Three published subject outcomes per student make the backlog list
+        # and department/semester analysis useful in a development database.
+        # Existing result history is left untouched.
+        academic_year = f"{student.batch}-{str(int(student.batch) + 1)[-2:]}" if str(student.batch).isdigit() else "development"
+        for subject_index, (suffix, title) in enumerate([
+            ("101", "Core Academic Subject"),
+            ("102", "Applied Academic Subject"),
+            ("103", "Professional Practice"),
+        ]):
+            code = f"DEV{student.semester}{suffix}"
+            # About one in eight students has an outstanding failed subject.
+            outcome = "failed" if subject_index == 0 and index % 8 == 0 else "passed"
+            result_id = f"dev_coverage_result_{student.id}_{subject_index}"
+            _ensure(s, D.StudentSubjectResult, result_id,
+                    lambda result_id=result_id, student=student, academic_year=academic_year, code=code, title=title, outcome=outcome:
+                    D.StudentSubjectResult(id=result_id, tenant_id=TENANT,
+                        student_id=student.id, academic_year=academic_year,
+                        semester=student.semester, subject_code=code,
+                        subject_title=title, attempt=1, outcome=outcome,
+                        published_at=datetime.utcnow(), source="development_sample"))
+    s.commit()
+
+
+>>>>>>> 22ee34d (updated code to branch)
 def seed_domain():
     Base.metadata.create_all(engine)
     s = SessionLocal()
@@ -1557,6 +1752,13 @@ def seed_domain():
         _seed_calendar_data(s)
         _seed_chairman_workflows(s)
         _bind_portal_accounts(s)
+<<<<<<< HEAD
+=======
+        _seed_principal_dashboard_data(s)
+        _seed_principal_schedule_events(s)
+        _seed_development_backlog_history(s)
+        _seed_development_principal_coverage(s)
+>>>>>>> 22ee34d (updated code to branch)
         return {
             "status": "domain-seeded",
             "schools": s.query(D.School).count(),

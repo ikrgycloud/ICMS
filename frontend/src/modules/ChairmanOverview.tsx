@@ -5,6 +5,7 @@ import { Modal, Spinner } from './kit'
 const RUPEE = '\u20B9'
 const SEGMENT_COLORS = ['#3b82f6', '#18b46b', '#f7b53b', '#ef233c', '#162033']
 
+<<<<<<< HEAD
 type PeriodMode = 'none' | 'preset' | 'custom'
 type SemesterMode = 'whole' | 'odd' | 'even'
 type RangeMeta = {
@@ -22,6 +23,12 @@ export default function ChairmanOverview({ go }: { go: (view: string) => void })
   const [periodMode, setPeriodMode] = useState<PeriodMode>('preset')
   const [customStart, setCustomStart] = useState('')
   const [customEnd, setCustomEnd] = useState('')
+=======
+export default function ChairmanOverview({ go }: { go: (view: string) => void }) {
+  const [selectedStart, setSelectedStart] = useState('')
+  const [selectedYear, setSelectedYear] = useState('')
+  const [selectedSemesterMode, setSelectedSemesterMode] = useState('whole')
+>>>>>>> 22ee34d (updated code to branch)
   const [data, setData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -31,6 +38,7 @@ export default function ChairmanOverview({ go }: { go: (view: string) => void })
   const [feesLoading, setFeesLoading] = useState(false)
   const [feesError, setFeesError] = useState('')
 
+<<<<<<< HEAD
   const availableRanges = useMemo<RangeMeta[]>(() => {
     if (!data?.range) return []
     const ranges = data.range.available_ranges?.length ? data.range.available_ranges : [data.range]
@@ -156,6 +164,8 @@ export default function ChairmanOverview({ go }: { go: (view: string) => void })
     if (next.end !== customEnd) setCustomEnd(next.end)
   }, [customEnd, customStart, data?.range?.end, data?.range?.start, periodMode, scopedRange])
 
+=======
+>>>>>>> 22ee34d (updated code to branch)
   useEffect(() => {
     let active = true
 
@@ -164,10 +174,17 @@ export default function ChairmanOverview({ go }: { go: (view: string) => void })
       setError('')
 
       try {
+<<<<<<< HEAD
         const response = await api.chairmanOverview(queryRange.start, queryRange.end)
         if (!active) return
         setData(response)
         if (periodMode === 'preset' && !selectedStart && response?.range?.start) {
+=======
+        const response = await api.chairmanOverview(selectedStart)
+        if (!active) return
+        setData(response)
+        if (!selectedStart && response?.range?.start) {
+>>>>>>> 22ee34d (updated code to branch)
           setSelectedStart(response.range.start)
         }
       } catch (err: any) {
@@ -182,7 +199,11 @@ export default function ChairmanOverview({ go }: { go: (view: string) => void })
     return () => {
       active = false
     }
+<<<<<<< HEAD
   }, [periodMode, queryRange.end, queryRange.start, reloadKey])
+=======
+  }, [reloadKey, selectedStart])
+>>>>>>> 22ee34d (updated code to branch)
 
   useEffect(() => {
     if (!feesOpen) return
@@ -192,7 +213,11 @@ export default function ChairmanOverview({ go }: { go: (view: string) => void })
       setFeesLoading(true)
       setFeesError('')
       try {
+<<<<<<< HEAD
         const response = await api.chairmanOutstandingFees(queryRange.start, queryRange.end)
+=======
+        const response = await api.chairmanOutstandingFees(selectedStart || data?.range?.start || '')
+>>>>>>> 22ee34d (updated code to branch)
         if (!active) return
         setFeesData(response)
       } catch (err: any) {
@@ -207,7 +232,11 @@ export default function ChairmanOverview({ go }: { go: (view: string) => void })
     return () => {
       active = false
     }
+<<<<<<< HEAD
   }, [feesOpen, queryRange.end, queryRange.start])
+=======
+  }, [feesOpen, selectedStart, data?.range?.start])
+>>>>>>> 22ee34d (updated code to branch)
 
   const donut = useMemo(() => {
     const segments = data?.financial?.segments || []
@@ -222,6 +251,7 @@ export default function ChairmanOverview({ go }: { go: (view: string) => void })
     return `conic-gradient(${stops.join(', ')})`
   }, [data])
 
+<<<<<<< HEAD
   function handlePeriodModeChange(nextMode: PeriodMode) {
     setPeriodMode(nextMode)
     if (nextMode === 'custom') {
@@ -249,6 +279,55 @@ export default function ChairmanOverview({ go }: { go: (view: string) => void })
     setCustomStart(clampDate(nextStart, scopedRange.start, scopedRange.end))
     setCustomEnd(nextEnd)
   }
+=======
+  const availableRanges = useMemo(() => {
+    if (!data?.range) return []
+    const ranges = data.range.available_ranges?.length ? data.range.available_ranges : [data.range]
+    return ranges.map(buildRangeMeta)
+  }, [data])
+
+  const yearOptions = useMemo<string[]>(
+    () => Array.from(new Set<string>(availableRanges.map((range: any) => String(range.year)))).sort((left, right) => Number(right) - Number(left)),
+    [availableRanges],
+  )
+
+  const yearScopedRanges = useMemo(
+    () => availableRanges.filter(range => !selectedYear || range.year === selectedYear),
+    [availableRanges, selectedYear],
+  )
+
+  const filteredRanges = useMemo(
+    () => yearScopedRanges.filter(range => selectedSemesterMode === 'whole' || range.semester === selectedSemesterMode),
+    [yearScopedRanges, selectedSemesterMode],
+  )
+
+  const activeRange = useMemo(() => {
+    const activeStart = selectedStart || data?.range?.start
+    return availableRanges.find(range => range.start === activeStart) || filteredRanges[0] || availableRanges[0] || null
+  }, [availableRanges, filteredRanges, selectedStart, data?.range?.start])
+
+  useEffect(() => {
+    if (!availableRanges.length) return
+    if (!selectedYear || !yearOptions.includes(selectedYear)) {
+      setSelectedYear(activeRange?.year || availableRanges[0].year)
+    }
+  }, [activeRange, availableRanges, selectedYear, yearOptions])
+
+  useEffect(() => {
+    if (selectedSemesterMode === 'whole' || !yearScopedRanges.length) return
+    if (!yearScopedRanges.some(range => range.semester === selectedSemesterMode)) {
+      setSelectedSemesterMode('whole')
+    }
+  }, [selectedSemesterMode, yearScopedRanges])
+
+  useEffect(() => {
+    if (!filteredRanges.length) return
+    const activeStart = selectedStart || data?.range?.start
+    if (!filteredRanges.some(range => range.start === activeStart)) {
+      setSelectedStart(filteredRanges[0].start)
+    }
+  }, [filteredRanges, selectedStart, data?.range?.start])
+>>>>>>> 22ee34d (updated code to branch)
 
   if (loading) return <Spinner />
 
@@ -314,6 +393,14 @@ export default function ChairmanOverview({ go }: { go: (view: string) => void })
             <h1>{data.welcome.title} <span className="chair-wave">{'\u{1F44B}'}</span></h1>
             <p>{data.welcome.subtitle}</p>
           </div>
+<<<<<<< HEAD
+=======
+
+          <div className="chair-context-chip">
+            <MetricGlyph kind="clock" />
+            <span>{activeRange?.label || data.range.label}</span>
+          </div>
+>>>>>>> 22ee34d (updated code to branch)
         </div>
 
         <div className="chair-toolbar chair-toolbar-compact">
@@ -333,7 +420,11 @@ export default function ChairmanOverview({ go }: { go: (view: string) => void })
             <span className="chair-filter-label">Semester</span>
             <span className="chair-filter-control">
               <MetricGlyph kind="semester" />
+<<<<<<< HEAD
               <select value={selectedSemesterMode} onChange={event => setSelectedSemesterMode(event.target.value as SemesterMode)}>
+=======
+              <select value={selectedSemesterMode} onChange={event => setSelectedSemesterMode(event.target.value)}>
+>>>>>>> 22ee34d (updated code to branch)
                 <option value="whole">Whole</option>
                 <option value="odd">Odd semester</option>
                 <option value="even">Even semester</option>
@@ -345,6 +436,7 @@ export default function ChairmanOverview({ go }: { go: (view: string) => void })
             <span className="chair-filter-label">Period</span>
             <span className="chair-filter-control">
               <MetricGlyph kind="clock" />
+<<<<<<< HEAD
               <select value={periodMode} onChange={event => handlePeriodModeChange(event.target.value as PeriodMode)}>
                 <option value="preset">Monthly snapshot</option>
                 <option value="custom">Custom date range</option>
@@ -418,6 +510,15 @@ export default function ChairmanOverview({ go }: { go: (view: string) => void })
               </div>
             </div>
           )}
+=======
+              <select value={selectedStart || data.range.start} onChange={event => setSelectedStart(event.target.value)}>
+                {filteredRanges.map((range: any) => (
+                  <option key={range.start} value={range.start}>{range.label}</option>
+                ))}
+              </select>
+            </span>
+          </label>
+>>>>>>> 22ee34d (updated code to branch)
         </div>
       </section>
 
@@ -432,7 +533,11 @@ export default function ChairmanOverview({ go }: { go: (view: string) => void })
                 <div className={`chair-kpi-sub ${trendTone(card.metric)}`}>
                   <TrendArrow direction={card.metric.direction} />
                   <span>{formatDelta(card.metric, card.key === 'outstanding_fees')}</span>
+<<<<<<< HEAD
                   <small>{comparisonLabel}</small>
+=======
+                  <small>vs last month</small>
+>>>>>>> 22ee34d (updated code to branch)
                 </div>
               </div>
             </button>
@@ -445,7 +550,11 @@ export default function ChairmanOverview({ go }: { go: (view: string) => void })
                 <div className={`chair-kpi-sub ${trendTone(card.metric)}`}>
                   <TrendArrow direction={card.metric.direction} />
                   <span>{formatDelta(card.metric, card.key === 'outstanding_fees')}</span>
+<<<<<<< HEAD
                   <small>{comparisonLabel}</small>
+=======
+                  <small>vs last month</small>
+>>>>>>> 22ee34d (updated code to branch)
                 </div>
               </div>
             </div>
@@ -672,7 +781,11 @@ function OutstandingFeesModal({
                 <div className={`outstanding-mini-sub ${card.tone === 'danger' && card.direction === 'up' ? 'danger' : 'good'}`}>
                   <TrendArrow direction={card.direction} />
                   <span>{card.delta.toFixed(1)}%</span>
+<<<<<<< HEAD
                   <small>vs previous period</small>
+=======
+                  <small>vs last month</small>
+>>>>>>> 22ee34d (updated code to branch)
                 </div>
               </div>
             ))}
@@ -787,7 +900,11 @@ function trendTone(metric: any) {
   return 'good'
 }
 
+<<<<<<< HEAD
 function buildRangeMeta(range: any): RangeMeta {
+=======
+function buildRangeMeta(range: any) {
+>>>>>>> 22ee34d (updated code to branch)
   const [yearPart = '', monthPart = '1'] = String(range?.start || '').split('-')
   const year = String(Number(yearPart) || new Date().getFullYear())
   const month = Number(monthPart) || 1
@@ -798,6 +915,7 @@ function buildRangeMeta(range: any): RangeMeta {
   }
 }
 
+<<<<<<< HEAD
 function buildScopeRange(year: string, semester: SemesterMode) {
   const safeYear = Number(year) || new Date().getFullYear()
   if (semester === 'odd') {
@@ -848,6 +966,8 @@ function formatDateRangeLabel(start: string, end: string) {
   return `${from.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })} - ${to.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}`
 }
 
+=======
+>>>>>>> 22ee34d (updated code to branch)
 function alertGlyph(severity: string) {
   if (severity === 'critical') return 'alert'
   if (severity === 'action') return 'warning'
