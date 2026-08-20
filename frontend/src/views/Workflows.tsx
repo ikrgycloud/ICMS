@@ -48,7 +48,7 @@ export default function Workflows({ user, onChange }: { user: any; onChange: () 
                       <td style={{ color: 'var(--txt-soft)' }}>{w.title}</td>
                       <td>{w.initiator}</td>
                       <td className="mono">{money(w.amount)}</td>
-                      <td className="mono" style={{ fontSize: 12 }}>{w.current_stage}/{w.chain.length}</td>
+                      <td className="mono" style={{ fontSize: 8 }}>{w.current_stage}/{w.chain.length}</td>
                       <td><StatePill s={w.state} /></td>
                       <td><button className="btn btn-out" onClick={() => setSelected(w)}>Open</button></td>
                     </tr>
@@ -103,13 +103,13 @@ function StartModal({ user, onClose, onDone }: any) {
           </div>
           {proc && (
             <div style={{ background: 'var(--mist)', borderRadius: 12, padding: 14, marginBottom: 16 }}>
-              <div style={{ fontFamily: 'var(--ff-mono)', fontSize: 11, color: 'var(--txt-mute)', textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 8 }}>Approval chain · escalates to {proc.escalation}</div>
+              <div style={{ fontFamily: 'var(--ff-mono)', fontSize: 8, color: 'var(--txt-mute)', textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 8 }}>Approval chain · escalates to {proc.escalation}</div>
               <div className="chain">
                 {proc.chain.map((c: string, i: number) => (
                   <>
                     <div className="chain-node" key={i} style={{ minWidth: 110, padding: 10 }}>
                       <div className="cn-stage">Stage {i}</div>
-                      <div className="cn-role" style={{ fontSize: 12.5 }}>{c}</div>
+                      <div className="cn-role" style={{ fontSize: 8.5 }}>{c}</div>
                     </div>
                     {i < proc.chain.length - 1 && <span className="chain-arrow">→</span>}
                   </>
@@ -168,7 +168,7 @@ function DetailModal({ wf, user, onClose, onDone }: any) {
         <div className="modal-h">
           <div>
             <h3>{data.label}</h3>
-            <div style={{ fontSize: 13, color: 'var(--txt-soft)', marginTop: 4 }}>{data.title}</div>
+            <div style={{ fontSize: 9, color: 'var(--txt-soft)', marginTop: 4 }}>{data.title}</div>
           </div>
           <button className="close-x" onClick={onClose}>×</button>
         </div>
@@ -181,7 +181,7 @@ function DetailModal({ wf, user, onClose, onDone }: any) {
             <Meta label="Escalates to"><span className="mono">{data.escalation}</span></Meta>
           </div>
 
-          <div style={{ fontFamily: 'var(--ff-mono)', fontSize: 11, color: 'var(--txt-mute)', textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 10 }}>Approval chain</div>
+          <div style={{ fontFamily: 'var(--ff-mono)', fontSize: 8, color: 'var(--txt-mute)', textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 10 }}>Approval chain</div>
           <div className="chain" style={{ marginBottom: 22 }}>
             {data.chain.map((c: string, i: number) => (
               <>
@@ -200,20 +200,20 @@ function DetailModal({ wf, user, onClose, onDone }: any) {
                 <span className="mono" style={{ fontWeight: 700, color: outcomeColor(lastDecision.outcome) }}>{lastDecision.outcome}</span>
                 {lastDecision.escalate_to && <span className="tag" style={{ background: '#fdeee4', color: '#c05a1e' }}>→ {lastDecision.escalate_to}</span>}
               </div>
-              <div style={{ fontSize: 13.5, color: 'var(--txt-soft)', marginTop: 6 }}>{lastDecision.reason}</div>
+              <div style={{ fontSize: 9.5, color: 'var(--txt-soft)', marginTop: 6 }}>{lastDecision.reason}</div>
             </div>
           )}
 
           {data.history.length > 0 && (
             <>
-              <div style={{ fontFamily: 'var(--ff-mono)', fontSize: 11, color: 'var(--txt-mute)', textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 10 }}>Decision history</div>
+              <div style={{ fontFamily: 'var(--ff-mono)', fontSize: 8, color: 'var(--txt-mute)', textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 10 }}>Decision history</div>
               <div style={{ marginBottom: 16 }}>
                 {data.history.map((h: any, i: number) => (
-                  <div key={i} style={{ display: 'flex', gap: 12, padding: '9px 0', borderBottom: '1px solid #f2efe8', fontSize: 13 }}>
+                  <div key={i} style={{ display: 'flex', gap: 12, padding: '9px 0', borderBottom: '1px solid #f2efe8', fontSize: 9 }}>
                     <span className="mono" style={{ fontWeight: 700, color: outcomeColor(h.decision), minWidth: 80 }}>{h.decision}</span>
                     <div style={{ flex: 1 }}>
                       <div><b>{h.actor}</b> · <span style={{ color: 'var(--txt-soft)' }}>{h.stage_label}</span></div>
-                      <div style={{ color: 'var(--txt-mute)', fontSize: 12.5 }}>{h.reason}</div>
+                      <div style={{ color: 'var(--txt-mute)', fontSize: 8.5 }}>{h.reason}</div>
                     </div>
                   </div>
                 ))}
@@ -234,13 +234,13 @@ function DetailModal({ wf, user, onClose, onDone }: any) {
                 <button className="btn btn-rose" disabled={busy} onClick={() => decide('reject')}>Reject</button>
                 <button className="btn btn-out" disabled={busy} onClick={() => decide('escalate')}>Escalate</button>
               </div>
-              <div style={{ fontSize: 12, color: 'var(--txt-mute)', marginTop: 10 }}>
+              <div style={{ fontSize: 8, color: 'var(--txt-mute)', marginTop: 10 }}>
                 The engine runs the full authority check on each action. If you initiated this request, segregation of duties will block your own approval.
               </div>
             </div>
           )}
           {terminal && (
-            <div style={{ textAlign: 'center', padding: 14, background: 'var(--mist)', borderRadius: 12, color: 'var(--txt-soft)', fontSize: 14 }}>
+            <div style={{ textAlign: 'center', padding: 14, background: 'var(--mist)', borderRadius: 12, color: 'var(--txt-soft)', fontSize: 10 }}>
               This request has reached a terminal state: <b>{data.state}</b>.
             </div>
           )}
@@ -253,8 +253,8 @@ function DetailModal({ wf, user, onClose, onDone }: any) {
 function Meta({ label, children }: any) {
   return (
     <div>
-      <div style={{ fontFamily: 'var(--ff-mono)', fontSize: 10, color: 'var(--txt-mute)', textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 5 }}>{label}</div>
-      <div style={{ fontSize: 14, fontWeight: 500 }}>{children}</div>
+      <div style={{ fontFamily: 'var(--ff-mono)', fontSize: 8, color: 'var(--txt-mute)', textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 5 }}>{label}</div>
+      <div style={{ fontSize: 10, fontWeight: 500 }}>{children}</div>
     </div>
   )
 }

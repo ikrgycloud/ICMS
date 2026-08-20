@@ -27,6 +27,8 @@ import Research from './modules/Research'
 import Placements from './modules/Placements'
 import Grievance from './modules/Grievance'
 import Governance from './modules/Governance'
+import ChairmanApprovals from './modules/ChairmanApprovals'
+import ChairmanDelegation from './modules/ChairmanDelegation'
 import AdminPanel from './modules/AdminPanel'
 import Analytics from './modules/Analytics'
 import Procurement from './modules/Procurement'
@@ -402,11 +404,13 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'admin':
       return <AdminPanel caps={caps} />
     case 'approvals':
-      return <Workflows user={user} onChange={onChange} />
+      return user.office_n === 1
+        ? <ChairmanApprovals user={user} onChange={onChange} />
+        : <Workflows user={user} onChange={onChange} />
     case 'workflows':
       return <Workflows user={user} onChange={onChange} />
     case 'delegation':
-      return <Delegations user={user} />
+      return user.office_n === 1 ? <ChairmanDelegation user={user} /> : <Delegations user={user} />
     case 'audit':
       return <AuditView />
     case 'directory':
