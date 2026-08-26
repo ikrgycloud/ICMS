@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { Empty, Spinner } from '../modules/kit'
 
-export default function FacultyHome({ user, go }: { user: any; go: (v: string) => void }) {
+export default function FacultyHome({ user, go }: { user: any; go: (v: string) => void })
   const [home, setHome] = useState<any>(null)
   useEffect(() => { api.facultyHome().then(setHome).catch(() => setHome({ error: true })) }, [user?.active_role])
   if (!home) return <Spinner />
