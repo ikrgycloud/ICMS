@@ -13,6 +13,8 @@ import MySchedule from './modules/MySchedule'
 import AcademicCalendar from './modules/AcademicCalendar'
 import Students from './modules/Students'
 import Academics from './modules/Academics'
+import Curriculum from './modules/Curriculum'
+import CoursesSubjects from './modules/CoursesSubjects'
 import Attendance from './modules/Attendance'
 import Examinations from './modules/Examinations'
 import Admissions from './modules/Admissions'
@@ -35,6 +37,7 @@ import Procurement from './modules/Procurement'
 import Integrations from './modules/Integrations'
 import StudentHome from './personas/StudentHome'
 import FacultyHome from './personas/FacultyHome'
+import FacultySchedule from './personas/FacultySchedule'
 import ParentHome from './personas/ParentHome'
 
 const LEVEL_COLORS: Record<number, string> = {
@@ -72,8 +75,8 @@ const CHAIRMAN_DISPLAY: Record<string, { label: string; group: string }> = {
 // not imply that an unavailable backend workflow can be opened.
 const PRINCIPAL_NAV = [
   ['Workspace', 'Dashboard', 'overview'], ['Workspace', 'My Schedule', 'my_schedule'],
-  ['Academics', 'Academic Calendar', 'academic_calendar'], ['Academics', 'Curriculum', 'academics'],
-  ['Academics', 'Courses & Subjects', 'academics'], ['Academics', 'Timetable', 'calendar'],
+  ['Academics', 'Academic Calendar', 'academic_calendar'], ['Academics', 'Curriculum', 'curriculum'],
+  ['Academics', 'Courses & Subjects', 'courses_subjects'], ['Academics', 'Timetable', 'calendar'],
   ['Academics', 'Academic Performance', 'analytics'],
   ['Students', 'Students', 'students'], ['Students', 'Admissions', 'admissions'], ['Students', 'Attendance', 'attendance'],
   ['Students', 'Performance', 'analytics'], ['Students', 'Student Welfare', 'grievance'], ['Students', 'Discipline & Grievances', 'grievance'],
@@ -85,6 +88,25 @@ const PRINCIPAL_NAV = [
   ['Audit & Reporting', 'Audit', 'audit'], ['Audit & Reporting', 'Reports', 'analytics'],
   ['Reference', 'Directory', 'directory'], ['Reference', 'Authority & Permissions', 'matrices'],
 ] as const
+
+// Faculty offices share the same functional modules, but need the focused
+// teaching workspace described by the Professor Office information layout.
+// A link is only interactive when its backing module is authorised.
+const FACULTY_NAV = [
+  ['Workspace', 'Overview', 'overview'], ['Workspace', 'My Schedule', 'my_schedule'], ['Workspace', 'Messages', 'workflows'],
+  ['Teaching & Academics', 'My Sections', 'academics'], ['Teaching & Academics', 'Attendance', 'attendance'],
+  ['Teaching & Academics', 'Assessments & Marks', 'examinations'], ['Teaching & Academics', 'Examinations', 'examinations'],
+  ['Teaching & Academics', 'Course Materials', 'academics'], ['Teaching & Academics', 'Research & Publications', 'research'],
+  ['Teaching & Academics', 'Projects & Guidance', 'research'], ['Teaching & Academics', 'Academic Calendar', 'academic_calendar'],
+  ['Administration', 'Leave Requests', 'workflows'], ['Administration', 'My Requests & Approvals', 'workflows'],
+  ['Reference', 'Directory', 'directory'], ['Reference', 'Profile', 'directory'],
+] as const
+
+const FACULTY_ACTIVE_LABEL: Record<string, string> = {
+  overview: 'Overview', my_schedule: 'My Schedule', workflows: 'My Requests & Approvals',
+  academics: 'My Sections', attendance: 'Attendance', examinations: 'Assessments & Marks',
+  research: 'Research & Publications', academic_calendar: 'Academic Calendar', directory: 'Directory',
+}
 
 export default function App({ onLogout }: { onLogout: () => void }) {
   const [user, setUser] = useState<any>(getUser())
@@ -117,7 +139,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     // Faculty & Staff is a Principal-specific presentation of the authorised
     // HR module.  It has its own route so that the list/profile experience is
     // retained when opened from the dashboard KPI or the Principal sidebar.
-    const principalVirtualModule = user?.office_n === 4 && view === 'faculty_staff'
+    const principalVirtualModule = user?.office_n === 4 && ['faculty_staff', 'curriculum', 'courses_subjects'].includes(view)
     if (!principalVirtualModule && !ws.modules.some((module: any) => module.key === view)) {
       setView(ws.modules[0].key)
     }
@@ -167,6 +189,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const color = LEVEL_COLORS[user.level] || '#c9a24a'
   const chairmanShell = user.office_n === 1
   const principalShell = user.office_n === 4
+  const facultyShell = user.persona === 'faculty'
   const groups: Record<string, any[]> = {}
   displayModules.forEach((module: any) => {
     ;(groups[module.group] = groups[module.group] || []).push(module)
@@ -176,20 +199,26 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const current = displayModules.find((module: any) => module.key === view) || displayModules[0]
   const principalGroups = PRINCIPAL_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
     const source = displayModules.find((module: any) => module.key === key)
+      || (key === 'courses_subjects' ? displayModules.find((module: any) => module.key === 'academics') : undefined)
       || (key === 'faculty_staff' ? { key, label, group, enabled: true } : undefined)
+    ;(out[group] = out[group] || []).push({ key, label, group, source, enabled: Boolean(source) })
+    return out
+  }, {})
+  const facultyGroups = FACULTY_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
+    const source = displayModules.find((module: any) => module.key === key)
     ;(out[group] = out[group] || []).push({ key, label, group, source, enabled: Boolean(source) })
     return out
   }, {})
 
   return (
-    <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''}`}>
+    <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''} ${facultyShell ? 'faculty-shell' : ''}`}>
       <aside className={`sidebar ${sideOpen ? 'open' : ''}`}>
         <div className="brand">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <div className="seal">IC</div>
             <div>
               <div className="brand-name">ICMS</div>
-              <div className="brand-sub">{principalShell ? 'Principal Portal' : 'University Group'}</div>
+              <div className="brand-sub">{principalShell ? 'Principal Portal' : facultyShell ? 'University Group' : 'University Group'}</div>
             </div>
           </div>
         </div>
@@ -203,19 +232,19 @@ export default function App({ onLogout }: { onLogout: () => void }) {
         </div>
 
         <nav className="side-nav">
-          {(principalShell ? Object.keys(principalGroups) : groupKeys).map(group => (
+          {(principalShell ? Object.keys(principalGroups) : facultyShell ? Object.keys(facultyGroups) : groupKeys).map(group => (
             <div key={group}>
               <div className="side-sec">{group}</div>
-              {(principalShell ? principalGroups[group] : groups[group]).map((module: any) => (
+              {(principalShell ? principalGroups[group] : facultyShell ? facultyGroups[group] : groups[group]).map((module: any) => (
                 <button
-                  key={principalShell ? `${group}-${module.label}` : module.key}
-                  className={`nav-item ${view === module.key && (!principalShell || module.enabled) ? 'on' : ''} ${principalShell && !module.enabled ? 'nav-item-disabled' : ''}`}
+                  key={(principalShell || facultyShell) ? `${group}-${module.label}` : module.key}
+                  className={`nav-item ${(facultyShell ? FACULTY_ACTIVE_LABEL[view] === module.label : view === module.key) && (!(principalShell || facultyShell) || module.enabled) ? 'on' : ''} ${(principalShell || facultyShell) && !module.enabled ? 'nav-item-disabled' : ''}`}
                   onClick={() => {
-                    if (principalShell && !module.enabled) return
+                    if ((principalShell || facultyShell) && !module.enabled) return
                     setView(module.key)
                     setSideOpen(false)
                   }}
-                  title={principalShell && !module.enabled ? 'This module is not currently available for the Principal workspace' : module.label}
+                  title={(principalShell || facultyShell) && !module.enabled ? 'This module is not available for your current role' : module.label}
                   type="button"
                 >
                   <span className="ico">
@@ -356,6 +385,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'calendar':
       return <Calendar user={user} caps={caps} />
     case 'my_schedule':
+      if (user.persona === 'faculty') return <FacultySchedule user={user} go={go} />
       return <MySchedule user={user} go={go} />
     case 'academic_calendar':
       return <AcademicCalendar user={user} caps={caps} />
@@ -367,6 +397,10 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <Students caps={caps} />
     case 'academics':
       return <Academics caps={caps} />
+    case 'curriculum':
+      return <Curriculum />
+    case 'courses_subjects':
+      return <CoursesSubjects />
     case 'attendance':
       return <Attendance caps={caps} />
     case 'examinations':
@@ -504,6 +538,8 @@ function NavGlyph({ moduleKey }: { moduleKey: string }) {
     case 'students':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m3 8 9-4 9 4-9 4-9-4Z" /><path d="M7 10v4c0 1.7 2.2 3 5 3s5-1.3 5-3v-4" /></svg>
     case 'academics':
+    case 'curriculum':
+    case 'courses_subjects':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v18H6.5A2.5 2.5 0 0 0 4 23V5.5Z" /><path d="M12 3v18" /></svg>
     case 'attendance':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m5 12 4 4 10-10" /></svg>

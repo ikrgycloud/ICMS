@@ -1268,11 +1268,54 @@ def add_student(body: StudentIn, ctx=Depends(auth), s=Depends(db)):
 def list_courses(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view")[0])
     dept_map = {d.id: d.code for d in s.query(D.Department).all()}
+    program_map = {p.id: p.name for p in s.query(D.Program).all()}
     rows = s.query(D.Course).order_by(D.Course.code).all()
     return {"courses": [{
         "id": r.id, "code": r.code, "title": r.title, "credits": r.credits,
         "semester": r.semester, "dept": dept_map.get(r.dept_id, ""),
-    } for r in rows]}
+        "program": program_map.get(r.program_id, "B.Tech"), "regulation": r.regulation or "R2023",
+        "course_type": r.course_type or "Core", "category": r.category or "Professional Core",
+        "ltp": r.ltp or "", "prerequisite": r.prerequisite or "", "status": r.status or "Active",
+        "description": r.description or "",
+    } for r in rows], "can_create": can(s, ctx, "academics", "create_course")}
+
+
+class CourseIn(BaseModel):
+    code: str
+    title: str
+    dept_code: str
+    credits: int = 3
+    semester: int = 1
+    program: str = "B.Tech"
+    regulation: str = "R2023"
+    course_type: str = "Core"
+    category: str = "Professional Core"
+    ltp: str = "3-0-0"
+    prerequisite: str = ""
+    description: str = ""
+
+
+@router.post("/academics/courses")
+def create_course(body: CourseIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "academics", "create_course")
+    require(dec)
+    code = body.code.strip().upper()
+    if not code or not body.title.strip() or body.credits < 1 or body.semester not in range(1, 9):
+        raise HTTPException(400, "Provide a course code, title, valid credits, and semester (1–8).")
+    if s.query(D.Course).filter(D.Course.code == code).first():
+        raise HTTPException(400, "A course with this code already exists.")
+    dept = s.query(D.Department).filter(D.Department.code == body.dept_code).first()
+    if not dept:
+        raise HTTPException(400, "Choose a valid department.")
+    program = s.query(D.Program).filter(D.Program.dept_id == dept.id, D.Program.level == "UG").first()
+    course = D.Course(id=uid(), tenant_id=TENANT, dept_id=dept.id, program_id=program.id if program else None,
+                      code=code, title=body.title.strip(), credits=body.credits, semester=body.semester,
+                      description=body.description.strip(), regulation=body.regulation.strip() or "R2023",
+                      course_type=body.course_type, category=body.category.strip() or "Professional Core",
+                      ltp=body.ltp.strip(), prerequisite=body.prerequisite.strip(), status="Active")
+    s.add(course); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "course.create", f"course:{course.id}", "", "Active", f"Created {code} — {course.title}")
+    return {"id": course.id, "decision": dec.as_dict()}
 
 
 @router.get("/academics/sections")

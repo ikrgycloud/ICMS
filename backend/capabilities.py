@@ -18,6 +18,7 @@ through authorize() in authority.py. This map only decides what is *offered*.
 
 # App module keys and their display metadata (icon is a glyph used by the UI).
 MODULES = {
+    "curriculum":   {"label": "Curriculum", "icon": "Curr", "group": "Academics"},
     "overview":     {"label": "Overview",      "icon": "◆", "group": "Workspace"},
     "my_schedule":  {"label": "My Schedule",   "icon": "📅", "group": "Workspace"},
     "calendar":     {"label": "Calendar",      "icon": "📆", "group": "Workspace"},
@@ -66,10 +67,10 @@ OFFICE_MODULES = {
     8:  ["students", "grievance", "hostel", "approvals"],                          # Dean Student Affairs
     9:  ["research", "analytics", "approvals"],                                    # Dean R&D / IQAC
     10: ["academics", "students", "attendance", "examinations", "hr", "approvals"],# HOD
-    11: ["academics", "attendance", "examinations", "research"],                   # Professor
-    12: ["academics", "attendance", "examinations", "research"],                   # Associate Professor
-    13: ["academics", "attendance", "examinations"],                              # Assistant Professor
-    14: ["academics", "attendance", "examinations"],                              # Lecturer
+    11: ["my_schedule", "academics", "attendance", "examinations", "research"], # Professor
+    12: ["my_schedule", "academics", "attendance", "examinations", "research"], # Associate Professor
+    13: ["my_schedule", "academics", "attendance", "examinations"],              # Assistant Professor
+    14: ["my_schedule", "academics", "attendance", "examinations"],              # Lecturer
     15: ["admissions", "students", "approvals"],                                   # Admission Office
     16: ["examinations", "students", "approvals"],                                 # Exam Controller
     17: ["academics", "attendance", "approvals"],                                  # Academic Coordinator
@@ -108,7 +109,7 @@ MODULE_ACTIONS = {
     "academic_calendar": {"view": "view", "create": "create", "edit": "edit",
                           "delete": "delete"},
     "students":     {"view": "view", "add": "create", "edit": "edit"},
-    "academics":    {"view": "view", "create_section": "create", "edit": "edit",
+    "academics":    {"view": "view", "create_section": "create", "create_course": "create", "edit": "edit",
                      "assign_faculty": "assign"},
     "attendance":   {"view": "view", "mark": "create", "correct": "edit"},
     "examinations": {"view": "view", "enter_marks": "create", "moderate": "verify",
@@ -150,6 +151,7 @@ ACTION_OFFICE_ALLOW = {
     ("students", "add"): {15, 35},                    # Admissions / Front office own creation
     ("students", "edit"): {10, 15, 35},               # Principal has oversight, not record editing
     ("academics", "create_section"): {6, 10, 17},     # Dean Acad, HOD, Acad Coordinator
+    ("academics", "create_course"): {6, 10, 17},      # Curriculum owners
     ("academics", "assign_faculty"): {6, 10, 17},
     ("attendance", "mark"): {10, 11, 12, 13, 14, 17},  # HOD + faculty + coordinator
     ("attendance", "correct"): {10, 17},
@@ -199,6 +201,8 @@ def action_allowed_for_office(module: str, action: str, office_n: int) -> bool:
 def modules_for_office(n: int) -> list:
     """Ordered, de-duplicated module list for an office."""
     mods = list(OFFICE_MODULES.get(n, []))
+    if n in {4, 5, 6, 10, 17}:
+        mods.append("curriculum")
     # base modules always available, appended after the office-specific ones
     ordered = []
     for m in ["overview"] + mods + [x for x in BASE_MODULES if x != "overview"]:

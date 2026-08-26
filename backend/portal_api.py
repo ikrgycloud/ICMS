@@ -13,14 +13,14 @@ this router serves the signed-in person's OWN world:
 This is what makes every login genuinely different: two people with the same
 module can see completely different, personally-relevant data.
 """
-from datetime import date
+from datetime import date, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 
 from core import db, auth
 from database import office
 import domain_models as D
-from models import User
+from models import User, Notification
 
 router = APIRouter(prefix="/api/portal")
 
@@ -233,14 +233,107 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
                       .filter(D.Enrollment.section_id.in_(sec_ids),
                               D.Enrollment.status == "enrolled").count())
     dept = s.query(D.Department).get(stf.dept_id) if stf.dept_id else None
-    # my pending leave
-    my_leave = s.query(D.LeaveRequest).filter(D.LeaveRequest.staff_id == stf.id).all()
+    course_map = {course.id: course for course in s.query(D.Course).all()}
+    enrollments = s.query(D.Enrollment).filter(D.Enrollment.section_id.in_(sec_ids), D.Enrollment.status == "enrolled").all() if sec_ids else []
+    enrollment_by_section = {section.id: 0 for section in secs}
+    for enrollment in enrollments: enrollment_by_section[enrollment.section_id] = enrollment_by_section.get(enrollment.section_id, 0) + 1
+    attendance = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.section_id.in_(sec_ids)).all() if sec_ids else []
+    attendance_by_section = {section.id: [] for section in secs}
+    for record in attendance: attendance_by_section.setdefault(record.section_id, []).append(record)
+    assessments = s.query(D.Assessment).filter(D.Assessment.section_id.in_(sec_ids)).all() if sec_ids else []
+    marks = s.query(D.Mark).filter(D.Mark.assessment_id.in_([item.id for item in assessments])).all() if assessments else []
+    marks_by_assessment = {}
+    for mark in marks: marks_by_assessment.setdefault(mark.assessment_id, []).append(mark)
+    section_rows = []
+    for section in secs:
+        records = attendance_by_section.get(section.id, [])
+        attendance_pct = round(100 * sum(1 for record in records if record.present) / len(records), 1) if records else None
+        course = course_map.get(section.course_id)
+        section_rows.append({"id": section.id, "course_code": course.code if course else "", "title": course.title if course else "", "section": section.section_code, "schedule": section.schedule, "room": section.room, "enrolled": enrollment_by_section.get(section.id, 0), "capacity": section.capacity, "attendance_pct": attendance_pct})
+    total_attendance = sum(len(records) for records in attendance_by_section.values())
+    present_attendance = sum(sum(1 for record in records if record.present) for records in attendance_by_section.values())
+    average_attendance = round(100 * present_attendance / total_attendance, 1) if total_attendance else None
+    max_marks_by_assessment = {assessment.id: assessment.max_marks for assessment in assessments}
+    possible_marks = sum(max_marks_by_assessment.get(mark.assessment_id, 100) for mark in marks)
+    average_score = round(10 * sum(mark.score for mark in marks) / possible_marks, 2) if possible_marks else None
+    pending = []
+    # A class on today's timetable still needs attendance when no record has
+    # been saved for that section/date.  This derives the reminder from the
+    # same assigned sections and attendance rows used by the rest of the page.
+    today_short = date.today().strftime("%a")
+    for section in secs:
+        scheduled_days = (section.schedule or "").split(maxsplit=1)[0].split("/")
+        has_class_today = any(day[:3].title() == today_short for day in scheduled_days)
+        already_marked = any(record.on_date == date.today() for record in attendance_by_section.get(section.id, []))
+        if has_class_today and not already_marked:
+            course = course_map.get(section.course_id)
+            pending.append({"id": f"attendance-{section.id}-{date.today().isoformat()}", "kind": "attendance",
+                            "title": f"Mark attendance: {course.code if course else 'Section'} ({section.section_code})",
+                            "course": course.title if course else "Assigned section", "count": 1,
+                            "due": "Today"})
+    marks_pending = 0
+    for assessment in assessments:
+        missing = max(0, enrollment_by_section.get(assessment.section_id, 0) - len(marks_by_assessment.get(assessment.id, [])))
+        if missing:
+            marks_pending += 1
+            section = next((item for item in section_rows if item["id"] == assessment.section_id), None)
+            pending.append({"id": assessment.id, "kind": "marks", "title": f"Enter marks: {assessment.name}", "course": f"{section['course_code']} ({section['section']})" if section else "Section", "count": missing, "due": "Marks pending"})
+    notes = s.query(Notification).filter(Notification.user_id == ctx["sub"]).order_by(Notification.created_at.desc()).limit(4).all()
+    day_indexes = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
+    today = date.today()
+    week_start = today - timedelta(days=today.weekday())
+    teaching_schedule = []
+    for section in secs:
+        parts = (section.schedule or "").split(maxsplit=1)
+        days, class_time = (parts[0], parts[1] if len(parts) > 1 else "Time pending") if parts else ("", "Time pending")
+        course = course_map.get(section.course_id)
+        for day_name in days.split("/"):
+            day_index = day_indexes.get(day_name[:3].title())
+            if day_index is None:
+                continue
+            class_date = week_start + timedelta(days=day_index)
+            teaching_schedule.append({"id": f"{section.id}-{day_index}", "day": class_date.strftime("%a"),
+                                      "date": class_date.isoformat(), "time": class_time,
+                                      "section": section.section_code,
+                                      "course_code": course.code if course else "",
+                                      "subject": course.title if course else "Course unavailable",
+                                      "room": section.room or "Room pending"})
+    teaching_schedule.sort(key=lambda item: (item["date"], item["time"], item["course_code"]))
+    classes_this_week = len(teaching_schedule)
+
+    attendance_trend = []
+    for offset in range(5, -1, -1):
+        start = week_start - timedelta(weeks=offset)
+        end = start + timedelta(days=6)
+        records = [record for record in attendance if start <= record.on_date <= end]
+        attendance_trend.append({"label": f"Wk {6 - offset}",
+                                 "value": round(100 * sum(record.present for record in records) / len(records), 1) if records else None})
+    distribution = {"80% and above": 0, "60% – 79%": 0, "40% – 59%": 0, "Below 40%": 0}
+    for mark in marks:
+        maximum = max_marks_by_assessment.get(mark.assessment_id, 0)
+        if not maximum:
+            continue
+        score_pct = 100 * mark.score / maximum
+        if score_pct >= 80: distribution["80% and above"] += 1
+        elif score_pct >= 60: distribution["60% – 79%"] += 1
+        elif score_pct >= 40: distribution["40% – 59%"] += 1
+        else: distribution["Below 40%"] += 1
     return {
         "profile": {"name": stf.name, "emp_id": stf.emp_id,
                     "designation": stf.designation,
-                    "department": dept.name if dept else ""},
-        "kpis": {"sections": len(secs), "students": n_students,
-                 "leave_requests": len(my_leave)},
+                    "department": dept.name if dept else "", "email": stf.email,
+                    "phone": stf.phone or None, "office_hours": stf.office_hours or None},
+        "kpis": {"sections": len(secs), "students": n_students, "classes_this_week": classes_this_week,
+                 "pending_tasks": len(pending), "marks_entry_pending": marks_pending,
+                 "average_attendance": average_attendance, "average_grade": average_score},
+        "sections": section_rows, "pending_tasks": pending[:4],
+        "announcements": [{"id": item.id, "title": item.title, "detail": item.detail, "date": item.created_at.date().isoformat()} for item in notes],
+        "teaching_schedule": teaching_schedule,
+        "attendance_trend": attendance_trend,
+        "marks_distribution": [{"label": label, "value": value} for label, value in distribution.items()],
+        "performance": {"assessments": len(assessments), "average_score": round(average_score * 10, 1) if average_score is not None else None,
+                        "marks_entered": len(marks), "expected_marks": sum(enrollment_by_section.get(item.section_id, 0) for item in assessments)},
+        "role_context": {"active_role": ctx.get("role"), "available_roles": office(ctx["office_n"])["internal_roles"]},
     }
 
 
@@ -261,6 +354,31 @@ def faculty_sections(ctx=Depends(auth), s=Depends(db)):
                     "schedule": sec.schedule, "room": sec.room,
                     "enrolled": enrolled, "assessments": asmts})
     return {"sections": out}
+
+
+@router.get("/faculty/schedule")
+def faculty_schedule(ctx=Depends(auth), s=Depends(db)):
+    """Weekly schedule built from the faculty member's assigned sections and staff events."""
+    stf = _staff_or_404(s, ctx)
+    today = date.today(); week_start = today - timedelta(days=today.weekday()); week_end = week_start + timedelta(days=6)
+    courses = {row.id: row for row in s.query(D.Course).all()}
+    days = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
+    events = []
+    sections = s.query(D.Section).filter(D.Section.faculty_person_id == stf.id).all()
+    for section in sections:
+        parts = (section.schedule or "").split(maxsplit=1); names = parts[0] if parts else ""; class_time = parts[1] if len(parts) > 1 else "Time pending"
+        course = courses.get(section.course_id)
+        for name in names.split("/"):
+            index = days.get(name[:3].title())
+            if index is not None:
+                events.append({"id": f"class-{section.id}-{index}", "date": (week_start + timedelta(days=index)).isoformat(), "time": class_time, "title": f"{course.code if course else 'Course'} ({section.section_code})", "detail": course.title if course else "Assigned section", "location": section.room or "Room pending", "type": "class", "route": "attendance"})
+    for event in s.query(D.CalendarEvent).filter(D.CalendarEvent.status == "published").all():
+        if not event.start_at or not (week_start <= event.start_at.date() <= week_end) or event.audience not in ("all", "staff", "leadership"):
+            continue
+        events.append({"id": f"event-{event.id}", "date": event.start_at.date().isoformat(), "time": "All day" if event.all_day else event.start_at.strftime("%H:%M"), "title": event.title, "detail": event.category, "location": event.location or "Campus", "type": "meeting", "route": "calendar"})
+    events.sort(key=lambda item: (item["date"], item["time"], item["title"]))
+    leaves = s.query(D.LeaveRequest).filter(D.LeaveRequest.staff_id == stf.id, D.LeaveRequest.status.in_(["pending", "approved"])).count()
+    return {"profile": {"name": stf.name, "email": stf.email, "phone": stf.phone, "office_hours": stf.office_hours}, "role": ctx.get("role"), "week_start": week_start.isoformat(), "events": events, "summary": {"classes": sum(item["type"] == "class" for item in events), "meetings": sum(item["type"] == "meeting" for item in events), "sections": len(sections), "leave_requests": leaves}}
 
 
 @router.get("/faculty/section/{section_id}/students")

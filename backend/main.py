@@ -14,8 +14,9 @@ import uuid
 import time
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy import desc, func, or_
 
@@ -36,7 +37,12 @@ from models import (User, Person, Role, RolePermission, Delegation, WorkflowInst
 from domain_api import router as domain_router
 from portal_api import router as portal_router
 from integrations_api import router as integrations_router
+from sms_api import router as sms_router
 from domain_seed import seed_domain
+
+# Use the same named security scheme as modular routers. Swagger UI now has a
+# single Authorize action which applies the bearer token to protected APIs.
+bearer_scheme = HTTPBearer(scheme_name="BearerAuth", auto_error=False)
 
 app = FastAPI(title="ICMS — Integrated College/University Management System",
               version="1.0")
@@ -45,6 +51,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
 app.include_router(domain_router)
 app.include_router(portal_router)
 app.include_router(integrations_router)
+app.include_router(sms_router)
 
 
 @app.on_event("startup")
@@ -67,11 +74,11 @@ def db():
         s.close()
 
 
-def auth(authorization: str = Header(None)) -> dict:
-    if not authorization or not authorization.startswith("Bearer "):
+def auth(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> dict:
+    if not credentials or credentials.scheme.lower() != "bearer":
         raise HTTPException(401, "Missing token")
     try:
-        return decode_token(authorization.split(" ", 1)[1])
+        return decode_token(credentials.credentials)
     except Exception:
         raise HTTPException(401, "Invalid or expired token")
 

@@ -528,9 +528,16 @@ def _seed_core_domain(s):
         for ccode, title, credits, sem in courses:
             cid = f"course_{ccode.lower()}"
             course_rows.append((cid, did, code, sem))
-            s.add(D.Course(id=cid, tenant_id=TENANT, dept_id=did, code=ccode,
+            is_elective = sem == 7
+            ltp = "3-1-0" if credits >= 4 else ("3-0-0" if credits == 3 else "2-0-0")
+            s.add(D.Course(id=cid, tenant_id=TENANT, dept_id=did,
+                           program_id=f"prog_{code.lower()}_btech", code=ccode,
                            title=title, credits=credits, semester=sem,
-                           description=f"{title} core course for semester {sem}."))
+                           description=f"{title} course for semester {sem}.",
+                           regulation="R2023", course_type="Elective" if is_elective else "Core",
+                           category="Professional Elective" if is_elective else "Professional Core",
+                           ltp=ltp, prerequisite="" if sem == 1 else f"Semester {sem - 2} foundation",
+                           status="Active"))
 
     faculty_by_dept = {code: [] for code in dept_ids}
     fac_i = 0
@@ -542,6 +549,8 @@ def _seed_core_domain(s):
             nm = _name()
             s.add(D.StaffMember(id=fid, tenant_id=TENANT, emp_id=f"FAC{fac_i:04d}",
                                 name=nm, email=f"fac{fac_i}@icms.edu", dept_id=did,
+                                phone=f"9{R.randint(100000000, 999999999)}",
+                                office_hours="Mon–Fri 02:00 PM – 04:00 PM",
                                 designation=R.choice(FACULTY_TITLES),
                                 office_n=R.choice([11, 12, 13, 14]),
                                 campus=CAMPUS_SCOPES[0],

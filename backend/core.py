@@ -8,12 +8,17 @@ Kept in one place so both routers behave identically and the audit chain stays
 single-writer-consistent.
 """
 import uuid
-from fastapi import Header, HTTPException
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import desc
 
 from database import SessionLocal, TENANT
 from models import AuditLog, Notification, Delegation
 from authority import decode_token, audit_hash
+
+# A named bearer scheme makes FastAPI expose one global "Authorize" control in
+# Swagger UI.  The UI stores the token for every protected ICMS endpoint.
+bearer_scheme = HTTPBearer(scheme_name="BearerAuth", auto_error=False)
 
 
 def db():
@@ -24,11 +29,11 @@ def db():
         s.close()
 
 
-def auth(authorization: str = Header(None)) -> dict:
-    if not authorization or not authorization.startswith("Bearer "):
+def auth(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> dict:
+    if not credentials or credentials.scheme.lower() != "bearer":
         raise HTTPException(401, "Missing token")
     try:
-        return decode_token(authorization.split(" ", 1)[1])
+        return decode_token(credentials.credentials)
     except Exception:
         raise HTTPException(401, "Invalid or expired token")
 

@@ -17,6 +17,7 @@ services:
 
   backend:
     build: ./backend
+    env_file: ./backend/.env
     environment:
       DATABASE_URL: postgresql://icms:icms_secret@db:5432/icms
       JWT_SECRET: change-me-in-production

@@ -225,6 +225,8 @@ CREATE TABLE staff_members (
 	emp_id VARCHAR, 
 	name VARCHAR, 
 	email VARCHAR, 
+	phone VARCHAR,
+	office_hours VARCHAR,
 	dept_id VARCHAR, 
 	designation VARCHAR, 
 	office_n INTEGER, 

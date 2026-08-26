@@ -8,7 +8,7 @@ import os
 import json
 import re
 from datetime import datetime, timedelta
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from models import (Base, Tenant, OrgScope, Person, User, Role, Permission,
@@ -49,6 +49,38 @@ def slug(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")
 
 
+def _ensure_course_columns():
+    """Small additive migration for the course-catalog fields introduced after v1."""
+    if not inspect(engine).has_table("courses"):
+        return
+    wanted = {
+        "program_id": "VARCHAR", "regulation": "VARCHAR", "course_type": "VARCHAR",
+        "category": "VARCHAR", "ltp": "VARCHAR", "prerequisite": "VARCHAR", "status": "VARCHAR",
+    }
+    existing = {column["name"] for column in inspect(engine).get_columns("courses")}
+    with engine.begin() as connection:
+        for name, column_type in wanted.items():
+            if name not in existing:
+                connection.execute(text(f"ALTER TABLE courses ADD COLUMN {name} {column_type}"))
+        connection.execute(text("UPDATE courses SET regulation = 'R2023' WHERE regulation IS NULL OR regulation = ''"))
+        connection.execute(text("UPDATE courses SET course_type = CASE WHEN semester = 7 THEN 'Elective' ELSE 'Core' END WHERE course_type IS NULL OR course_type = ''"))
+        connection.execute(text("UPDATE courses SET category = CASE WHEN semester = 7 THEN 'Professional Elective' ELSE 'Professional Core' END WHERE category IS NULL OR category = ''"))
+        connection.execute(text("UPDATE courses SET ltp = CASE WHEN credits >= 4 THEN '3-1-0' WHEN credits = 3 THEN '3-0-0' ELSE '2-0-0' END WHERE ltp IS NULL OR ltp = ''"))
+        connection.execute(text("UPDATE courses SET status = 'Active' WHERE status IS NULL OR status = ''"))
+
+
+def _ensure_staff_contact_columns():
+    """Add optional faculty contact fields without requiring a database reset."""
+    if not inspect(engine).has_table("staff_members"):
+        return
+    wanted = {"phone": "VARCHAR", "office_hours": "VARCHAR"}
+    existing = {column["name"] for column in inspect(engine).get_columns("staff_members")}
+    with engine.begin() as connection:
+        for name, column_type in wanted.items():
+            if name not in existing:
+                connection.execute(text(f"ALTER TABLE staff_members ADD COLUMN {name} {column_type}"))
+
+
 # Demo username for each office head (matches the login screen's demo accounts).
 DEMO_USERNAMES = {
     1: "chairman", 2: "vice_chairman", 3: "campus_head", 4: "principal",
@@ -67,6 +99,8 @@ DEMO_USERNAMES = {
 
 def seed():
     Base.metadata.create_all(engine)
+    _ensure_course_columns()
+    _ensure_staff_contact_columns()
     s = SessionLocal()
     try:
         # Tenant + scope tree (Document §6, §11).

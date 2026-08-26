@@ -149,6 +149,7 @@ export const api = {
 
   // ---- academics ----
   courses: () => req('/academics/courses'),
+  createCourse: (b: any) => req('/academics/courses', { method: 'POST', body: JSON.stringify(b) }),
   sections: () => req('/academics/sections'),
   createSection: (b: any) => req('/academics/sections', { method: 'POST', body: JSON.stringify(b) }),
 
@@ -220,6 +221,7 @@ export const api = {
   studentResults: () => req('/portal/student/results'),
   studentFees: () => req('/portal/student/fees'),
   facultyHome: () => req('/portal/faculty/home'),
+  facultySchedule: () => req('/portal/faculty/schedule'),
   facultySections: () => req('/portal/faculty/sections'),
   facultySectionStudents: (id: string) => req(`/portal/faculty/section/${id}/students`),
   parentHome: () => req('/portal/parent/home'),

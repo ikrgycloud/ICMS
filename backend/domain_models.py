@@ -57,11 +57,18 @@ class Course(Base):
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
     dept_id = Column(String, ForeignKey("departments.id"))
+    program_id = Column(String, ForeignKey("programs.id"), nullable=True)
     code = Column(String)              # CS101
     title = Column(String)
     credits = Column(Integer, default=3)
     semester = Column(Integer, default=1)
     description = Column(Text, default="")
+    regulation = Column(String, default="R2023")
+    course_type = Column(String, default="Core")
+    category = Column(String, default="Professional Core")
+    ltp = Column(String, default="3-0-0")
+    prerequisite = Column(String, default="")
+    status = Column(String, default="Active")
 
 
 class Section(Base):
@@ -110,6 +117,8 @@ class StaffMember(Base):
     emp_id = Column(String, index=True)
     name = Column(String)
     email = Column(String, default="")
+    phone = Column(String, default="")
+    office_hours = Column(String, default="")
     dept_id = Column(String, nullable=True)
     designation = Column(String)       # Professor, Assistant Professor, Clerk...
     office_n = Column(Integer, nullable=True)
