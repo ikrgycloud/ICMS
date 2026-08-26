@@ -100,7 +100,39 @@ class Student(Base):
     cgpa = Column(Float, default=0.0)
     hosteller = Column(Boolean, default=False)
     scholarship = Column(Boolean, default=False)
+    blood_group = Column(String, default="")
+    student_type = Column(String, default="Regular")
     user_id = Column(String, nullable=True)     # link to portal login if any
+
+
+class StudentCalendarEvent(Base):
+    __tablename__ = "student_calendar_events"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    student_id = Column(String, ForeignKey("students.id"), index=True)
+    title = Column(String)
+    note = Column(Text, default="")
+    start_at = Column(DateTime, nullable=False)
+    end_at = Column(DateTime, nullable=False)
+    status = Column(String, default="active")
+    created_by = Column(String, default="")
+    updated_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class StudentCourseViewPreference(Base):
+    __tablename__ = "student_course_view_preferences"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    student_id = Column(String, ForeignKey("students.id"), index=True)
+    section_id = Column(String, ForeignKey("sections.id"), index=True)
+    faculty_label = Column(String, default="")
+    schedule_label = Column(String, default="")
+    created_by = Column(String, default="")
+    updated_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 
 class StaffMember(Base):
@@ -141,7 +173,10 @@ class AttendanceRecord(Base):
     student_id = Column(String, ForeignKey("students.id"))
     on_date = Column(Date, default=date.today)
     present = Column(Boolean, default=True)
+    status = Column(String, default="present")
+    note = Column(String, default="")
     marked_by = Column(String, default="")
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 
 class Assessment(Base):
@@ -153,6 +188,19 @@ class Assessment(Base):
     max_marks = Column(Float, default=100)
     weight = Column(Float, default=1.0)
     locked = Column(Boolean, default=False)
+    assessment_type = Column(String, default="exam")
+    scheduled_at = Column(DateTime, nullable=True)
+    end_at = Column(DateTime, nullable=True)
+    published = Column(Boolean, default=False)
+    instructions = Column(Text, default="")
+    status = Column(String, default="draft")
+    academic_year = Column(String, default="")
+    created_by = Column(String, default="")
+    updated_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    published_at = Column(DateTime, nullable=True)
+    published_by = Column(String, default="")
 
 
 class Mark(Base):
@@ -164,6 +212,11 @@ class Mark(Base):
     score = Column(Float, default=0)
     entered_by = Column(String, default="")
     entered_at = Column(DateTime, default=datetime.utcnow)
+    status = Column(String, default="published")
+    published_at = Column(DateTime, nullable=True)
+    published_by = Column(String, default="")
+    is_valid = Column(Boolean, default=True)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 
 class ResultSheet(Base):
@@ -176,6 +229,9 @@ class ResultSheet(Base):
     status = Column(String, default="draft")   # draft/moderated/published
     published_by = Column(String, default="")
     published_at = Column(DateTime, nullable=True)
+    academic_year = Column(String, default="")
+    semester = Column(Integer, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 
 class StudentSubjectResult(Base):
@@ -192,6 +248,75 @@ class StudentSubjectResult(Base):
     outcome = Column(String)  # passed / failed / result_pending
     published_at = Column(DateTime, nullable=True)
     source = Column(String, default="examination")  # examination / development_sample
+    course_id = Column(String, nullable=True)
+    section_id = Column(String, nullable=True)
+    result_sheet_id = Column(String, nullable=True)
+    credits = Column(Float, default=0)
+    grade = Column(String, default="")
+    grade_point = Column(Float, nullable=True)
+    percentage = Column(Float, nullable=True)
+    total_score = Column(Float, nullable=True)
+    max_score = Column(Float, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ExamScheduleEntry(Base):
+    __tablename__ = "exam_schedule_entries"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    assessment_id = Column(String, ForeignKey("assessments.id"), nullable=True)
+    section_id = Column(String, ForeignKey("sections.id"))
+    academic_year = Column(String, index=True)
+    semester = Column(Integer, index=True)
+    exam_type = Column(String, default="exam")
+    start_at = Column(DateTime, nullable=True)
+    end_at = Column(DateTime, nullable=True)
+    venue = Column(String, default="")
+    mode = Column(String, default="Offline")
+    status = Column(String, default="scheduled")  # scheduled/rescheduled/completed/cancelled
+    version_no = Column(Integer, default=1)
+    is_active = Column(Boolean, default=True)
+    managed_by_office_n = Column(Integer, nullable=True)
+    note = Column(Text, default="")
+    created_by = Column(String, default="")
+    updated_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ExamScheduleHistory(Base):
+    __tablename__ = "exam_schedule_history"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    schedule_id = Column(String, ForeignKey("exam_schedule_entries.id"))
+    assessment_id = Column(String, ForeignKey("assessments.id"), nullable=True)
+    change_type = Column(String, default="created")
+    previous_start_at = Column(DateTime, nullable=True)
+    previous_end_at = Column(DateTime, nullable=True)
+    previous_venue = Column(String, default="")
+    previous_status = Column(String, default="")
+    new_start_at = Column(DateTime, nullable=True)
+    new_end_at = Column(DateTime, nullable=True)
+    new_venue = Column(String, default="")
+    new_status = Column(String, default="")
+    note = Column(Text, default="")
+    created_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ExamSeatAssignment(Base):
+    __tablename__ = "exam_seat_assignments"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    schedule_id = Column(String, ForeignKey("exam_schedule_entries.id"), nullable=True)
+    assessment_id = Column(String, ForeignKey("assessments.id"), nullable=True)
+    student_id = Column(String, ForeignKey("students.id"), index=True)
+    seat_label = Column(String, default="")
+    seat_zone = Column(String, default="")
+    note = Column(Text, default="")
+    assigned_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 
 # --------------------------------------------------------------------------- #
@@ -384,6 +509,63 @@ class AcademicCalendarEntry(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
+class TimetableEntry(Base):
+    __tablename__ = "timetable_entries"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    section_id = Column(String, ForeignKey("sections.id"), index=True)
+    day_of_week = Column(Integer, default=0)     # Monday = 0
+    start_time = Column(String, default="09:00")
+    end_time = Column(String, default="10:00")
+    room = Column(String, default="")
+    building = Column(String, default="")
+    effective_from = Column(Date, nullable=True)
+    effective_to = Column(Date, nullable=True)
+    status = Column(String, default="active")    # active / cancelled / inactive
+    created_by = Column(String, default="")
+    updated_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Assignment(Base):
+    __tablename__ = "assignments"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    section_id = Column(String, ForeignKey("sections.id"), index=True)
+    title = Column(String)
+    description = Column(Text, default="")
+    assigned_at = Column(DateTime, default=datetime.utcnow)
+    due_at = Column(DateTime, nullable=True)
+    status = Column(String, default="published")  # draft / published / closed
+    reference_url = Column(String, default="")
+    created_by = Column(String, default="")
+    updated_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Announcement(Base):
+    __tablename__ = "announcements"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    title = Column(String)
+    body = Column(Text, default="")
+    audience = Column(String, default="all_students")
+    campus = Column(String, default="")
+    department_id = Column(String, ForeignKey("departments.id"), nullable=True)
+    program_id = Column(String, ForeignKey("programs.id"), nullable=True)
+    section_id = Column(String, ForeignKey("sections.id"), nullable=True)
+    student_id = Column(String, ForeignKey("students.id"), nullable=True)
+    published_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    status = Column(String, default="published")
+    created_by = Column(String, default="")
+    owner_office_n = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
 # --------------------------------------------------------------------------- #
 #  Library
 # --------------------------------------------------------------------------- #
@@ -405,6 +587,7 @@ class BookLoan(Base):
     tenant_id = Column(String, index=True)
     book_id = Column(String, ForeignKey("books.id"))
     borrower = Column(String)          # roll_no or emp_id
+    student_id = Column(String, ForeignKey("students.id"), nullable=True)
     borrower_name = Column(String, default="")
     issued_on = Column(Date, default=date.today)
     due_on = Column(Date, nullable=True)
@@ -552,3 +735,18 @@ class Complaint(Base):
     status = Column(String, default="open")      # open/investigating/resolved
     severity = Column(String, default="normal")
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class StudentIdentityCard(Base):
+    __tablename__ = "student_identity_cards"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    student_id = Column(String, ForeignKey("students.id"), index=True)
+    card_number = Column(String, unique=True, index=True)
+    blood_group = Column(String, default="")
+    issued_on = Column(Date, default=date.today)
+    valid_until = Column(Date, nullable=True)
+    status = Column(String, default="active")
+    verification_token = Column(String, unique=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)

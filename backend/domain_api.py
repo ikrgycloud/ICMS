@@ -11,7 +11,7 @@ the control.
 from datetime import date, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import desc, func
+from sqlalchemy import and_, desc, func, or_
 
 from core import db, auth, uid, write_audit, notify, active_delegation_for
 from database import office, TENANT, slug
@@ -77,6 +77,56 @@ def actor_name(s, ctx):
         return ctx["sub"]
     p = s.query(Person).get(u.person_id)
     return p.name if p else u.username
+
+
+def _staff_profile(s, ctx):
+    return s.query(D.StaffMember).filter(D.StaffMember.user_id == ctx["sub"]).first()
+
+
+def _section_or_404(s, section_id: str):
+    row = s.query(D.Section).get(section_id)
+    if not row:
+        raise HTTPException(404, "Section not found")
+    return row
+
+
+def _section_course_payloads(s):
+    return {c.id: c for c in s.query(D.Course).all()}
+
+
+def _section_faculty_names(s):
+    return {f.id: f.name for f in s.query(D.StaffMember).all()}
+
+
+def _can_manage_section_for_timetable(s, ctx, section):
+    if ctx["office_n"] == 6:
+        return True
+    staff = _staff_profile(s, ctx)
+    if ctx["office_n"] in {10, 17}:
+        return bool(staff and staff.dept_id == section.dept_id)
+    return False
+
+
+def _can_manage_section_for_tasks(s, ctx, section):
+    staff = _staff_profile(s, ctx)
+    if ctx["office_n"] in {11, 12, 13, 14}:
+        return bool(staff and section.faculty_person_id == staff.id)
+    if ctx["office_n"] in {10, 17}:
+        return bool(staff and staff.dept_id == section.dept_id)
+    return ctx["office_n"] == 6
+
+
+def _can_manage_section_for_assessments(s, ctx, section):
+    staff = _staff_profile(s, ctx)
+    if ctx["office_n"] == 16:
+        return True
+    if ctx["office_n"] in {11, 12, 13, 14}:
+        return bool(staff and section.faculty_person_id == staff.id)
+    return bool(ctx["office_n"] in {10, 17} and staff and staff.dept_id == section.dept_id)
+
+
+def _format_time_label(start_time: str, end_time: str) -> str:
+    return f"{start_time} - {end_time}"
 
 
 # --------------------------------------------------------------------------- #
@@ -1322,6 +1372,218 @@ def create_section(body: SectionIn, ctx=Depends(auth), s=Depends(db)):
     return {"id": sid, "decision": dec.as_dict()}
 
 
+@router.get("/academics/section/{section_id}/timetable")
+def section_timetable(section_id: str, ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "academics", "view")[0])
+    section = _section_or_404(s, section_id)
+    rows = (s.query(D.TimetableEntry)
+            .filter(D.TimetableEntry.section_id == section.id)
+            .order_by(D.TimetableEntry.day_of_week, D.TimetableEntry.start_time).all())
+    return {
+        "entries": [{
+            "id": row.id,
+            "day_of_week": row.day_of_week,
+            "start_time": row.start_time,
+            "end_time": row.end_time,
+            "room": row.room,
+            "building": row.building,
+            "status": row.status,
+            "effective_from": row.effective_from.isoformat() if row.effective_from else "",
+            "effective_to": row.effective_to.isoformat() if row.effective_to else "",
+            "slot": _format_time_label(row.start_time, row.end_time),
+        } for row in rows],
+        "can_manage": can(s, ctx, "academics", "manage_timetable"),
+    }
+
+
+class TimetableEntryIn(BaseModel):
+    day_of_week: int
+    start_time: str
+    end_time: str
+    room: str = ""
+    building: str = ""
+    effective_from: str = ""
+    effective_to: str = ""
+
+
+@router.post("/academics/section/{section_id}/timetable")
+def create_timetable_entry(section_id: str, body: TimetableEntryIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "academics", "manage_timetable")
+    require(dec)
+    section = _section_or_404(s, section_id)
+    if not _can_manage_section_for_timetable(s, ctx, section):
+        raise HTTPException(403, "You are not authorized to manage the timetable for this section")
+    who = actor_name(s, ctx)
+    row = D.TimetableEntry(
+        id=uid(), tenant_id=TENANT, section_id=section.id,
+        day_of_week=max(0, min(6, int(body.day_of_week))),
+        start_time=body.start_time, end_time=body.end_time,
+        room=body.room or section.room, building=body.building,
+        effective_from=date.fromisoformat(body.effective_from) if body.effective_from else None,
+        effective_to=date.fromisoformat(body.effective_to) if body.effective_to else None,
+        status="active", created_by=who, updated_by=who,
+    )
+    s.add(row)
+    s.commit()
+    write_audit(s, ctx["sub"], who, ctx["office_n"], "timetable.create",
+                f"timetable:{row.id}", "", "active",
+                f"Created timetable entry for section {section.section_code}")
+    return {"id": row.id, "decision": dec.as_dict()}
+
+
+@router.put("/academics/timetable/{entry_id}")
+def update_timetable_entry(entry_id: str, body: TimetableEntryIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "academics", "manage_timetable")
+    require(dec)
+    row = s.query(D.TimetableEntry).get(entry_id)
+    if not row:
+        raise HTTPException(404, "Timetable entry not found")
+    section = _section_or_404(s, row.section_id)
+    if not _can_manage_section_for_timetable(s, ctx, section):
+        raise HTTPException(403, "You are not authorized to manage the timetable for this section")
+    prev_state = row.status
+    row.day_of_week = max(0, min(6, int(body.day_of_week)))
+    row.start_time = body.start_time
+    row.end_time = body.end_time
+    row.room = body.room or section.room
+    row.building = body.building
+    row.effective_from = date.fromisoformat(body.effective_from) if body.effective_from else None
+    row.effective_to = date.fromisoformat(body.effective_to) if body.effective_to else None
+    row.updated_by = actor_name(s, ctx)
+    row.updated_at = datetime.utcnow()
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "timetable.update",
+                f"timetable:{row.id}", prev_state, row.status,
+                f"Updated timetable entry for section {section.section_code}")
+    return {"id": row.id, "decision": dec.as_dict()}
+
+
+@router.post("/academics/timetable/{entry_id}/deactivate")
+def deactivate_timetable_entry(entry_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "academics", "manage_timetable")
+    require(dec)
+    row = s.query(D.TimetableEntry).get(entry_id)
+    if not row:
+        raise HTTPException(404, "Timetable entry not found")
+    section = _section_or_404(s, row.section_id)
+    if not _can_manage_section_for_timetable(s, ctx, section):
+        raise HTTPException(403, "You are not authorized to manage the timetable for this section")
+    prev_state = row.status
+    row.status = "inactive"
+    row.updated_by = actor_name(s, ctx)
+    row.updated_at = datetime.utcnow()
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "timetable.update",
+                f"timetable:{row.id}", prev_state, row.status,
+                f"Deactivated timetable entry for section {section.section_code}")
+    return {"status": row.status, "decision": dec.as_dict()}
+
+
+@router.get("/academics/section/{section_id}/assignments")
+def section_assignments(section_id: str, ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "academics", "view")[0])
+    rows = (s.query(D.Assignment)
+            .filter(D.Assignment.section_id == section_id)
+            .order_by(desc(D.Assignment.due_at), desc(D.Assignment.assigned_at)).all())
+    return {"assignments": [{
+        "id": row.id,
+        "title": row.title,
+        "description": row.description,
+        "status": row.status,
+        "assigned_at": row.assigned_at.isoformat() if row.assigned_at else "",
+        "due_at": row.due_at.isoformat() if row.due_at else "",
+    } for row in rows]}
+
+
+class AssignmentIn(BaseModel):
+    title: str
+    description: str = ""
+    due_at: str = ""
+    status: str = "published"
+    reference_url: str = ""
+
+
+@router.post("/academics/section/{section_id}/assignments")
+def create_assignment(section_id: str, body: AssignmentIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "academics", "create_task")
+    require(dec)
+    section = _section_or_404(s, section_id)
+    if not _can_manage_section_for_tasks(s, ctx, section):
+        raise HTTPException(403, "You cannot create tasks for this section")
+    who = actor_name(s, ctx)
+    row = D.Assignment(
+        id=uid(), tenant_id=TENANT, section_id=section.id,
+        title=body.title.strip(), description=body.description.strip(),
+        assigned_at=datetime.utcnow(),
+        due_at=datetime.fromisoformat(body.due_at) if body.due_at else None,
+        status=body.status or "published", reference_url=body.reference_url.strip(),
+        created_by=who, updated_by=who,
+    )
+    s.add(row)
+    s.commit()
+    write_audit(s, ctx["sub"], who, ctx["office_n"], "assignment.create",
+                f"assignment:{row.id}", "", row.status,
+                f"Created task '{row.title}' for section {section.section_code}")
+    return {"id": row.id, "decision": dec.as_dict()}
+
+
+@router.put("/academics/assignments/{assignment_id}")
+def update_assignment(assignment_id: str, body: AssignmentIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "academics", "edit_task")
+    require(dec)
+    row = s.query(D.Assignment).get(assignment_id)
+    if not row:
+        raise HTTPException(404, "Assignment not found")
+    section = _section_or_404(s, row.section_id)
+    if not _can_manage_section_for_tasks(s, ctx, section):
+        raise HTTPException(403, "You cannot update tasks for this section")
+    prev_state = row.status
+    row.title = body.title.strip()
+    row.description = body.description.strip()
+    row.due_at = datetime.fromisoformat(body.due_at) if body.due_at else None
+    row.status = body.status or row.status
+    row.reference_url = body.reference_url.strip()
+    row.updated_by = actor_name(s, ctx)
+    row.updated_at = datetime.utcnow()
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "assignment.update",
+                f"assignment:{row.id}", prev_state, row.status,
+                f"Updated task '{row.title}'")
+    return {"id": row.id, "decision": dec.as_dict()}
+
+
+class AnnouncementIn(BaseModel):
+    title: str
+    body: str
+    audience: str = "department"
+    department_id: str | None = None
+    program_id: str | None = None
+    section_id: str | None = None
+    student_id: str | None = None
+    expires_at: str = ""
+
+
+@router.post("/academics/announcements")
+def create_announcement(body: AnnouncementIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "academics", "publish_announcement")
+    require(dec)
+    who = actor_name(s, ctx)
+    audience = (body.audience or "department").strip().lower()
+    row = D.Announcement(
+        id=uid(), tenant_id=TENANT, title=body.title.strip(), body=body.body.strip(),
+        audience=audience, campus="", department_id=body.department_id, program_id=body.program_id,
+        section_id=body.section_id, student_id=body.student_id, published_at=datetime.utcnow(),
+        expires_at=datetime.fromisoformat(body.expires_at) if body.expires_at else None,
+        status="published", created_by=who, owner_office_n=ctx["office_n"],
+    )
+    s.add(row)
+    s.commit()
+    write_audit(s, ctx["sub"], who, ctx["office_n"], "announcement.publish",
+                f"announcement:{row.id}", "", row.status,
+                f"Published announcement '{row.title}'")
+    return {"id": row.id, "decision": dec.as_dict()}
+
+
 # --------------------------------------------------------------------------- #
 #  ATTENDANCE
 # --------------------------------------------------------------------------- #
@@ -1378,12 +1640,36 @@ def mark_attendance(body: MarkAttendanceIn, ctx=Depends(auth), s=Depends(db)):
     require(dec)
     d = date.fromisoformat(body.on_date) if body.on_date else date.today()
     who = actor_name(s, ctx)
+
+    def upsert(student_id: str, present: bool):
+        row = (
+            s.query(D.AttendanceRecord)
+            .filter(
+                D.AttendanceRecord.section_id == body.section_id,
+                D.AttendanceRecord.student_id == student_id,
+                D.AttendanceRecord.on_date == d,
+            )
+            .first()
+        )
+        if row is None:
+            row = D.AttendanceRecord(
+                id=uid(),
+                tenant_id=TENANT,
+                section_id=body.section_id,
+                student_id=student_id,
+                on_date=d,
+            )
+            s.add(row)
+        row.present = present
+        row.status = "present" if present else "absent"
+        row.note = ""
+        row.marked_by = who
+        row.updated_at = datetime.utcnow()
+
     for sid in body.present_ids:
-        s.add(D.AttendanceRecord(id=uid(), tenant_id=TENANT, section_id=body.section_id,
-                                 student_id=sid, on_date=d, present=True, marked_by=who))
+        upsert(sid, True)
     for sid in body.absent_ids:
-        s.add(D.AttendanceRecord(id=uid(), tenant_id=TENANT, section_id=body.section_id,
-                                 student_id=sid, on_date=d, present=False, marked_by=who))
+        upsert(sid, False)
     s.commit()
     n = len(body.present_ids) + len(body.absent_ids)
     write_audit(s, ctx["sub"], who, ctx["office_n"], "attendance.mark",
@@ -1395,32 +1681,364 @@ def mark_attendance(body: MarkAttendanceIn, ctx=Depends(auth), s=Depends(db)):
 # --------------------------------------------------------------------------- #
 #  EXAMINATIONS: marks entry + result publication (SoD-separated)
 # --------------------------------------------------------------------------- #
+def _academic_year_for_datetime(dt_value):
+    anchor = dt_value.date() if isinstance(dt_value, datetime) else dt_value
+    anchor = anchor or date.today()
+    start_year = anchor.year if anchor.month >= 6 else anchor.year - 1
+    return f"{start_year}-{str(start_year + 1)[-2:]}"
+
+
+def _section_semester(s, section):
+    course = s.query(D.Course).get(section.course_id) if section and section.course_id else None
+    return course.semester if course else None
+
+
+def _can_view_exam_section(s, ctx, section):
+    if ctx["office_n"] in {4, 5, 6, 16}:
+        return True
+    staff = _staff_profile(s, ctx)
+    if ctx["office_n"] in {10, 17}:
+        return bool(staff and staff.dept_id == section.dept_id)
+    if ctx["office_n"] in {11, 12, 13, 14}:
+        return bool(staff and section.faculty_person_id == staff.id)
+    return False
+
+
+def _can_manage_section_for_exam_timetable(s, ctx, section):
+    if ctx["office_n"] in {6, 16}:
+        return True
+    staff = _staff_profile(s, ctx)
+    return bool(ctx["office_n"] in {10, 17} and staff and staff.dept_id == section.dept_id)
+
+
+def _exam_scoped_sections(s, ctx):
+    rows = s.query(D.Section).all()
+    return [row for row in rows if _can_view_exam_section(s, ctx, row)]
+
+
+def _assessment_pct(score: float | None, max_marks: float | None):
+    if max_marks in (None, 0):
+        return None
+    return round((float(score or 0) / float(max_marks)) * 100, 1)
+
+
+def _weighted_mark_average(mark_pairs):
+    usable = [
+        (assessment, mark, _assessment_pct(mark.score, assessment.max_marks))
+        for assessment, mark in mark_pairs
+    ]
+    usable = [(assessment, mark, pct) for assessment, mark, pct in usable if pct is not None]
+    if not usable:
+        return None
+    total_weight = sum(float(assessment.weight or 0) for assessment, _, _ in usable)
+    if total_weight > 0:
+        score = sum(pct * float(assessment.weight or 0) for assessment, _, pct in usable) / total_weight
+    else:
+        score = sum(pct for _, _, pct in usable) / len(usable)
+    return round(score, 2)
+
+
+def _grade_for_percentage(pct: float | None):
+    if pct is None:
+        return {"grade": "", "grade_point": None, "outcome": "result_pending"}
+    if pct >= 90:
+        return {"grade": "O", "grade_point": 10.0, "outcome": "passed"}
+    if pct >= 80:
+        return {"grade": "A+", "grade_point": 9.0, "outcome": "passed"}
+    if pct >= 70:
+        return {"grade": "A", "grade_point": 8.0, "outcome": "passed"}
+    if pct >= 60:
+        return {"grade": "B+", "grade_point": 7.0, "outcome": "passed"}
+    if pct >= 55:
+        return {"grade": "B", "grade_point": 6.0, "outcome": "passed"}
+    if pct >= 50:
+        return {"grade": "C", "grade_point": 5.0, "outcome": "passed"}
+    return {"grade": "F", "grade_point": 0.0, "outcome": "failed"}
+
+
+def _recompute_student_cgpa(s, student_id: str):
+    rows = (
+        s.query(D.StudentSubjectResult)
+        .filter(D.StudentSubjectResult.student_id == student_id)
+        .order_by(
+            D.StudentSubjectResult.subject_code,
+            D.StudentSubjectResult.attempt,
+            D.StudentSubjectResult.published_at,
+            D.StudentSubjectResult.updated_at,
+        )
+        .all()
+    )
+    latest = {}
+    for row in rows:
+        latest[row.subject_code] = row
+    credit_rows = [row for row in latest.values() if (row.credits or 0) > 0 and row.grade_point is not None]
+    student = s.query(D.Student).get(student_id)
+    if not student or not credit_rows:
+        return
+    total_credits = sum(float(row.credits or 0) for row in credit_rows)
+    if total_credits <= 0:
+        return
+    total_points = sum(float(row.grade_point or 0) * float(row.credits or 0) for row in credit_rows)
+    student.cgpa = round(total_points / total_credits, 2)
+
+
+def _sync_assessment_from_schedule(assessment, body, actor, section):
+    if not assessment:
+        return
+    assessment.section_id = section.id
+    assessment.scheduled_at = datetime.fromisoformat(body.start_at) if body.start_at else None
+    assessment.end_at = datetime.fromisoformat(body.end_at) if body.end_at else None
+    assessment.academic_year = (body.academic_year or assessment.academic_year or _academic_year_for_datetime(assessment.scheduled_at)).strip()
+    assessment.updated_by = actor
+    assessment.updated_at = datetime.utcnow()
+    if body.status == "cancelled":
+        assessment.status = "cancelled"
+    elif body.status == "rescheduled":
+        assessment.status = "rescheduled"
+
+
+def _write_schedule_history(s, schedule, actor, change_type, previous_state, note=""):
+    history = D.ExamScheduleHistory(
+        id=uid(),
+        tenant_id=TENANT,
+        schedule_id=schedule.id,
+        assessment_id=schedule.assessment_id,
+        change_type=change_type,
+        previous_start_at=previous_state.get("start_at"),
+        previous_end_at=previous_state.get("end_at"),
+        previous_venue=previous_state.get("venue", ""),
+        previous_status=previous_state.get("status", ""),
+        new_start_at=schedule.start_at,
+        new_end_at=schedule.end_at,
+        new_venue=schedule.venue or "",
+        new_status=schedule.status or "",
+        note=note or schedule.note or "",
+        created_by=actor,
+        created_at=datetime.utcnow(),
+    )
+    s.add(history)
+
+
+def _publish_section_subject_results(s, section, result_sheet, actor):
+    enrollments = (
+        s.query(D.Enrollment)
+        .filter(D.Enrollment.section_id == section.id, D.Enrollment.status == "enrolled")
+        .all()
+    )
+    if not enrollments:
+        return 0
+
+    assessments = (
+        s.query(D.Assessment)
+        .filter(
+            D.Assessment.section_id == section.id,
+            D.Assessment.published == True,
+            D.Assessment.status != "draft",
+            D.Assessment.status != "cancelled",
+        )
+        .order_by(D.Assessment.scheduled_at, D.Assessment.id)
+        .all()
+    )
+    assessment_ids = [row.id for row in assessments]
+    if not assessment_ids:
+        return 0
+
+    marks = (
+        s.query(D.Mark)
+        .filter(
+            D.Mark.assessment_id.in_(assessment_ids),
+            D.Mark.status == "published",
+            D.Mark.is_valid == True,
+        )
+        .all()
+    )
+    marks_by_student = {}
+    marks_by_assessment = {row.id: row for row in assessments}
+    for mark in marks:
+        assessment = marks_by_assessment.get(mark.assessment_id)
+        if not assessment:
+            continue
+        marks_by_student.setdefault(mark.student_id, []).append((assessment, mark))
+
+    course = s.query(D.Course).get(section.course_id) if section.course_id else None
+    published = 0
+    now = datetime.utcnow()
+    academic_year = (result_sheet.academic_year or _academic_year_for_datetime(now)).strip()
+    semester = result_sheet.semester or (course.semester if course else None)
+
+    for enrollment in enrollments:
+        mark_pairs = marks_by_student.get(enrollment.student_id, [])
+        if not mark_pairs:
+            continue
+        percentage = _weighted_mark_average(mark_pairs)
+        grade_meta = _grade_for_percentage(percentage)
+        total_score = round(sum(float(mark.score or 0) for _, mark in mark_pairs), 1)
+        max_score = round(sum(float(assessment.max_marks or 0) for assessment, _ in mark_pairs), 1)
+        previous_attempts = [
+            row.attempt or 0
+            for row in s.query(D.StudentSubjectResult)
+            .filter(
+                D.StudentSubjectResult.student_id == enrollment.student_id,
+                D.StudentSubjectResult.subject_code == (course.code if course else section.id),
+                D.StudentSubjectResult.result_sheet_id != result_sheet.id,
+            )
+            .all()
+        ]
+        result_id = f"ssr_{result_sheet.id}_{enrollment.student_id}"
+        row = s.query(D.StudentSubjectResult).get(result_id)
+        if row is None:
+            row = D.StudentSubjectResult(
+                id=result_id,
+                tenant_id=TENANT,
+                student_id=enrollment.student_id,
+                attempt=(max(previous_attempts) if previous_attempts else 0) + 1,
+            )
+            s.add(row)
+        row.academic_year = academic_year
+        row.semester = semester
+        row.subject_code = course.code if course else section.id
+        row.subject_title = course.title if course else f"Section {section.section_code}"
+        row.outcome = grade_meta["outcome"]
+        row.published_at = now
+        row.source = "examination"
+        row.course_id = course.id if course else None
+        row.section_id = section.id
+        row.result_sheet_id = result_sheet.id
+        row.credits = course.credits if course else 0
+        row.grade = grade_meta["grade"]
+        row.grade_point = grade_meta["grade_point"]
+        row.percentage = percentage
+        row.total_score = total_score
+        row.max_score = max_score
+        row.updated_at = now
+        _recompute_student_cgpa(s, enrollment.student_id)
+        published += 1
+    return published
+
+
 @router.get("/exams/sections")
 def exam_sections(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "examinations", "view")[0])
     course_map = {c.id: (c.code, c.title) for c in s.query(D.Course).all()}
-    rows = s.query(D.Section).limit(100).all()
+    rows = _exam_scoped_sections(s, ctx)
     out = []
     for r in rows:
         cc, ct = course_map.get(r.course_id, ("", ""))
         asmts = s.query(D.Assessment).filter(D.Assessment.section_id == r.id).count()
-        rs = s.query(D.ResultSheet).filter(D.ResultSheet.section_id == r.id).first()
+        rs = (s.query(D.ResultSheet)
+              .filter(D.ResultSheet.section_id == r.id)
+              .order_by(desc(D.ResultSheet.published_at), desc(D.ResultSheet.updated_at))
+              .first())
         out.append({"id": r.id, "course_code": cc, "course_title": ct,
                     "section": r.section_code, "assessments": asmts,
                     "result_status": rs.status if rs else "none"})
     return {"sections": out,
             "can_enter_marks": can(s, ctx, "examinations", "enter_marks"),
-            "can_publish": can(s, ctx, "examinations", "publish_result")}
+            "can_publish": can(s, ctx, "examinations", "publish_result"),
+            "can_publish_marks": can(s, ctx, "examinations", "publish_marks"),
+            "can_manage_timetable": can(s, ctx, "examinations", "manage_timetable")}
 
 
 @router.get("/exams/assessments/{section_id}")
 def exam_assessments(section_id: str, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "examinations", "view")[0])
-    rows = s.query(D.Assessment).filter(D.Assessment.section_id == section_id).all()
+    section = _section_or_404(s, section_id)
+    if not _can_view_exam_section(s, ctx, section):
+        raise HTTPException(403, "You cannot view examinations for this section")
+    schedule_by_assessment = {}
+    for row in (s.query(D.ExamScheduleEntry)
+                .filter(D.ExamScheduleEntry.section_id == section_id, D.ExamScheduleEntry.is_active == True)
+                .order_by(desc(D.ExamScheduleEntry.version_no), desc(D.ExamScheduleEntry.updated_at))
+                .all()):
+        if row.assessment_id and row.assessment_id not in schedule_by_assessment:
+            schedule_by_assessment[row.assessment_id] = row
+    rows = s.query(D.Assessment).filter(D.Assessment.section_id == section_id).order_by(D.Assessment.scheduled_at, D.Assessment.id).all()
     return {"assessments": [{"id": a.id, "name": a.name, "max_marks": a.max_marks,
-                             "locked": a.locked,
-                             "entered": s.query(D.Mark).filter(D.Mark.assessment_id == a.id).count()}
+                             "locked": a.locked, "assessment_type": a.assessment_type,
+                             "scheduled_at": a.scheduled_at.isoformat() if a.scheduled_at else "",
+                             "end_at": a.end_at.isoformat() if a.end_at else "",
+                             "published": a.published, "status": a.status,
+                             "published_at": a.published_at.isoformat() if a.published_at else "",
+                             "entered": s.query(D.Mark).filter(D.Mark.assessment_id == a.id).count(),
+                             "published_marks": s.query(D.Mark).filter(D.Mark.assessment_id == a.id, D.Mark.status == "published").count(),
+                             "timetable_status": schedule_by_assessment.get(a.id).status if schedule_by_assessment.get(a.id) else a.status}
                             for a in rows]}
+
+
+class AssessmentUpsertIn(BaseModel):
+    section_id: str
+    name: str
+    max_marks: float = 100
+    assessment_type: str = "quiz"
+    scheduled_at: str = ""
+    end_at: str = ""
+    published: bool = True
+    instructions: str = ""
+    academic_year: str = ""
+
+
+@router.post("/exams/assessments")
+def create_assessment(body: AssessmentUpsertIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "examinations", "create_assessment")
+    require(dec)
+    section = _section_or_404(s, body.section_id)
+    if not _can_manage_section_for_assessments(s, ctx, section):
+        raise HTTPException(403, "You cannot create assessments for this section")
+    who = actor_name(s, ctx)
+    row = D.Assessment(
+        id=uid(), tenant_id=TENANT, section_id=section.id, name=body.name.strip(),
+        max_marks=body.max_marks, weight=1.0, locked=False,
+        assessment_type=(body.assessment_type or "quiz").strip().lower(),
+        scheduled_at=datetime.fromisoformat(body.scheduled_at) if body.scheduled_at else None,
+        end_at=datetime.fromisoformat(body.end_at) if body.end_at else None,
+        published=body.published, instructions=body.instructions.strip(),
+        status="published" if body.published else "draft",
+        academic_year=(body.academic_year or _academic_year_for_datetime(datetime.fromisoformat(body.scheduled_at)) if body.scheduled_at else _academic_year_for_datetime(datetime.utcnow())).strip(),
+        created_by=who,
+        updated_by=who,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+        published_at=datetime.utcnow() if body.published else None,
+        published_by=who if body.published else "",
+    )
+    s.add(row)
+    s.commit()
+    write_audit(s, ctx["sub"], who, ctx["office_n"], "assessment.create",
+                f"assessment:{row.id}", "", row.status,
+                f"Created assessment '{row.name}' for section {section.section_code}")
+    return {"id": row.id, "decision": dec.as_dict()}
+
+
+@router.put("/exams/assessments/{assessment_id}")
+def update_assessment(assessment_id: str, body: AssessmentUpsertIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "examinations", "edit_assessment")
+    require(dec)
+    row = s.query(D.Assessment).get(assessment_id)
+    if not row:
+        raise HTTPException(404, "Assessment not found")
+    section = _section_or_404(s, row.section_id)
+    if not _can_manage_section_for_assessments(s, ctx, section):
+        raise HTTPException(403, "You cannot update assessments for this section")
+    prev_state = row.status
+    row.name = body.name.strip()
+    row.max_marks = body.max_marks
+    row.assessment_type = (body.assessment_type or row.assessment_type or "quiz").strip().lower()
+    row.scheduled_at = datetime.fromisoformat(body.scheduled_at) if body.scheduled_at else None
+    row.end_at = datetime.fromisoformat(body.end_at) if body.end_at else None
+    row.published = body.published
+    row.instructions = body.instructions.strip()
+    row.status = "published" if body.published else "draft"
+    row.academic_year = (body.academic_year or row.academic_year or _academic_year_for_datetime(row.scheduled_at or datetime.utcnow())).strip()
+    row.updated_by = actor_name(s, ctx)
+    row.updated_at = datetime.utcnow()
+    if body.published and not row.published_at:
+        row.published_at = datetime.utcnow()
+        row.published_by = actor_name(s, ctx)
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "assessment.create",
+                f"assessment:{row.id}", prev_state, row.status,
+                f"Updated assessment '{row.name}'")
+    return {"id": row.id, "decision": dec.as_dict()}
 
 
 class EnterMarksIn(BaseModel):
@@ -1435,21 +2053,72 @@ def enter_marks(body: EnterMarksIn, ctx=Depends(auth), s=Depends(db)):
     a = s.query(D.Assessment).get(body.assessment_id)
     if not a:
         raise HTTPException(400, "Unknown assessment")
+    section = _section_or_404(s, a.section_id)
+    if not _can_manage_section_for_assessments(s, ctx, section):
+        raise HTTPException(403, "You cannot enter marks for this section")
     if a.locked:
         raise HTTPException(409, "Assessment is locked; marks cannot be changed")
     who = actor_name(s, ctx)
+    valid_student_ids = {
+        row.student_id
+        for row in s.query(D.Enrollment)
+        .filter(D.Enrollment.section_id == section.id, D.Enrollment.status == "enrolled")
+        .all()
+    }
     for stu_id, score in body.marks.items():
+        if stu_id not in valid_student_ids:
+            raise HTTPException(400, "Marks can be entered only for students enrolled in this section")
         existing = s.query(D.Mark).filter(D.Mark.assessment_id == a.id,
                                           D.Mark.student_id == stu_id).first()
         if existing:
             existing.score = float(score)
+            existing.status = "draft"
+            existing.updated_at = datetime.utcnow()
         else:
             s.add(D.Mark(id=uid(), tenant_id=TENANT, assessment_id=a.id,
-                         student_id=stu_id, score=float(score), entered_by=who))
+                         student_id=stu_id, score=float(score), entered_by=who,
+                         status="draft", updated_at=datetime.utcnow()))
     s.commit()
     write_audit(s, ctx["sub"], who, ctx["office_n"], "marks.enter",
                 f"assessment:{a.id}", "", "entered", f"Entered {len(body.marks)} marks for {a.name}")
     return {"entered": len(body.marks), "decision": dec.as_dict()}
+
+
+class PublishMarksIn(BaseModel):
+    assessment_id: str
+
+
+@router.post("/exams/marks/publish")
+def publish_marks(body: PublishMarksIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "examinations", "publish_marks")
+    require(dec)
+    assessment = s.query(D.Assessment).get(body.assessment_id)
+    if not assessment:
+        raise HTTPException(404, "Assessment not found")
+    section = _section_or_404(s, assessment.section_id)
+    if not _can_manage_section_for_assessments(s, ctx, section):
+        raise HTTPException(403, "You cannot publish marks for this section")
+    who = actor_name(s, ctx)
+    now = datetime.utcnow()
+    rows = s.query(D.Mark).filter(D.Mark.assessment_id == assessment.id, D.Mark.is_valid == True).all()
+    for row in rows:
+        row.status = "published"
+        row.published_at = now
+        row.published_by = who
+        row.updated_at = now
+    assessment.published = True
+    assessment.status = "published" if assessment.status != "cancelled" else assessment.status
+    assessment.published_at = assessment.published_at or now
+    assessment.published_by = assessment.published_by or who
+    assessment.updated_at = now
+    assessment.updated_by = who
+    s.commit()
+    write_audit(
+        s, ctx["sub"], who, ctx["office_n"], "marks.publish",
+        f"assessment:{assessment.id}", "draft", "published",
+        f"Published {len(rows)} marks for {assessment.name}",
+    )
+    return {"published": len(rows), "decision": dec.as_dict()}
 
 
 class PublishResultIn(BaseModel):
@@ -1462,19 +2131,185 @@ def publish_result(body: PublishResultIn, ctx=Depends(auth), s=Depends(db)):
     dec, verb = gate(s, ctx, "examinations", "publish_result")
     require(dec)
     who = actor_name(s, ctx)
-    rs = s.query(D.ResultSheet).filter(D.ResultSheet.section_id == body.section_id).first()
+    section = _section_or_404(s, body.section_id)
+    rs = (s.query(D.ResultSheet)
+          .filter(D.ResultSheet.section_id == body.section_id)
+          .order_by(desc(D.ResultSheet.published_at), desc(D.ResultSheet.updated_at))
+          .first())
     if not rs:
         rs = D.ResultSheet(id=uid(), tenant_id=TENANT, section_id=body.section_id,
                            term="2025-Odd")
         s.add(rs)
+    course = s.query(D.Course).get(section.course_id) if section.course_id else None
+    rs.academic_year = rs.academic_year or _academic_year_for_datetime(datetime.utcnow())
+    rs.semester = rs.semester or (course.semester if course else None)
     rs.status = "published"
     rs.published_by = who
     rs.published_at = datetime.utcnow()
+    rs.updated_at = datetime.utcnow()
+    section_assessment_ids = [row[0] for row in s.query(D.Assessment.id).filter(D.Assessment.section_id == section.id).all()]
+    if section_assessment_ids:
+        marks = s.query(D.Mark).filter(D.Mark.assessment_id.in_(section_assessment_ids), D.Mark.is_valid == True).all()
+        for mark in marks:
+            if mark.status != "published":
+                mark.status = "published"
+                mark.published_at = rs.published_at
+                mark.published_by = who
+                mark.updated_at = rs.published_at
+    published_rows = _publish_section_subject_results(s, section, rs, who)
     s.commit()
     write_audit(s, ctx["sub"], who, ctx["office_n"], "result.publish",
                 f"section:{body.section_id}", "moderated", "published",
                 "Result published")
-    return {"status": "published", "decision": dec.as_dict()}
+    return {"status": "published", "published_results": published_rows, "decision": dec.as_dict()}
+
+
+class ExamTimetableUpsertIn(BaseModel):
+    section_id: str
+    assessment_id: str = ""
+    academic_year: str = ""
+    semester: int | None = None
+    exam_type: str = "exam"
+    start_at: str = ""
+    end_at: str = ""
+    venue: str = ""
+    mode: str = "Offline"
+    status: str = "scheduled"
+    note: str = ""
+
+
+@router.get("/exams/timetable/{section_id}")
+def exam_timetable(section_id: str, ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "examinations", "view")[0])
+    section = _section_or_404(s, section_id)
+    if not _can_view_exam_section(s, ctx, section):
+        raise HTTPException(403, "You cannot view timetable for this section")
+    course = s.query(D.Course).get(section.course_id) if section.course_id else None
+    rows = (
+        s.query(D.ExamScheduleEntry)
+        .filter(D.ExamScheduleEntry.section_id == section_id)
+        .order_by(desc(D.ExamScheduleEntry.is_active), desc(D.ExamScheduleEntry.version_no), D.ExamScheduleEntry.start_at)
+        .all()
+    )
+    return {
+        "entries": [
+            {
+                "id": row.id,
+                "section_id": row.section_id,
+                "assessment_id": row.assessment_id,
+                "course_code": course.code if course else "",
+                "course_title": course.title if course else "",
+                "academic_year": row.academic_year,
+                "semester": row.semester,
+                "exam_type": row.exam_type,
+                "start_at": row.start_at.isoformat() if row.start_at else "",
+                "end_at": row.end_at.isoformat() if row.end_at else "",
+                "venue": row.venue,
+                "mode": row.mode,
+                "status": row.status,
+                "version_no": row.version_no,
+                "is_active": row.is_active,
+                "note": row.note or "",
+            }
+            for row in rows
+        ],
+        "can_manage_timetable": can(s, ctx, "examinations", "manage_timetable"),
+    }
+
+
+@router.post("/exams/timetable")
+def create_exam_timetable(body: ExamTimetableUpsertIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "examinations", "manage_timetable")
+    require(dec)
+    section = _section_or_404(s, body.section_id)
+    if not _can_manage_section_for_exam_timetable(s, ctx, section):
+        raise HTTPException(403, "You cannot manage exam timetable for this section")
+    assessment = None
+    if body.assessment_id:
+        assessment = s.query(D.Assessment).get(body.assessment_id)
+        if not assessment or assessment.section_id != section.id:
+            raise HTTPException(400, "Assessment does not belong to this section")
+    who = actor_name(s, ctx)
+    row = D.ExamScheduleEntry(
+        id=uid(),
+        tenant_id=TENANT,
+        assessment_id=assessment.id if assessment else None,
+        section_id=section.id,
+        academic_year=(body.academic_year or _academic_year_for_datetime(datetime.fromisoformat(body.start_at)) if body.start_at else _academic_year_for_datetime(datetime.utcnow())).strip(),
+        semester=body.semester if body.semester is not None else _section_semester(s, section),
+        exam_type=(body.exam_type or (assessment.assessment_type if assessment else "exam") or "exam").strip().lower(),
+        start_at=datetime.fromisoformat(body.start_at) if body.start_at else None,
+        end_at=datetime.fromisoformat(body.end_at) if body.end_at else None,
+        venue=body.venue.strip(),
+        mode=(body.mode or "Offline").strip(),
+        status=(body.status or "scheduled").strip().lower(),
+        version_no=1,
+        is_active=True,
+        managed_by_office_n=ctx["office_n"],
+        note=body.note.strip(),
+        created_by=who,
+        updated_by=who,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    s.add(row)
+    _sync_assessment_from_schedule(assessment, body, who, section)
+    s.flush()
+    _write_schedule_history(s, row, who, "created", {"start_at": None, "end_at": None, "venue": "", "status": ""}, body.note.strip())
+    s.commit()
+    write_audit(
+        s, ctx["sub"], who, ctx["office_n"], "exam.timetable.create",
+        f"exam_schedule:{row.id}", "", row.status,
+        f"Created {row.exam_type} timetable entry for section {section.section_code}",
+    )
+    return {"id": row.id, "decision": dec.as_dict()}
+
+
+@router.put("/exams/timetable/{schedule_id}")
+def update_exam_timetable(schedule_id: str, body: ExamTimetableUpsertIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "examinations", "manage_timetable")
+    require(dec)
+    row = s.query(D.ExamScheduleEntry).get(schedule_id)
+    if not row:
+        raise HTTPException(404, "Exam timetable entry not found")
+    section = _section_or_404(s, row.section_id)
+    if not _can_manage_section_for_exam_timetable(s, ctx, section):
+        raise HTTPException(403, "You cannot manage exam timetable for this section")
+    assessment = s.query(D.Assessment).get(body.assessment_id or row.assessment_id) if (body.assessment_id or row.assessment_id) else None
+    if body.assessment_id and (not assessment or assessment.section_id != section.id):
+        raise HTTPException(400, "Assessment does not belong to this section")
+    who = actor_name(s, ctx)
+    previous = {
+        "start_at": row.start_at,
+        "end_at": row.end_at,
+        "venue": row.venue,
+        "status": row.status,
+    }
+    row.assessment_id = assessment.id if assessment else row.assessment_id
+    row.academic_year = (body.academic_year or row.academic_year or _academic_year_for_datetime(row.start_at or datetime.utcnow())).strip()
+    row.semester = body.semester if body.semester is not None else (row.semester or _section_semester(s, section))
+    row.exam_type = (body.exam_type or row.exam_type or "exam").strip().lower()
+    row.start_at = datetime.fromisoformat(body.start_at) if body.start_at else row.start_at
+    row.end_at = datetime.fromisoformat(body.end_at) if body.end_at else row.end_at
+    row.venue = body.venue.strip() or row.venue
+    row.mode = (body.mode or row.mode or "Offline").strip()
+    row.status = (body.status or row.status or "scheduled").strip().lower()
+    row.version_no = int(row.version_no or 1) + 1
+    row.is_active = True
+    row.managed_by_office_n = ctx["office_n"]
+    row.note = body.note.strip() or row.note
+    row.updated_by = who
+    row.updated_at = datetime.utcnow()
+    _sync_assessment_from_schedule(assessment, body, who, section)
+    change_type = "rescheduled" if row.status == "rescheduled" else ("cancelled" if row.status == "cancelled" else "updated")
+    _write_schedule_history(s, row, who, change_type, previous, body.note.strip())
+    s.commit()
+    write_audit(
+        s, ctx["sub"], who, ctx["office_n"], "exam.timetable.update",
+        f"exam_schedule:{row.id}", previous.get("status", ""), row.status,
+        f"Updated exam timetable entry for section {section.section_code}",
+    )
+    return {"id": row.id, "decision": dec.as_dict()}
 
 
 # --------------------------------------------------------------------------- #
@@ -1651,7 +2486,11 @@ def issue_book(body: IssueBookIn, ctx=Depends(auth), s=Depends(db)):
     if b.copies_available < 1:
         raise HTTPException(409, "No copies available")
     b.copies_available -= 1
+    student = (s.query(D.Student)
+               .filter(or_(D.Student.id == body.borrower, D.Student.roll_no == body.borrower))
+               .first())
     s.add(D.BookLoan(id=uid(), tenant_id=TENANT, book_id=b.id, borrower=body.borrower,
+                     student_id=student.id if student else None,
                      borrower_name=body.borrower_name, issued_on=date.today(),
                      due_on=date.today() + timedelta(days=14), returned=False))
     s.commit()

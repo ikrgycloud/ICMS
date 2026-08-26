@@ -1,5 +1,5 @@
 -- ICMS database schema (PostgreSQL)
--- Auto-generated from SQLAlchemy models. 41 tables.
+-- Auto-generated from SQLAlchemy models. 46 tables.
 
 CREATE TABLE applications (
 	id VARCHAR NOT NULL, 
@@ -293,13 +293,15 @@ CREATE TABLE book_loans (
 	tenant_id VARCHAR, 
 	book_id VARCHAR, 
 	borrower VARCHAR, 
+	student_id VARCHAR, 
 	borrower_name VARCHAR, 
 	issued_on DATE, 
 	due_on DATE, 
 	returned BOOLEAN, 
 	fine FLOAT, 
 	PRIMARY KEY (id), 
-	FOREIGN KEY(book_id) REFERENCES books (id)
+	FOREIGN KEY(book_id) REFERENCES books (id), 
+	FOREIGN KEY(student_id) REFERENCES students (id)
 );
 
 CREATE TABLE courses (
@@ -412,6 +414,8 @@ CREATE TABLE students (
 	cgpa FLOAT, 
 	hosteller BOOLEAN, 
 	scholarship BOOLEAN, 
+	blood_group VARCHAR, 
+	student_type VARCHAR, 
 	user_id VARCHAR, 
 	PRIMARY KEY (id), 
 	FOREIGN KEY(program_id) REFERENCES programs (id), 
@@ -438,6 +442,19 @@ CREATE TABLE assessments (
 	max_marks FLOAT, 
 	weight FLOAT, 
 	locked BOOLEAN, 
+	assessment_type VARCHAR, 
+	scheduled_at TIMESTAMP WITHOUT TIME ZONE, 
+	end_at TIMESTAMP WITHOUT TIME ZONE, 
+	published BOOLEAN, 
+	instructions TEXT, 
+	status VARCHAR, 
+	academic_year VARCHAR, 
+	created_by VARCHAR, 
+	updated_by VARCHAR, 
+	created_at TIMESTAMP WITHOUT TIME ZONE, 
+	updated_at TIMESTAMP WITHOUT TIME ZONE, 
+	published_at TIMESTAMP WITHOUT TIME ZONE, 
+	published_by VARCHAR, 
 	PRIMARY KEY (id), 
 	FOREIGN KEY(section_id) REFERENCES sections (id)
 );
@@ -449,7 +466,10 @@ CREATE TABLE attendance_records (
 	student_id VARCHAR, 
 	on_date DATE, 
 	present BOOLEAN, 
+	status VARCHAR, 
+	note VARCHAR, 
 	marked_by VARCHAR, 
+	updated_at TIMESTAMP WITHOUT TIME ZONE, 
 	PRIMARY KEY (id), 
 	FOREIGN KEY(section_id) REFERENCES sections (id), 
 	FOREIGN KEY(student_id) REFERENCES students (id)
@@ -489,8 +509,37 @@ CREATE TABLE result_sheets (
 	status VARCHAR, 
 	published_by VARCHAR, 
 	published_at TIMESTAMP WITHOUT TIME ZONE, 
+	academic_year VARCHAR, 
+	semester INTEGER, 
+	updated_at TIMESTAMP WITHOUT TIME ZONE, 
 	PRIMARY KEY (id), 
 	FOREIGN KEY(section_id) REFERENCES sections (id)
+);
+
+CREATE TABLE student_subject_results (
+	id VARCHAR NOT NULL, 
+	tenant_id VARCHAR, 
+	student_id VARCHAR, 
+	academic_year VARCHAR, 
+	semester INTEGER, 
+	subject_code VARCHAR, 
+	subject_title VARCHAR, 
+	attempt INTEGER, 
+	outcome VARCHAR, 
+	published_at TIMESTAMP WITHOUT TIME ZONE, 
+	source VARCHAR, 
+	course_id VARCHAR, 
+	section_id VARCHAR, 
+	result_sheet_id VARCHAR, 
+	credits FLOAT, 
+	grade VARCHAR, 
+	grade_point FLOAT, 
+	percentage FLOAT, 
+	total_score FLOAT, 
+	max_score FLOAT, 
+	updated_at TIMESTAMP WITHOUT TIME ZONE, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(student_id) REFERENCES students (id)
 );
 
 CREATE TABLE marks (
@@ -501,7 +550,78 @@ CREATE TABLE marks (
 	score FLOAT, 
 	entered_by VARCHAR, 
 	entered_at TIMESTAMP WITHOUT TIME ZONE, 
+	status VARCHAR, 
+	published_at TIMESTAMP WITHOUT TIME ZONE, 
+	published_by VARCHAR, 
+	is_valid BOOLEAN, 
+	updated_at TIMESTAMP WITHOUT TIME ZONE, 
 	PRIMARY KEY (id), 
+	FOREIGN KEY(assessment_id) REFERENCES assessments (id), 
+	FOREIGN KEY(student_id) REFERENCES students (id)
+);
+
+CREATE TABLE exam_schedule_entries (
+	id VARCHAR NOT NULL, 
+	tenant_id VARCHAR, 
+	assessment_id VARCHAR, 
+	section_id VARCHAR, 
+	academic_year VARCHAR, 
+	semester INTEGER, 
+	exam_type VARCHAR, 
+	start_at TIMESTAMP WITHOUT TIME ZONE, 
+	end_at TIMESTAMP WITHOUT TIME ZONE, 
+	venue VARCHAR, 
+	mode VARCHAR, 
+	status VARCHAR, 
+	version_no INTEGER, 
+	is_active BOOLEAN, 
+	managed_by_office_n INTEGER, 
+	note TEXT, 
+	created_by VARCHAR, 
+	updated_by VARCHAR, 
+	created_at TIMESTAMP WITHOUT TIME ZONE, 
+	updated_at TIMESTAMP WITHOUT TIME ZONE, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(assessment_id) REFERENCES assessments (id), 
+	FOREIGN KEY(section_id) REFERENCES sections (id)
+);
+
+CREATE TABLE exam_schedule_history (
+	id VARCHAR NOT NULL, 
+	tenant_id VARCHAR, 
+	schedule_id VARCHAR, 
+	assessment_id VARCHAR, 
+	change_type VARCHAR, 
+	previous_start_at TIMESTAMP WITHOUT TIME ZONE, 
+	previous_end_at TIMESTAMP WITHOUT TIME ZONE, 
+	previous_venue VARCHAR, 
+	previous_status VARCHAR, 
+	new_start_at TIMESTAMP WITHOUT TIME ZONE, 
+	new_end_at TIMESTAMP WITHOUT TIME ZONE, 
+	new_venue VARCHAR, 
+	new_status VARCHAR, 
+	note TEXT, 
+	created_by VARCHAR, 
+	created_at TIMESTAMP WITHOUT TIME ZONE, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(schedule_id) REFERENCES exam_schedule_entries (id), 
+	FOREIGN KEY(assessment_id) REFERENCES assessments (id)
+);
+
+CREATE TABLE exam_seat_assignments (
+	id VARCHAR NOT NULL, 
+	tenant_id VARCHAR, 
+	schedule_id VARCHAR, 
+	assessment_id VARCHAR, 
+	student_id VARCHAR, 
+	seat_label VARCHAR, 
+	seat_zone VARCHAR, 
+	note TEXT, 
+	assigned_by VARCHAR, 
+	created_at TIMESTAMP WITHOUT TIME ZONE, 
+	updated_at TIMESTAMP WITHOUT TIME ZONE, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(schedule_id) REFERENCES exam_schedule_entries (id), 
 	FOREIGN KEY(assessment_id) REFERENCES assessments (id), 
 	FOREIGN KEY(student_id) REFERENCES students (id)
 );
@@ -517,4 +637,101 @@ CREATE TABLE payments (
 	reference VARCHAR, 
 	PRIMARY KEY (id), 
 	FOREIGN KEY(invoice_id) REFERENCES fee_invoices (id)
+);
+
+CREATE TABLE timetable_entries (
+	id VARCHAR NOT NULL, 
+	tenant_id VARCHAR, 
+	section_id VARCHAR, 
+	day_of_week INTEGER, 
+	start_time VARCHAR, 
+	end_time VARCHAR, 
+	room VARCHAR, 
+	building VARCHAR, 
+	effective_from DATE, 
+	effective_to DATE, 
+	status VARCHAR, 
+	created_by VARCHAR, 
+	updated_by VARCHAR, 
+	created_at TIMESTAMP WITHOUT TIME ZONE, 
+	updated_at TIMESTAMP WITHOUT TIME ZONE, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(section_id) REFERENCES sections (id)
+);
+
+CREATE TABLE assignments (
+	id VARCHAR NOT NULL, 
+	tenant_id VARCHAR, 
+	section_id VARCHAR, 
+	title VARCHAR, 
+	description TEXT, 
+	assigned_at TIMESTAMP WITHOUT TIME ZONE, 
+	due_at TIMESTAMP WITHOUT TIME ZONE, 
+	status VARCHAR, 
+	reference_url VARCHAR, 
+	created_by VARCHAR, 
+	updated_by VARCHAR, 
+	created_at TIMESTAMP WITHOUT TIME ZONE, 
+	updated_at TIMESTAMP WITHOUT TIME ZONE, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(section_id) REFERENCES sections (id)
+);
+
+CREATE TABLE announcements (
+	id VARCHAR NOT NULL, 
+	tenant_id VARCHAR, 
+	title VARCHAR, 
+	body TEXT, 
+	audience VARCHAR, 
+	campus VARCHAR, 
+	department_id VARCHAR, 
+	program_id VARCHAR, 
+	section_id VARCHAR, 
+	student_id VARCHAR, 
+	published_at TIMESTAMP WITHOUT TIME ZONE, 
+	expires_at TIMESTAMP WITHOUT TIME ZONE, 
+	status VARCHAR, 
+	created_by VARCHAR, 
+	owner_office_n INTEGER, 
+	created_at TIMESTAMP WITHOUT TIME ZONE, 
+	updated_at TIMESTAMP WITHOUT TIME ZONE, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(department_id) REFERENCES departments (id), 
+	FOREIGN KEY(program_id) REFERENCES programs (id), 
+	FOREIGN KEY(section_id) REFERENCES sections (id), 
+	FOREIGN KEY(student_id) REFERENCES students (id)
+);
+
+CREATE TABLE student_identity_cards (
+	id VARCHAR NOT NULL, 
+	tenant_id VARCHAR, 
+	student_id VARCHAR, 
+	card_number VARCHAR, 
+	blood_group VARCHAR, 
+	issued_on DATE, 
+	valid_until DATE, 
+	status VARCHAR, 
+	verification_token VARCHAR, 
+	created_at TIMESTAMP WITHOUT TIME ZONE, 
+	updated_at TIMESTAMP WITHOUT TIME ZONE, 
+	PRIMARY KEY (id), 
+	UNIQUE (card_number), 
+	UNIQUE (verification_token), 
+	FOREIGN KEY(student_id) REFERENCES students (id)
+);
+
+CREATE TABLE student_course_view_preferences (
+	id VARCHAR NOT NULL,
+	tenant_id VARCHAR,
+	student_id VARCHAR,
+	section_id VARCHAR,
+	faculty_label VARCHAR,
+	schedule_label VARCHAR,
+	created_by VARCHAR,
+	updated_by VARCHAR,
+	created_at TIMESTAMP WITHOUT TIME ZONE,
+	updated_at TIMESTAMP WITHOUT TIME ZONE,
+	PRIMARY KEY (id),
+	FOREIGN KEY(student_id) REFERENCES students (id),
+	FOREIGN KEY(section_id) REFERENCES sections (id)
 );

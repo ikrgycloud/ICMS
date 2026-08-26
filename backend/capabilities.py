@@ -26,6 +26,7 @@ MODULES = {
     "academics":    {"label": "Academics",     "icon": "📚", "group": "Academics"},
     "attendance":   {"label": "Attendance",    "icon": "✔", "group": "Academics"},
     "examinations": {"label": "Examinations",  "icon": "📝", "group": "Academics"},
+    "scores":       {"label": "Scores",        "icon": "📊", "group": "Academics"},
     "admissions":   {"label": "Admissions",    "icon": "📥", "group": "Academics"},
     "research":     {"label": "Research",      "icon": "🔬", "group": "Academics"},
     "placements":   {"label": "Placements",    "icon": "💼", "group": "Academics"},
@@ -91,7 +92,7 @@ OFFICE_MODULES = {
     33: ["assets", "procurement"],                                                 # Store / Inventory
     34: ["assets"],                                                               # Security
     35: ["students", "directory"],                                                 # Front Office
-    36: ["students", "academics", "attendance", "examinations", "finance",         # Student Portal
+    36: ["students", "academics", "attendance", "examinations", "scores", "finance",         # Student Portal
          "library", "hostel", "transport", "placements", "grievance"],
     37: ["students", "finance"],                                                   # Parent Portal
     38: ["placements", "analytics"],                                               # Alumni
@@ -109,10 +110,16 @@ MODULE_ACTIONS = {
                           "delete": "delete"},
     "students":     {"view": "view", "add": "create", "edit": "edit"},
     "academics":    {"view": "view", "create_section": "create", "edit": "edit",
-                     "assign_faculty": "assign"},
+                     "assign_faculty": "assign", "manage_timetable": "edit",
+                     "create_task": "create", "edit_task": "edit",
+                     "publish_task": "publish", "close_task": "edit",
+                     "publish_announcement": "publish"},
     "attendance":   {"view": "view", "mark": "create", "correct": "edit"},
     "examinations": {"view": "view", "enter_marks": "create", "moderate": "verify",
-                     "publish_result": "publish", "lock": "lock"},
+                     "publish_result": "publish", "lock": "lock",
+                     "create_assessment": "create", "edit_assessment": "edit",
+                     "publish_marks": "publish", "manage_timetable": "edit"},
+    "scores":       {"view": "view"},
     "admissions":   {"view": "view", "verify": "verify", "offer": "approve",
                      "reject": "reject"},
     "finance":      {"view": "view", "create_invoice": "create",
@@ -151,12 +158,22 @@ ACTION_OFFICE_ALLOW = {
     ("students", "edit"): {10, 15, 35},               # Principal has oversight, not record editing
     ("academics", "create_section"): {6, 10, 17},     # Dean Acad, HOD, Acad Coordinator
     ("academics", "assign_faculty"): {6, 10, 17},
+    ("academics", "manage_timetable"): {6, 10, 17},
+    ("academics", "create_task"): {10, 11, 12, 13, 14, 17},
+    ("academics", "edit_task"): {10, 11, 12, 13, 14, 17},
+    ("academics", "publish_task"): {10, 11, 12, 13, 14, 17},
+    ("academics", "close_task"): {10, 11, 12, 13, 14, 17},
+    ("academics", "publish_announcement"): {6, 8, 10, 17},
     ("attendance", "mark"): {10, 11, 12, 13, 14, 17},  # HOD + faculty + coordinator
     ("attendance", "correct"): {10, 17},
     ("examinations", "enter_marks"): {11, 12, 13, 14, 16},  # faculty + exam cell
     ("examinations", "moderate"): {16},
     ("examinations", "publish_result"): {16},          # Exam Controller only (SoD)
     ("examinations", "lock"): {16},
+    ("examinations", "create_assessment"): {11, 12, 13, 14, 16},
+    ("examinations", "edit_assessment"): {11, 12, 13, 14, 16},
+    ("examinations", "publish_marks"): {11, 12, 13, 14, 16},
+    ("examinations", "manage_timetable"): {6, 10, 16, 17},
     ("admissions", "verify"): {15},
     ("admissions", "offer"): {4, 15},
     ("admissions", "reject"): {4, 15},

@@ -8,7 +8,7 @@ import os
 import json
 import re
 from datetime import datetime, timedelta
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from models import (Base, Tenant, OrgScope, Person, User, Role, Permission,
@@ -36,6 +36,76 @@ DATABASE_URL = os.environ.get("DATABASE_URL", f"sqlite:///{HERE}/icms.db")
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+
+def ensure_additive_schema():
+    """Create missing tables and add newly introduced additive columns safely."""
+    Base.metadata.create_all(engine)
+
+    additions = {
+        "students": [
+            ("blood_group", "VARCHAR DEFAULT ''"),
+            ("student_type", "VARCHAR DEFAULT 'Regular'"),
+        ],
+        "attendance_records": [
+            ("status", "VARCHAR DEFAULT 'present'"),
+            ("note", "VARCHAR DEFAULT ''"),
+            ("updated_at", "TIMESTAMP"),
+        ],
+        "assessments": [
+            ("assessment_type", "VARCHAR DEFAULT 'exam'"),
+            ("scheduled_at", "TIMESTAMP"),
+            ("end_at", "TIMESTAMP"),
+            ("published", "BOOLEAN DEFAULT FALSE"),
+            ("instructions", "TEXT DEFAULT ''"),
+            ("status", "VARCHAR DEFAULT 'draft'"),
+            ("academic_year", "VARCHAR DEFAULT ''"),
+            ("created_by", "VARCHAR DEFAULT ''"),
+            ("updated_by", "VARCHAR DEFAULT ''"),
+            ("created_at", "TIMESTAMP"),
+            ("updated_at", "TIMESTAMP"),
+            ("published_at", "TIMESTAMP"),
+            ("published_by", "VARCHAR DEFAULT ''"),
+        ],
+        "marks": [
+            ("status", "VARCHAR DEFAULT 'published'"),
+            ("published_at", "TIMESTAMP"),
+            ("published_by", "VARCHAR DEFAULT ''"),
+            ("is_valid", "BOOLEAN DEFAULT TRUE"),
+            ("updated_at", "TIMESTAMP"),
+        ],
+        "result_sheets": [
+            ("academic_year", "VARCHAR DEFAULT ''"),
+            ("semester", "INTEGER"),
+            ("updated_at", "TIMESTAMP"),
+        ],
+        "student_subject_results": [
+            ("course_id", "VARCHAR"),
+            ("section_id", "VARCHAR"),
+            ("result_sheet_id", "VARCHAR"),
+            ("credits", "FLOAT DEFAULT 0"),
+            ("grade", "VARCHAR DEFAULT ''"),
+            ("grade_point", "FLOAT"),
+            ("percentage", "FLOAT"),
+            ("total_score", "FLOAT"),
+            ("max_score", "FLOAT"),
+            ("updated_at", "TIMESTAMP"),
+        ],
+        "book_loans": [
+            ("student_id", "VARCHAR"),
+        ],
+    }
+
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        for table_name, columns in additions.items():
+            if not inspector.has_table(table_name):
+                continue
+            existing = {column["name"] for column in inspector.get_columns(table_name)}
+            for column_name, ddl in columns:
+                if column_name in existing:
+                    continue
+                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"))
 
 
 def office(n: int) -> dict:
@@ -66,7 +136,7 @@ DEMO_USERNAMES = {
 
 
 def seed():
-    Base.metadata.create_all(engine)
+    ensure_additive_schema()
     s = SessionLocal()
     try:
         # Tenant + scope tree (Document §6, §11).
