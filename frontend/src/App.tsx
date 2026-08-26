@@ -36,6 +36,7 @@ import Analytics from './modules/Analytics'
 import Procurement from './modules/Procurement'
 import Integrations from './modules/Integrations'
 import StudentHome from './personas/StudentHome'
+import { StudentAttendanceView, StudentCalendarView, StudentCoursesView, StudentExaminationsView, StudentFeesView, StudentLibraryView, StudentScoresView } from './personas/StudentViews'
 import FacultyHome from './personas/FacultyHome'
 import FacultySchedule from './personas/FacultySchedule'
 import ParentHome from './personas/ParentHome'
@@ -178,7 +179,9 @@ export default function App({ onLogout }: { onLogout: () => void }) {
 
   const rawModules = ws?.modules || []
   const displayModules = useMemo(
-    () => rawModules.map((module: any) => ({ ...module, ...displayMeta(user, module) })),
+    () => rawModules
+      .filter((module: any) => !(user?.persona === 'student' && module.key === 'students'))
+      .map((module: any) => ({ ...module, ...displayMeta(user, module) })),
     [rawModules, user],
   )
 
@@ -383,6 +386,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       if (user.persona === 'parent') return <ParentHome user={user} />
       return <Overview user={user} go={go} />
     case 'calendar':
+      if (user.persona === 'student') return <StudentCalendarView user={user} go={go} />
       return <Calendar user={user} caps={caps} />
     case 'my_schedule':
       if (user.persona === 'faculty') return <FacultySchedule user={user} go={go} />
@@ -394,22 +398,31 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'analytics':
       return <Analytics user={user} />
     case 'students':
+      if (user.persona === 'student') return <StudentHome user={user} go={go} />
       return <Students caps={caps} />
     case 'academics':
+      if (user.persona === 'student') return <StudentCoursesView />
       return <Academics caps={caps} />
     case 'curriculum':
       return <Curriculum />
     case 'courses_subjects':
       return <CoursesSubjects />
     case 'attendance':
+      if (user.persona === 'student') return <StudentAttendanceView />
       return <Attendance caps={caps} />
     case 'examinations':
+      if (user.persona === 'student') return <StudentExaminationsView go={go} />
+      return <Examinations caps={caps} />
+    case 'scores':
+      if (user.persona === 'student') return <StudentScoresView />
       return <Examinations caps={caps} />
     case 'admissions':
       return <Admissions caps={caps} />
     case 'finance':
+      if (user.persona === 'student') return <StudentFeesView />
       return <Finance caps={caps} />
     case 'library':
+      if (user.persona === 'student') return <StudentLibraryView />
       return <Library caps={caps} />
     case 'hr':
       return <HR caps={caps} />
@@ -545,6 +558,8 @@ function NavGlyph({ moduleKey }: { moduleKey: string }) {
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m5 12 4 4 10-10" /></svg>
     case 'examinations':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M7 4h10l3 3v13H7a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" /><path d="M15 4v3h3M9 13h6M9 17h4" /></svg>
+    case 'scores':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 20h16" /><path d="M7 16V9M12 16V5M17 16v-3" /><path d="M6 8 9 5l3 3 4-4 2 2" /></svg>
     case 'admissions':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 3v18M3 12h18" /></svg>
     case 'library':

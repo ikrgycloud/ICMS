@@ -26,6 +26,21 @@ const CATEGORIES = [
   'Engagement',
 ]
 
+const MONTH_OPTIONS = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+]
+
 function monthStartIso(base = new Date()) {
   const d = new Date(base)
   d.setDate(1)
@@ -61,6 +76,7 @@ function blankForm() {
 
 export default function Calendar({ user, caps }: { user: any; caps: any }) {
   const [month, setMonth] = useState(monthStartIso())
+  const [selectedDate, setSelectedDate] = useState(dateInputValue(new Date()))
   const [data, setData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -109,11 +125,38 @@ export default function Calendar({ user, caps }: { user: any; caps: any }) {
   const canCreate = Boolean(data?.permissions?.create && caps?.create)
   const canEdit = Boolean(data?.permissions?.edit && caps?.edit)
   const canDelete = Boolean(data?.permissions?.delete && caps?.delete)
+  const selected = parseLocalDate(selectedDate)
+  const yearOptions = useMemo(() => buildYearOptions(selected.getFullYear()), [selectedDate])
+
+  function commitCalendarSelection(next: Date) {
+    setSelectedDate(dateInputValue(next))
+    setMonth(monthStartIso(next))
+  }
 
   function shiftMonth(direction: number) {
-    const base = new Date(`${data?.range?.start || month}T00:00:00`)
-    base.setMonth(base.getMonth() + direction)
-    setMonth(monthStartIso(base))
+    const base = parseLocalDate(selectedDate || `${data?.range?.start || month}`)
+    const next = new Date(base.getFullYear(), base.getMonth() + direction, 1)
+    next.setDate(Math.min(base.getDate(), daysInMonth(next.getFullYear(), next.getMonth())))
+    commitCalendarSelection(next)
+  }
+
+  function applyDate(raw: string) {
+    if (!raw) return
+    commitCalendarSelection(parseLocalDate(raw))
+  }
+
+  function applyMonth(monthIndex: number) {
+    const base = parseLocalDate(selectedDate)
+    const next = new Date(base.getFullYear(), monthIndex, 1)
+    next.setDate(Math.min(base.getDate(), daysInMonth(next.getFullYear(), monthIndex)))
+    commitCalendarSelection(next)
+  }
+
+  function applyYear(year: number) {
+    const base = parseLocalDate(selectedDate)
+    const next = new Date(year, base.getMonth(), 1)
+    next.setDate(Math.min(base.getDate(), daysInMonth(year, base.getMonth())))
+    commitCalendarSelection(next)
   }
 
   function openCreate() {
@@ -184,7 +227,40 @@ export default function Calendar({ user, caps }: { user: any; caps: any }) {
         sub={`Live calendar for ${user.active_role}. This board blends shared events, academic milestones, and workflow-linked dates straight from the database.`}
         right={
           <div className="calendar-head-actions">
-            <button className="btn btn-out" onClick={() => setMonth(monthStartIso())} type="button">Today</button>
+            <label className="calendar-jump-control">
+              <span>Date</span>
+              <input
+                className="calendar-jump-input"
+                type="date"
+                value={selectedDate}
+                onChange={e => applyDate(e.target.value)}
+              />
+            </label>
+            <label className="calendar-jump-control">
+              <span>Month</span>
+              <select
+                className="select calendar-jump-select"
+                value={String(selected.getMonth())}
+                onChange={e => applyMonth(Number(e.target.value))}
+              >
+                {MONTH_OPTIONS.map((label, index) => (
+                  <option key={label} value={index}>{label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="calendar-jump-control">
+              <span>Year</span>
+              <select
+                className="select calendar-jump-select"
+                value={String(selected.getFullYear())}
+                onChange={e => applyYear(Number(e.target.value))}
+              >
+                {yearOptions.map(year => (
+                  <option key={year} value={year}>{year}</option>
+                ))}
+              </select>
+            </label>
+            <button className="btn btn-out" onClick={() => commitCalendarSelection(new Date())} type="button">Today</button>
             <button className="btn btn-out" onClick={() => shiftMonth(-1)} type="button">Prev</button>
             <button className="btn btn-out" onClick={() => shiftMonth(1)} type="button">Next</button>
             {canCreate && <button className="btn btn-crimson" onClick={openCreate} type="button">Add event</button>}
@@ -392,6 +468,27 @@ function buildMonthGrid(rawStart: string) {
 function toDateTimeLocal(raw: string) {
   const d = new Date(raw)
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+function parseLocalDate(raw: string) {
+  const [year, month, day] = String(raw || '').slice(0, 10).split('-').map(Number)
+  return new Date(year || 2026, (month || 1) - 1, day || 1)
+}
+
+function dateInputValue(base: Date) {
+  return `${base.getFullYear()}-${pad(base.getMonth() + 1)}-${pad(base.getDate())}`
+}
+
+function daysInMonth(year: number, monthIndex: number) {
+  return new Date(year, monthIndex + 1, 0).getDate()
+}
+
+function buildYearOptions(selectedYear: number) {
+  const start = Math.min(2020, selectedYear - 5)
+  const end = Math.max(2032, selectedYear + 5)
+  const out = []
+  for (let year = start; year <= end; year += 1) out.push(year)
+  return out
 }
 
 function prettyDate(raw: string) {

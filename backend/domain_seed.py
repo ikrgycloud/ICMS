@@ -9,7 +9,7 @@ import random
 from datetime import date, datetime, timedelta
 
 from database import (SessionLocal, TENANT, engine, DEMO_USERNAMES, CAMPUS_SCOPES,
-                      slug)
+                      slug, ensure_additive_schema)
 from matrices import APPROVAL_MATRIX
 from models import (Base, User, Delegation, DelegationPolicy, DelegationProfile,
                     WorkflowInstance, WorkflowProfile, Approval, Notification,
@@ -39,6 +39,9 @@ COURSE_BANK = {
         ("CS303", "Computer Networks", 3, 5),
         ("CS401", "Machine Learning", 4, 7),
         ("CS402", "Distributed Systems", 3, 7),
+        ("CS403", "Cloud Computing Lab", 2, 7),
+        ("CS404", "Compiler Design", 4, 7),
+        ("CS405", "Information Security", 3, 7),
     ],
     "ECE": [
         ("EC101", "Basic Electronics", 4, 1),
@@ -77,6 +80,91 @@ COURSE_BANK = {
         ("HS201", "Economics", 3, 3),
     ],
 }
+
+DEMO_ATTENDANCE_TODAY = date(2026, 8, 25)
+DEMO_ATTENDANCE_NOW = datetime(2026, 8, 25, 16, 15)
+STUDENT_PORTAL_ATTENDANCE_DEMO = [
+    {
+        "code": "CS401",
+        "title": "Machine Learning",
+        "credits": 4,
+        "semester": 7,
+        "section_code": "A",
+        "day_of_week": 1,
+        "start_time": "09:00",
+        "end_time": "10:00",
+        "room": "LH-2",
+        "building": "AI Block",
+        "faculty_id": "staff_portal_cs401",
+        "faculty_name": "Dr. Meera Nair",
+        "designation": "Professor",
+        "statuses": ["present", "present", "present", "late", "present", "present", "present", "present"],
+    },
+    {
+        "code": "CS402",
+        "title": "Distributed Systems",
+        "credits": 3,
+        "semester": 7,
+        "section_code": "A",
+        "day_of_week": 3,
+        "start_time": "10:00",
+        "end_time": "11:00",
+        "room": "LH-3",
+        "building": "Systems Block",
+        "faculty_id": "staff_portal_cs402",
+        "faculty_name": "Prof. Arun Kumar",
+        "designation": "Associate Professor",
+        "statuses": ["present", "present", "present", "od", "present", "present", "absent", "present"],
+    },
+    {
+        "code": "CS403",
+        "title": "Cloud Computing Lab",
+        "credits": 2,
+        "semester": 7,
+        "section_code": "A",
+        "day_of_week": 1,
+        "start_time": "11:15",
+        "end_time": "12:15",
+        "room": "Cloud Lab 2",
+        "building": "Lab Complex",
+        "faculty_id": "staff_portal_cs403",
+        "faculty_name": "Dr. Priya Iyer",
+        "designation": "Assistant Professor",
+        "statuses": ["present", "present", "leave", "present", "present", "present", "present", "present"],
+    },
+    {
+        "code": "CS404",
+        "title": "Compiler Design",
+        "credits": 4,
+        "semester": 7,
+        "section_code": "A",
+        "day_of_week": 1,
+        "start_time": "14:00",
+        "end_time": "15:00",
+        "room": "LH-5",
+        "building": "Academic Block",
+        "faculty_id": "staff_portal_cs404",
+        "faculty_name": "Prof. Vivek Rao",
+        "designation": "Professor",
+        "statuses": ["present", "absent", "present", "present", "absent", "present", "present", "pending"],
+    },
+    {
+        "code": "CS405",
+        "title": "Information Security",
+        "credits": 3,
+        "semester": 7,
+        "section_code": "A",
+        "day_of_week": 4,
+        "start_time": "15:15",
+        "end_time": "16:15",
+        "room": "LH-6",
+        "building": "Security Wing",
+        "faculty_id": "staff_portal_cs405",
+        "faculty_name": "Dr. Sneha Nair",
+        "designation": "Associate Professor",
+        "statuses": ["present", "present", "present", "present", "late", "present", "present", "absent"],
+    },
+]
 
 FIRST = [
     "Aarav", "Vivaan", "Aditya", "Vihaan", "Arjun", "Sai", "Reyansh",
@@ -377,6 +465,938 @@ def _program_prefix(name):
     return "BTECH"
 
 
+def _schedule_slots(schedule: str):
+    mapping = {
+        "Mon/Wed 10:00": [(0, "10:00", "11:00"), (2, "10:00", "11:00")],
+        "Tue/Thu 11:00": [(1, "11:00", "12:00"), (3, "11:00", "12:00")],
+        "Mon/Wed 14:00": [(0, "14:00", "15:00"), (2, "14:00", "15:00")],
+        "Wed/Fri 09:00": [(2, "09:00", "10:00"), (4, "09:00", "10:00")],
+    }
+    return mapping.get(schedule or "", [])
+
+
+def _ensure_timetable_entries_for_section(s, section, created_by="seed"):
+    slots = _schedule_slots(section.schedule)
+    for day_of_week, start_time, end_time in slots:
+        entry_id = f"tt_{section.id}_{day_of_week}_{start_time.replace(':', '')}"
+        row = _ensure(
+            s, D.TimetableEntry, entry_id,
+            lambda entry_id=entry_id, section=section, day_of_week=day_of_week,
+                   start_time=start_time, end_time=end_time, created_by=created_by: D.TimetableEntry(
+                       id=entry_id, tenant_id=TENANT, section_id=section.id,
+                       day_of_week=day_of_week, start_time=start_time, end_time=end_time,
+                       room=section.room, building="Academic Block",
+                       effective_from=date.today() - timedelta(days=120),
+                       effective_to=date.today() + timedelta(days=240),
+                       status="active", created_by=created_by, updated_by=created_by
+                   ),
+        )
+        row.room = section.room
+        row.status = row.status or "active"
+        row.updated_by = created_by
+        row.updated_at = datetime.utcnow()
+
+
+def _ensure_identity_card(s, student, valid_until=None):
+    valid_until = valid_until or (date.today() + timedelta(days=730))
+    card_number = f"ICMS-{student.roll_no}"
+    token = f"IC{student.roll_no[-10:]}".upper()
+    row = (s.query(D.StudentIdentityCard)
+           .filter(D.StudentIdentityCard.student_id == student.id)
+           .first())
+    if row is None:
+        row = D.StudentIdentityCard(
+            id=f"idc_{student.id}", tenant_id=TENANT, student_id=student.id,
+            card_number=card_number, verification_token=token
+        )
+        s.add(row)
+    row.card_number = row.card_number or card_number
+    row.verification_token = row.verification_token or token
+    row.blood_group = student.blood_group or row.blood_group or "O+"
+    row.issued_on = row.issued_on or date.today()
+    row.valid_until = valid_until
+    row.status = "active"
+    row.updated_at = datetime.utcnow()
+    return row
+
+
+def _recent_weekday_dates(weekday: int, count: int, end_date=DEMO_ATTENDANCE_TODAY):
+    cursor = end_date
+    while cursor.weekday() != weekday:
+        cursor -= timedelta(days=1)
+    dates = []
+    for _ in range(count):
+        dates.append(cursor)
+        cursor -= timedelta(days=7)
+    return list(reversed(dates))
+
+
+def _attendance_demo_marked_by(status: str) -> str:
+    if status == "late":
+        return "Clerk Office"
+    if status in {"leave", "od"}:
+        return "Head of Department Office"
+    return "Department Office"
+
+
+def _attendance_demo_note(status: str) -> str:
+    mapping = {
+        "present": "Daily attendance verified by the department office.",
+        "late": "Clerk office pushed a late verified update.",
+        "absent": "Session closed as absent after faculty marking.",
+        "leave": "Approved leave note posted by the office.",
+        "od": "OD entry verified by the HOD office.",
+    }
+    return mapping.get(status, "Attendance status updated by the department office.")
+
+
+def _ensure_student_portal_demo_sections(s, dept_id: str):
+    term = f"{DEMO_ATTENDANCE_TODAY.year}-Odd"
+    sections = []
+    for spec in STUDENT_PORTAL_ATTENDANCE_DEMO:
+        course_id = f"course_{spec['code'].lower()}"
+        course = _ensure(
+            s, D.Course, course_id,
+            lambda spec=spec, course_id=course_id: D.Course(
+                id=course_id,
+                tenant_id=TENANT,
+                dept_id=dept_id,
+                code=spec["code"],
+                title=spec["title"],
+                credits=spec["credits"],
+                semester=spec["semester"],
+                description=f"{spec['title']} core course for semester {spec['semester']}.",
+            ),
+        )
+        course.dept_id = dept_id
+        course.code = spec["code"]
+        course.title = spec["title"]
+        course.credits = spec["credits"]
+        course.semester = spec["semester"]
+        course.description = f"{spec['title']} core course for semester {spec['semester']}."
+
+        faculty = _ensure(
+            s, D.StaffMember, spec["faculty_id"],
+            lambda spec=spec, dept_id=dept_id: D.StaffMember(
+                id=spec["faculty_id"],
+                tenant_id=TENANT,
+                emp_id=f"PORTAL-{spec['code']}",
+                name=spec["faculty_name"],
+                email=f"{spec['code'].lower()}@icms.edu",
+                dept_id=dept_id,
+                designation=spec["designation"],
+                office_n=11,
+                campus=CAMPUS_SCOPES[0],
+                date_joined=date(2017, 6, 1),
+            ),
+        )
+        faculty.dept_id = dept_id
+        faculty.name = spec["faculty_name"]
+        faculty.designation = spec["designation"]
+        faculty.office_n = faculty.office_n or 11
+        faculty.campus = faculty.campus or CAMPUS_SCOPES[0]
+
+        section_id = f"sec_portal_{spec['code'].lower()}_{spec['section_code'].lower()}"
+        section = _ensure(
+            s, D.Section, section_id,
+            lambda spec=spec, section_id=section_id, course=course, dept_id=dept_id, faculty=faculty: D.Section(
+                id=section_id,
+                tenant_id=TENANT,
+                course_id=course.id,
+                dept_id=dept_id,
+                term=term,
+                section_code=spec["section_code"],
+                faculty_person_id=faculty.id,
+                room=spec["room"],
+                schedule=f"{['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][spec['day_of_week']]} {spec['start_time']}-{spec['end_time']}",
+                capacity=60,
+                scope_ref=dept_id,
+            ),
+        )
+        section.course_id = course.id
+        section.dept_id = dept_id
+        section.term = term
+        section.section_code = spec["section_code"]
+        section.faculty_person_id = faculty.id
+        section.room = spec["room"]
+        section.schedule = f"{['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][spec['day_of_week']]} {spec['start_time']}-{spec['end_time']}"
+        section.capacity = 60
+        section.scope_ref = dept_id
+
+        timetable_id = f"tt_portal_{spec['code'].lower()}"
+        timetable = _ensure(
+            s, D.TimetableEntry, timetable_id,
+            lambda spec=spec, timetable_id=timetable_id, section=section: D.TimetableEntry(
+                id=timetable_id,
+                tenant_id=TENANT,
+                section_id=section.id,
+                day_of_week=spec["day_of_week"],
+                start_time=spec["start_time"],
+                end_time=spec["end_time"],
+                room=spec["room"],
+                building=spec["building"],
+                effective_from=DEMO_ATTENDANCE_TODAY - timedelta(days=56),
+                effective_to=DEMO_ATTENDANCE_TODAY + timedelta(days=120),
+                status="active",
+                created_by="Dean Academics Office",
+                updated_by="Dean Academics Office",
+                created_at=DEMO_ATTENDANCE_NOW,
+                updated_at=DEMO_ATTENDANCE_NOW,
+            ),
+        )
+        timetable.section_id = section.id
+        timetable.day_of_week = spec["day_of_week"]
+        timetable.start_time = spec["start_time"]
+        timetable.end_time = spec["end_time"]
+        timetable.room = spec["room"]
+        timetable.building = spec["building"]
+        timetable.effective_from = DEMO_ATTENDANCE_TODAY - timedelta(days=56)
+        timetable.effective_to = DEMO_ATTENDANCE_TODAY + timedelta(days=120)
+        timetable.status = "active"
+        timetable.created_by = "Dean Academics Office"
+        timetable.updated_by = "Dean Academics Office"
+        timetable.updated_at = DEMO_ATTENDANCE_NOW
+
+        sections.append({"spec": spec, "course": course, "faculty": faculty, "section": section})
+
+    # These demo rows are linked later by assessments, timetable entries,
+    # and attendance records during the same unit of work. Flush once here
+    # so the live container startup seed can safely reference them.
+    s.flush()
+    return sections
+
+
+def _seed_student_portal_attendance_demo(s, student, demo_sections):
+    demo_section_ids = {item["section"].id for item in demo_sections}
+    enrollments = s.query(D.Enrollment).filter(D.Enrollment.student_id == student.id).all()
+    for row in enrollments:
+        row.status = "enrolled" if row.section_id in demo_section_ids else "dropped"
+
+    for item in demo_sections:
+        section = item["section"]
+        spec = item["spec"]
+        enrollment_id = f"enr_portal_{student.id}_{section.id}"
+        enrollment = _ensure(
+            s, D.Enrollment, enrollment_id,
+            lambda enrollment_id=enrollment_id, student=student, section=section: D.Enrollment(
+                id=enrollment_id,
+                tenant_id=TENANT,
+                student_id=student.id,
+                section_id=section.id,
+                status="enrolled",
+            ),
+        )
+        enrollment.student_id = student.id
+        enrollment.section_id = section.id
+        enrollment.status = "enrolled"
+
+    s.query(D.AttendanceRecord).filter(D.AttendanceRecord.id.like(f"att_portal_{student.id}_%")).delete(synchronize_session=False)
+
+    for course_index, item in enumerate(demo_sections, start=1):
+        spec = item["spec"]
+        section = item["section"]
+        course = item["course"]
+        session_dates = _recent_weekday_dates(spec["day_of_week"], len(spec["statuses"]))
+        for index, (session_date, status) in enumerate(zip(session_dates, spec["statuses"]), start=1):
+            if status == "pending":
+                continue
+            record_id = f"att_portal_{student.id}_{spec['code'].lower()}_{index:02d}"
+            updated_at = datetime.combine(session_date, datetime.min.time()).replace(
+                hour=16,
+                minute=10 + min(index, 20),
+            )
+            row = D.AttendanceRecord(
+                id=record_id,
+                tenant_id=TENANT,
+                section_id=section.id,
+                student_id=student.id,
+                on_date=session_date,
+                present=status in {"present", "late"},
+                status=status,
+                note=_attendance_demo_note(status),
+                marked_by=_attendance_demo_marked_by(status),
+                updated_at=updated_at,
+            )
+            s.add(row)
+
+        quiz_id = f"asmt_portal_{spec['code'].lower()}_quiz"
+        quiz_date = DEMO_ATTENDANCE_NOW + timedelta(days=course_index)
+        quiz = _ensure(
+            s, D.Assessment, quiz_id,
+            lambda quiz_id=quiz_id, section=section, course=course, quiz_date=quiz_date: D.Assessment(
+                id=quiz_id,
+                tenant_id=TENANT,
+                section_id=section.id,
+                name=f"{course.code} Attendance Review Quiz",
+                max_marks=20,
+                weight=1.0,
+                assessment_type="quiz",
+                scheduled_at=quiz_date,
+                end_at=quiz_date + timedelta(hours=1),
+                published=True,
+                instructions="Bring your digital ID and be seated 15 minutes before the quiz.",
+                status="published",
+            ),
+        )
+        quiz.section_id = section.id
+        quiz.name = f"{course.code} Attendance Review Quiz"
+        quiz.max_marks = 20
+        quiz.weight = 1.0
+        quiz.assessment_type = "quiz"
+        quiz.scheduled_at = quiz_date
+        quiz.end_at = quiz_date + timedelta(hours=1)
+        quiz.published = True
+        quiz.instructions = "Bring your digital ID and be seated 15 minutes before the quiz."
+        quiz.status = "published"
+
+        task_id = f"task_portal_{student.id}_{section.id}"
+        task = _ensure(
+            s, D.Assignment, task_id,
+            lambda task_id=task_id, section=section, course=course: D.Assignment(
+                id=task_id,
+                tenant_id=TENANT,
+                section_id=section.id,
+                title=f"{course.code} tutorial submission",
+                description=f"Upload the latest {course.title.lower()} worksheet reviewed by the department office.",
+                assigned_at=DEMO_ATTENDANCE_NOW - timedelta(days=2),
+                due_at=DEMO_ATTENDANCE_NOW + timedelta(days=2 + course_index),
+                status="published",
+                created_by=item["faculty"].name,
+                updated_by=item["faculty"].name,
+                created_at=DEMO_ATTENDANCE_NOW - timedelta(days=2),
+                updated_at=DEMO_ATTENDANCE_NOW - timedelta(days=2),
+            ),
+        )
+        task.section_id = section.id
+        task.title = f"{course.code} tutorial submission"
+        task.description = f"Upload the latest {course.title.lower()} worksheet reviewed by the department office."
+        task.assigned_at = DEMO_ATTENDANCE_NOW - timedelta(days=2)
+        task.due_at = DEMO_ATTENDANCE_NOW + timedelta(days=2 + course_index)
+        task.status = "published"
+        task.created_by = item["faculty"].name
+        task.updated_by = item["faculty"].name
+        task.updated_at = DEMO_ATTENDANCE_NOW - timedelta(days=2)
+
+
+def _seed_student_portal_examinations_demo(s, student, demo_sections):
+    section_by_code = {item["course"].code: item for item in demo_sections}
+    academic_year = "2026-27"
+
+    s.query(D.ExamSeatAssignment).filter(D.ExamSeatAssignment.id.like("seat_portal_%")).delete(synchronize_session=False)
+    s.query(D.ExamScheduleHistory).filter(D.ExamScheduleHistory.id.like("exhist_portal_%")).delete(synchronize_session=False)
+    s.query(D.ExamScheduleEntry).filter(D.ExamScheduleEntry.id.like("exsched_portal_%")).delete(synchronize_session=False)
+
+    exam_specs = [
+        {
+            "assessment_id": "asmt_portal_cs401_midterm",
+            "code": "CS401",
+            "name": "Mid Term Examination",
+            "assessment_type": "mid_term",
+            "max_marks": 100,
+            "weight": 3.0,
+            "start_at": datetime(2026, 8, 20, 9, 30),
+            "end_at": datetime(2026, 8, 20, 11, 0),
+            "venue": "Seminar Hall 1",
+            "mode": "Offline",
+            "assessment_status": "completed",
+            "schedule_status": "completed",
+            "managed_by_office_n": 16,
+            "created_by": "Exam Controller Office",
+            "faculty_publish_by": "Dr. Meera Nair",
+            "score": 78,
+            "mark_status": "published",
+            "mark_published_at": datetime(2026, 8, 20, 18, 30),
+            "note": "Published to enrolled students after faculty verification.",
+        },
+        {
+            "assessment_id": "asmt_portal_cs402_assignment2",
+            "code": "CS402",
+            "name": "Assignment 2",
+            "assessment_type": "assignment",
+            "max_marks": 20,
+            "weight": 1.5,
+            "start_at": datetime(2026, 8, 18, 14, 0),
+            "end_at": datetime(2026, 8, 18, 15, 0),
+            "venue": "Systems Block 3",
+            "mode": "Offline",
+            "assessment_status": "completed",
+            "schedule_status": "completed",
+            "managed_by_office_n": 10,
+            "created_by": "Head of Department Office",
+            "faculty_publish_by": "Prof. Arun Kumar",
+            "score": 18,
+            "mark_status": "published",
+            "mark_published_at": datetime(2026, 8, 18, 17, 45),
+            "note": "Internal assessment venue confirmed by HOD office.",
+        },
+        {
+            "assessment_id": "asmt_portal_cs403_labtest1",
+            "code": "CS403",
+            "name": "Lab Test 1",
+            "assessment_type": "lab_test",
+            "max_marks": 30,
+            "weight": 2.0,
+            "start_at": datetime(2026, 8, 15, 11, 0),
+            "end_at": datetime(2026, 8, 15, 12, 30),
+            "venue": "Cloud Lab 2",
+            "mode": "Offline",
+            "assessment_status": "completed",
+            "schedule_status": "completed",
+            "managed_by_office_n": 16,
+            "created_by": "Exam Controller Office",
+            "faculty_publish_by": "Dr. Priya Iyer",
+            "score": 27,
+            "mark_status": "published",
+            "mark_published_at": datetime(2026, 8, 15, 18, 15),
+            "note": "Venue revised by lab office before exam day.",
+            "history": [
+                {
+                    "id": "exhist_portal_cs403_labtest1_created",
+                    "change_type": "created",
+                    "previous_start_at": None,
+                    "previous_end_at": None,
+                    "previous_venue": "",
+                    "previous_status": "",
+                    "new_start_at": datetime(2026, 8, 15, 11, 0),
+                    "new_end_at": datetime(2026, 8, 15, 12, 30),
+                    "new_venue": "Cloud Lab 1",
+                    "new_status": "scheduled",
+                    "note": "Initial lab slot released by exam office.",
+                    "created_by": "Exam Controller Office",
+                    "created_at": datetime(2026, 8, 10, 10, 0),
+                },
+                {
+                    "id": "exhist_portal_cs403_labtest1_venue",
+                    "change_type": "updated",
+                    "previous_start_at": datetime(2026, 8, 15, 11, 0),
+                    "previous_end_at": datetime(2026, 8, 15, 12, 30),
+                    "previous_venue": "Cloud Lab 1",
+                    "previous_status": "scheduled",
+                    "new_start_at": datetime(2026, 8, 15, 11, 0),
+                    "new_end_at": datetime(2026, 8, 15, 12, 30),
+                    "new_venue": "Cloud Lab 2",
+                    "new_status": "completed",
+                    "note": "Venue moved after cloud rack maintenance.",
+                    "created_by": "HOD Office",
+                    "created_at": datetime(2026, 8, 12, 16, 0),
+                },
+            ],
+        },
+        {
+            "assessment_id": "asmt_portal_cs404_quiz2",
+            "code": "CS404",
+            "name": "Quiz 2",
+            "assessment_type": "quiz",
+            "max_marks": 20,
+            "weight": 1.0,
+            "start_at": datetime(2026, 8, 14, 9, 0),
+            "end_at": datetime(2026, 8, 14, 9, 30),
+            "venue": "Academic Block LH-5",
+            "mode": "Offline",
+            "assessment_status": "completed",
+            "schedule_status": "completed",
+            "managed_by_office_n": 10,
+            "created_by": "Head of Department Office",
+            "faculty_publish_by": "Prof. Vivek Rao",
+            "score": 14,
+            "mark_status": "published",
+            "mark_published_at": datetime(2026, 8, 14, 15, 10),
+            "note": "Published after section-wise validation.",
+        },
+        {
+            "assessment_id": "asmt_portal_cs405_viva1",
+            "code": "CS405",
+            "name": "Viva 1",
+            "assessment_type": "viva",
+            "max_marks": 20,
+            "weight": 1.0,
+            "start_at": datetime(2026, 8, 17, 15, 0),
+            "end_at": datetime(2026, 8, 17, 16, 0),
+            "venue": "Security Wing Seminar Room",
+            "mode": "Offline",
+            "assessment_status": "completed",
+            "schedule_status": "completed",
+            "managed_by_office_n": 16,
+            "created_by": "Exam Controller Office",
+            "faculty_publish_by": "Dr. Sneha Nair",
+            "score": 17,
+            "mark_status": "published",
+            "mark_published_at": datetime(2026, 8, 17, 18, 5),
+            "note": "Panel viva marks released by assigned faculty.",
+        },
+        {
+            "assessment_id": "asmt_portal_cs401_quiz",
+            "code": "CS401",
+            "name": "Unit Test 2",
+            "assessment_type": "quiz",
+            "max_marks": 20,
+            "weight": 1.0,
+            "start_at": datetime(2026, 8, 26, 16, 15),
+            "end_at": datetime(2026, 8, 26, 17, 15),
+            "venue": "AI Block LH-2",
+            "mode": "Offline",
+            "assessment_status": "published",
+            "schedule_status": "scheduled",
+            "managed_by_office_n": 10,
+            "created_by": "Head of Department Office",
+            "faculty_publish_by": "Dr. Meera Nair",
+            "score": None,
+            "mark_status": "",
+            "note": "Faculty released the quiz instructions for enrolled students.",
+        },
+        {
+            "assessment_id": "asmt_portal_cs402_internal3",
+            "code": "CS402",
+            "name": "Internal Assessment 3",
+            "assessment_type": "internal",
+            "max_marks": 25,
+            "weight": 2.0,
+            "start_at": datetime(2026, 8, 27, 10, 30),
+            "end_at": datetime(2026, 8, 27, 12, 0),
+            "venue": "Systems Block LH-3",
+            "mode": "Offline",
+            "assessment_status": "published",
+            "schedule_status": "scheduled",
+            "managed_by_office_n": 16,
+            "created_by": "Exam Controller Office",
+            "faculty_publish_by": "Prof. Arun Kumar",
+            "score": None,
+            "mark_status": "",
+            "note": "Exam office published the section-wise internal timetable.",
+        },
+        {
+            "assessment_id": "asmt_portal_cs403_labreview",
+            "code": "CS403",
+            "name": "Lab Evaluation 2",
+            "assessment_type": "lab_test",
+            "max_marks": 25,
+            "weight": 1.5,
+            "start_at": datetime(2026, 8, 28, 11, 15),
+            "end_at": datetime(2026, 8, 28, 12, 30),
+            "venue": "Cloud Lab 2",
+            "mode": "Offline",
+            "assessment_status": "published",
+            "schedule_status": "scheduled",
+            "managed_by_office_n": 10,
+            "created_by": "Head of Department Office",
+            "faculty_publish_by": "Dr. Priya Iyer",
+            "score": None,
+            "mark_status": "",
+            "note": "Lab batch schedule locked by HOD office.",
+        },
+        {
+            "assessment_id": "asmt_portal_cs404_midsem",
+            "code": "CS404",
+            "name": "Mid Sem Examination",
+            "assessment_type": "mid_term",
+            "max_marks": 100,
+            "weight": 3.0,
+            "start_at": datetime(2026, 8, 29, 9, 0),
+            "end_at": datetime(2026, 8, 29, 11, 0),
+            "venue": "Academic Block LH-5",
+            "mode": "Offline",
+            "assessment_status": "rescheduled",
+            "schedule_status": "rescheduled",
+            "managed_by_office_n": 16,
+            "created_by": "Exam Controller Office",
+            "faculty_publish_by": "Prof. Vivek Rao",
+            "score": None,
+            "mark_status": "",
+            "note": "Rescheduled after hall allocation update from the HOD office.",
+            "history": [
+                {
+                    "id": "exhist_portal_cs404_midsem_created",
+                    "change_type": "created",
+                    "previous_start_at": None,
+                    "previous_end_at": None,
+                    "previous_venue": "",
+                    "previous_status": "",
+                    "new_start_at": datetime(2026, 8, 28, 9, 0),
+                    "new_end_at": datetime(2026, 8, 28, 11, 0),
+                    "new_venue": "Academic Block LH-5",
+                    "new_status": "scheduled",
+                    "note": "Initial mid sem slot shared with students.",
+                    "created_by": "Exam Controller Office",
+                    "created_at": datetime(2026, 8, 8, 12, 0),
+                },
+                {
+                    "id": "exhist_portal_cs404_midsem_rescheduled",
+                    "change_type": "rescheduled",
+                    "previous_start_at": datetime(2026, 8, 28, 9, 0),
+                    "previous_end_at": datetime(2026, 8, 28, 11, 0),
+                    "previous_venue": "Academic Block LH-5",
+                    "previous_status": "scheduled",
+                    "new_start_at": datetime(2026, 8, 29, 9, 0),
+                    "new_end_at": datetime(2026, 8, 29, 11, 0),
+                    "new_venue": "Academic Block LH-5",
+                    "new_status": "rescheduled",
+                    "note": "Rescheduled because the HOD office moved the section slot.",
+                    "created_by": "HOD Office",
+                    "created_at": datetime(2026, 8, 22, 17, 30),
+                },
+            ],
+        },
+        {
+            "assessment_id": "asmt_portal_cs405_viva2",
+            "code": "CS405",
+            "name": "Viva Voce 2",
+            "assessment_type": "viva",
+            "max_marks": 25,
+            "weight": 1.5,
+            "start_at": datetime(2026, 8, 30, 14, 30),
+            "end_at": datetime(2026, 8, 30, 15, 30),
+            "venue": "Security Wing Seminar Room",
+            "mode": "Offline",
+            "assessment_status": "published",
+            "schedule_status": "scheduled",
+            "managed_by_office_n": 10,
+            "created_by": "Head of Department Office",
+            "faculty_publish_by": "Dr. Sneha Nair",
+            "score": None,
+            "mark_status": "",
+            "note": "Faculty panel list synced from department office.",
+        },
+        {
+            "assessment_id": "asmt_portal_cs401_case_review",
+            "code": "CS401",
+            "name": "Case Review Assessment",
+            "assessment_type": "internal",
+            "max_marks": 25,
+            "weight": 1.5,
+            "start_at": datetime(2026, 8, 24, 10, 0),
+            "end_at": datetime(2026, 8, 24, 11, 15),
+            "venue": "AI Block Seminar Room",
+            "mode": "Offline",
+            "assessment_status": "completed",
+            "schedule_status": "completed",
+            "managed_by_office_n": 10,
+            "created_by": "Head of Department Office",
+            "faculty_publish_by": "Dr. Meera Nair",
+            "score": 21,
+            "mark_status": "draft",
+            "mark_published_at": None,
+            "note": "Faculty moderation is in progress. Marks are expected to publish after review on August 27, 2026.",
+        },
+        {
+            "assessment_id": "asmt_portal_cs405_panel_review",
+            "code": "CS405",
+            "name": "Panel Review Practical",
+            "assessment_type": "external_final",
+            "max_marks": 50,
+            "weight": 2.0,
+            "start_at": datetime(2026, 8, 23, 14, 0),
+            "end_at": datetime(2026, 8, 23, 16, 0),
+            "venue": "Security Wing Practical Hall",
+            "mode": "Offline",
+            "assessment_status": "completed",
+            "schedule_status": "completed",
+            "managed_by_office_n": 16,
+            "created_by": "Exam Controller Office",
+            "faculty_publish_by": "Dr. Sneha Nair",
+            "score": None,
+            "mark_status": "",
+            "note": "Panel sheets were submitted to the exam office on August 24, 2026. Publication is pending office verification.",
+        },
+        {
+            "assessment_id": "asmt_portal_cs402_surprise_cancelled",
+            "code": "CS402",
+            "name": "Practice Test",
+            "assessment_type": "test",
+            "max_marks": 20,
+            "weight": 1.0,
+            "start_at": datetime(2026, 8, 31, 15, 0),
+            "end_at": datetime(2026, 8, 31, 16, 0),
+            "venue": "Systems Block LH-3",
+            "mode": "Offline",
+            "assessment_status": "cancelled",
+            "schedule_status": "cancelled",
+            "managed_by_office_n": 16,
+            "created_by": "Exam Controller Office",
+            "faculty_publish_by": "Prof. Arun Kumar",
+            "score": None,
+            "mark_status": "",
+            "note": "Cancelled and excluded from student upcoming list.",
+            "history": [
+                {
+                    "id": "exhist_portal_cs402_surprise_created",
+                    "change_type": "created",
+                    "previous_start_at": None,
+                    "previous_end_at": None,
+                    "previous_venue": "",
+                    "previous_status": "",
+                    "new_start_at": datetime(2026, 8, 31, 15, 0),
+                    "new_end_at": datetime(2026, 8, 31, 16, 0),
+                    "new_venue": "Systems Block LH-3",
+                    "new_status": "scheduled",
+                    "note": "Additional practice slot announced.",
+                    "created_by": "Exam Controller Office",
+                    "created_at": datetime(2026, 8, 19, 11, 0),
+                },
+                {
+                    "id": "exhist_portal_cs402_surprise_cancelled",
+                    "change_type": "cancelled",
+                    "previous_start_at": datetime(2026, 8, 31, 15, 0),
+                    "previous_end_at": datetime(2026, 8, 31, 16, 0),
+                    "previous_venue": "Systems Block LH-3",
+                    "previous_status": "scheduled",
+                    "new_start_at": datetime(2026, 8, 31, 15, 0),
+                    "new_end_at": datetime(2026, 8, 31, 16, 0),
+                    "new_venue": "Systems Block LH-3",
+                    "new_status": "cancelled",
+                    "note": "Cancelled after timetable consolidation.",
+                    "created_by": "Exam Controller Office",
+                    "created_at": datetime(2026, 8, 24, 9, 20),
+                },
+            ],
+        },
+        {
+            "assessment_id": "asmt_portal_cs405_internal_draft",
+            "code": "CS405",
+            "name": "Internal Draft Review",
+            "assessment_type": "internal",
+            "max_marks": 25,
+            "weight": 1.0,
+            "start_at": datetime(2026, 8, 19, 9, 30),
+            "end_at": datetime(2026, 8, 19, 10, 30),
+            "venue": "Security Wing LH-1",
+            "mode": "Offline",
+            "assessment_status": "draft",
+            "schedule_status": "scheduled",
+            "managed_by_office_n": 10,
+            "created_by": "Head of Department Office",
+            "faculty_publish_by": "Dr. Sneha Nair",
+            "score": 19,
+            "mark_status": "draft",
+            "mark_published_at": None,
+            "note": "Draft-only mark entry should stay hidden from student view.",
+        },
+    ]
+    seat_plan = {
+        "asmt_portal_cs401_midterm": ("A-12", "Seminar Hall 1 / Row A"),
+        "asmt_portal_cs402_assignment2": ("B-08", "Systems Block 3 / Row B"),
+        "asmt_portal_cs403_labtest1": ("Bench 14", "Cloud Lab 2 / Bay 3"),
+        "asmt_portal_cs404_quiz2": ("C-04", "Academic Block LH-5 / Row C"),
+        "asmt_portal_cs405_viva1": ("Panel 02", "Security Wing Seminar Room"),
+        "asmt_portal_cs401_quiz": ("A-18", "AI Block LH-2 / Row A"),
+        "asmt_portal_cs402_internal3": ("B-11", "Systems Block LH-3 / Row B"),
+        "asmt_portal_cs403_labreview": ("Bench 09", "Cloud Lab 2 / Bay 2"),
+        "asmt_portal_cs404_midsem": ("C-21", "Academic Block LH-5 / Row C"),
+        "asmt_portal_cs405_viva2": ("Panel 04", "Security Wing Seminar Room"),
+        "asmt_portal_cs401_case_review": ("A-09", "AI Block Seminar Room"),
+        "asmt_portal_cs405_panel_review": ("Bench 06", "Security Wing Practical Hall"),
+    }
+
+    for spec in exam_specs:
+        item = section_by_code[spec["code"]]
+        section = item["section"]
+        course = item["course"]
+        faculty = item["faculty"]
+        assessment = _ensure(
+            s, D.Assessment, spec["assessment_id"],
+            lambda spec=spec, section=section: D.Assessment(
+                id=spec["assessment_id"],
+                tenant_id=TENANT,
+                section_id=section.id,
+                name=spec["name"],
+                max_marks=spec["max_marks"],
+                weight=spec["weight"],
+                locked=False,
+                assessment_type=spec["assessment_type"],
+                scheduled_at=spec["start_at"],
+                end_at=spec["end_at"],
+                published=spec["assessment_status"] != "draft",
+                instructions=spec["note"],
+                status=spec["assessment_status"],
+            ),
+        )
+        assessment.section_id = section.id
+        assessment.name = spec["name"]
+        assessment.max_marks = spec["max_marks"]
+        assessment.weight = spec["weight"]
+        assessment.locked = False
+        assessment.assessment_type = spec["assessment_type"]
+        assessment.scheduled_at = spec["start_at"]
+        assessment.end_at = spec["end_at"]
+        assessment.published = spec["assessment_status"] != "draft"
+        assessment.instructions = spec["note"]
+        assessment.status = spec["assessment_status"]
+        assessment.academic_year = academic_year
+        assessment.created_by = faculty.name
+        assessment.updated_by = spec["created_by"]
+        assessment.created_at = min(spec["start_at"], DEMO_ATTENDANCE_NOW) - timedelta(days=7)
+        assessment.updated_at = min(spec["start_at"], DEMO_ATTENDANCE_NOW) - timedelta(days=1)
+        assessment.published_at = (min(spec["start_at"], DEMO_ATTENDANCE_NOW) - timedelta(days=5)) if assessment.published else None
+        assessment.published_by = spec["created_by"] if assessment.published else ""
+
+        schedule_id = f"exsched_portal_{spec['assessment_id']}"
+        schedule = _ensure(
+            s, D.ExamScheduleEntry, schedule_id,
+            lambda schedule_id=schedule_id, assessment=assessment, section=section, spec=spec: D.ExamScheduleEntry(
+                id=schedule_id,
+                tenant_id=TENANT,
+                assessment_id=assessment.id,
+                section_id=section.id,
+                academic_year=academic_year,
+                semester=course.semester,
+                exam_type=spec["assessment_type"],
+                start_at=spec["start_at"],
+                end_at=spec["end_at"],
+                venue=spec["venue"],
+                mode=spec["mode"],
+                status=spec["schedule_status"],
+                version_no=2 if spec["schedule_status"] == "rescheduled" else 1,
+                is_active=True,
+                managed_by_office_n=spec["managed_by_office_n"],
+                note=spec["note"],
+                created_by=spec["created_by"],
+                updated_by=spec["created_by"],
+                created_at=min(spec["start_at"], DEMO_ATTENDANCE_NOW) - timedelta(days=6),
+                updated_at=min(spec["start_at"], DEMO_ATTENDANCE_NOW) - timedelta(days=1),
+            ),
+        )
+        schedule.assessment_id = assessment.id
+        schedule.section_id = section.id
+        schedule.academic_year = academic_year
+        schedule.semester = course.semester
+        schedule.exam_type = spec["assessment_type"]
+        schedule.start_at = spec["start_at"]
+        schedule.end_at = spec["end_at"]
+        schedule.venue = spec["venue"]
+        schedule.mode = spec["mode"]
+        schedule.status = spec["schedule_status"]
+        schedule.version_no = 2 if spec["schedule_status"] == "rescheduled" else 1
+        schedule.is_active = True
+        schedule.managed_by_office_n = spec["managed_by_office_n"]
+        schedule.note = spec["note"]
+        schedule.created_by = spec["created_by"]
+        schedule.updated_by = spec["created_by"]
+        schedule.created_at = min(spec["start_at"], DEMO_ATTENDANCE_NOW) - timedelta(days=6)
+        schedule.updated_at = min(spec["start_at"], DEMO_ATTENDANCE_NOW) - timedelta(days=1)
+
+        history_specs = spec.get("history") or [
+            {
+                "id": f"exhist_portal_{spec['assessment_id']}_created",
+                "change_type": "created",
+                "previous_start_at": None,
+                "previous_end_at": None,
+                "previous_venue": "",
+                "previous_status": "",
+                "new_start_at": spec["start_at"],
+                "new_end_at": spec["end_at"],
+                "new_venue": spec["venue"],
+                "new_status": spec["schedule_status"],
+                "note": spec["note"],
+                "created_by": spec["created_by"],
+                "created_at": min(spec["start_at"], DEMO_ATTENDANCE_NOW) - timedelta(days=6),
+            }
+        ]
+        for history_spec in history_specs:
+            history = _ensure(
+                s, D.ExamScheduleHistory, history_spec["id"],
+                lambda history_spec=history_spec, schedule=schedule, assessment=assessment: D.ExamScheduleHistory(
+                    id=history_spec["id"],
+                    tenant_id=TENANT,
+                    schedule_id=schedule.id,
+                    assessment_id=assessment.id,
+                    change_type=history_spec["change_type"],
+                    previous_start_at=history_spec["previous_start_at"],
+                    previous_end_at=history_spec["previous_end_at"],
+                    previous_venue=history_spec["previous_venue"],
+                    previous_status=history_spec["previous_status"],
+                    new_start_at=history_spec["new_start_at"],
+                    new_end_at=history_spec["new_end_at"],
+                    new_venue=history_spec["new_venue"],
+                    new_status=history_spec["new_status"],
+                    note=history_spec["note"],
+                    created_by=history_spec["created_by"],
+                    created_at=history_spec["created_at"],
+                ),
+            )
+            history.schedule_id = schedule.id
+            history.assessment_id = assessment.id
+            history.change_type = history_spec["change_type"]
+            history.previous_start_at = history_spec["previous_start_at"]
+            history.previous_end_at = history_spec["previous_end_at"]
+            history.previous_venue = history_spec["previous_venue"]
+            history.previous_status = history_spec["previous_status"]
+            history.new_start_at = history_spec["new_start_at"]
+            history.new_end_at = history_spec["new_end_at"]
+            history.new_venue = history_spec["new_venue"]
+            history.new_status = history_spec["new_status"]
+            history.note = history_spec["note"]
+            history.created_by = history_spec["created_by"]
+            history.created_at = history_spec["created_at"]
+
+        if spec["assessment_status"] != "draft" and spec["schedule_status"] != "cancelled":
+            seat_label, seat_zone = seat_plan.get(spec["assessment_id"], ("", ""))
+            if seat_label:
+                seat_id = f"seat_portal_{student.id}_{assessment.id}"
+                seat_assignment = _ensure(
+                    s, D.ExamSeatAssignment, seat_id,
+                    lambda seat_id=seat_id, schedule=schedule, assessment=assessment, spec=spec, seat_label=seat_label, seat_zone=seat_zone: D.ExamSeatAssignment(
+                        id=seat_id,
+                        tenant_id=TENANT,
+                        schedule_id=schedule.id,
+                        assessment_id=assessment.id,
+                        student_id=student.id,
+                        seat_label=seat_label,
+                        seat_zone=seat_zone,
+                        note=f"Seat released by {spec['created_by']} for the enrolled student only.",
+                        assigned_by=spec["created_by"],
+                        created_at=min(spec["start_at"], DEMO_ATTENDANCE_NOW) - timedelta(days=3),
+                        updated_at=min(spec["start_at"], DEMO_ATTENDANCE_NOW) - timedelta(days=1),
+                    ),
+                )
+                seat_assignment.schedule_id = schedule.id
+                seat_assignment.assessment_id = assessment.id
+                seat_assignment.student_id = student.id
+                seat_assignment.seat_label = seat_label
+                seat_assignment.seat_zone = seat_zone
+                seat_assignment.note = f"Seat released by {spec['created_by']} for the enrolled student only."
+                seat_assignment.assigned_by = spec["created_by"]
+                seat_assignment.created_at = min(spec["start_at"], DEMO_ATTENDANCE_NOW) - timedelta(days=3)
+                seat_assignment.updated_at = min(spec["start_at"], DEMO_ATTENDANCE_NOW) - timedelta(days=1)
+
+        existing_mark = (
+            s.query(D.Mark)
+            .filter(D.Mark.assessment_id == assessment.id, D.Mark.student_id == student.id)
+            .first()
+        )
+        if spec["score"] is None:
+            if existing_mark:
+                s.delete(existing_mark)
+            continue
+
+        mark_id = f"mk_portal_{student.id}_{assessment.id}"
+        mark = _ensure(
+            s, D.Mark, mark_id,
+            lambda mark_id=mark_id, assessment=assessment, student=student, spec=spec: D.Mark(
+                id=mark_id,
+                tenant_id=TENANT,
+                assessment_id=assessment.id,
+                student_id=student.id,
+                score=spec["score"],
+                entered_by=faculty.name,
+                entered_at=spec["end_at"] + timedelta(hours=2),
+                status=spec["mark_status"] or "draft",
+                published_at=spec.get("mark_published_at"),
+                published_by=spec["faculty_publish_by"] if spec.get("mark_published_at") else "",
+                is_valid=True,
+                updated_at=spec["end_at"] + timedelta(hours=2),
+            ),
+        )
+        mark.assessment_id = assessment.id
+        mark.student_id = student.id
+        mark.score = spec["score"]
+        mark.entered_by = faculty.name
+        mark.entered_at = spec["end_at"] + timedelta(hours=2)
+        mark.status = spec["mark_status"] or "draft"
+        mark.published_at = spec.get("mark_published_at")
+        mark.published_by = spec["faculty_publish_by"] if spec.get("mark_published_at") else ""
+        mark.is_valid = True
+        mark.updated_at = spec["end_at"] + timedelta(hours=2)
+
+
 def _seed_calendar_data(s):
     today = date.today()
     month_anchor = today.replace(day=1)
@@ -593,7 +1613,9 @@ def _seed_core_domain(s):
                                 dept_id=did, campus=CAMPUS_SCOPES[0], batch=batch,
                                 semester=sem, section=R.choice(["A", "B"]),
                                 status="active", cgpa=cgpa, hosteller=hosteller,
-                                scholarship=scholarship))
+                                scholarship=scholarship,
+                                blood_group=R.choice(["A+", "A-", "B+", "B-", "AB+", "O+"]),
+                                student_type="Regular"))
 
     # Flush again before inserting dependent enrollments, assessments and marks.
     s.flush()
@@ -601,6 +1623,9 @@ def _seed_core_domain(s):
     sections_by_key = {}
     for sid, cid, did, code, sem, fid, sec_code in section_rows:
         sections_by_key.setdefault((code, sem), []).append(sid)
+        section = s.get(D.Section, sid)
+        if section:
+            _ensure_timetable_entries_for_section(s, section)
 
     enr_i = 0
     for stu_id, code, did, sem, batch, cgpa in student_rows:
@@ -612,10 +1637,19 @@ def _seed_core_domain(s):
 
     asmt_i = 0
     for sid, cid, did, code, sem, fid, sec_code in section_rows[:30]:
-        for aname, mx in [("Midterm", 50), ("Quiz 1", 20)]:
+        for aname, mx, assessment_type, days_out in [
+            ("Midterm", 50, "test", -20),
+            ("Quiz 1", 20, "quiz", 7),
+        ]:
             asmt_i += 1
             s.add(D.Assessment(id=f"asmt_{asmt_i}", tenant_id=TENANT, section_id=sid,
-                               name=aname, max_marks=mx, weight=1.0))
+                               name=aname, max_marks=mx, weight=1.0,
+                               assessment_type=assessment_type,
+                               scheduled_at=datetime.combine(date.today() + timedelta(days=days_out), datetime.min.time()).replace(hour=10),
+                               end_at=datetime.combine(date.today() + timedelta(days=days_out), datetime.min.time()).replace(hour=11),
+                               published=(days_out >= 0),
+                               instructions="Carry your university ID card.",
+                               status="published" if days_out >= 0 else "closed"))
 
     for i in range(1, 26):
         prog = R.choice(list(dept_ids.keys()))
@@ -666,7 +1700,7 @@ def _seed_core_domain(s):
     for i in range(1, 13):
         stu = R.choice(student_rows)
         s.add(D.BookLoan(id=f"loan_{i}", tenant_id=TENANT, book_id=R.choice(book_ids),
-                         borrower=stu[0], borrower_name=_name(),
+                         borrower=stu[0], student_id=stu[0], borrower_name=_name(),
                          issued_on=today - timedelta(days=R.randint(1, 40)),
                          due_on=today + timedelta(days=R.randint(-10, 14)),
                          returned=False, fine=0))
@@ -757,6 +1791,9 @@ def _seed_core_domain(s):
                           detail="Auto-generated sample complaint for demo.",
                           status=R.choice(["open", "open", "investigating", "resolved"]),
                           severity=R.choice(["normal", "normal", "high"])))
+
+    for student in s.query(D.Student).all():
+        _ensure_identity_card(s, student, date.today() + timedelta(days=730))
 
     s.commit()
 
@@ -1406,57 +2443,47 @@ def _bind_portal_accounts(s):
 
     stu_login = _user("student")
     if stu_login and "CSE" in dept_ids:
-        pick = (s.query(D.Student)
-                .filter(D.Student.dept_id == dept_ids["CSE"], D.Student.batch == "2023")
-                .order_by(D.Student.cgpa.desc()).first())
+        existing_bound = s.query(D.Student).filter(D.Student.user_id == stu_login.id).order_by(D.Student.roll_no).all()
+        pick = None
+        if stu_login.scope_ref and not str(stu_login.scope_ref).startswith("scope_"):
+            pick = s.query(D.Student).get(stu_login.scope_ref)
+        if not pick and existing_bound:
+            pick = existing_bound[0]
+        if not pick:
+            pick = (s.query(D.Student)
+                    .filter(D.Student.dept_id == dept_ids["CSE"], D.Student.batch == "2023")
+                    .order_by(D.Student.cgpa.desc()).first())
         if not pick:
             pick = (s.query(D.Student)
                     .filter(D.Student.dept_id == dept_ids["CSE"])
                     .order_by(D.Student.cgpa.desc()).first())
         if pick:
+            demo_sections = _ensure_student_portal_demo_sections(s, dept_ids["CSE"])
+            for row in existing_bound:
+                if row.id != pick.id:
+                    row.user_id = None
             pick.user_id = stu_login.id
+            pick.name = "Ananya Rao"
+            pick.semester = 7
+            pick.section = "A"
+            pick.batch = "2023"
+            pick.status = "active"
+            pick.campus = pick.campus or CAMPUS_SCOPES[0]
+            pick.blood_group = pick.blood_group or "B+"
+            pick.student_type = "Regular"
             stu_login.role = pick.name
             stu_login.scope_ref = pick.id
-            sections = s.query(D.Section).filter(D.Section.dept_id == dept_ids["CSE"]).all()[:5]
-            for sec in sections:
-                enr_id = f"enr_bound_{pick.id}_{sec.id}"
-                _ensure(
-                    s, D.Enrollment, enr_id,
-                    lambda enr_id=enr_id, sec=sec, pick=pick: D.Enrollment(
-                        id=enr_id, tenant_id=TENANT, student_id=pick.id,
-                        section_id=sec.id, status="enrolled"
-                    ),
-                )
-                for k in range(30):
-                    att_id = f"att_bound_{pick.id}_{sec.id}_{k}"
-                    _ensure(
-                        s, D.AttendanceRecord, att_id,
-                        lambda att_id=att_id, sec=sec, pick=pick, k=k: D.AttendanceRecord(
-                            id=att_id, tenant_id=TENANT, section_id=sec.id,
-                            student_id=pick.id, on_date=date.today() - timedelta(days=k),
-                            present=(k % 7 != 0), marked_by="Faculty"
-                        ),
-                    )
-                for asmt in s.query(D.Assessment).filter(D.Assessment.section_id == sec.id).all():
-                    mark_id = f"mk_bound_{pick.id}_{asmt.id}"
-                    _ensure(
-                        s, D.Mark, mark_id,
-                        lambda mark_id=mark_id, asmt=asmt, pick=pick: D.Mark(
-                            id=mark_id, tenant_id=TENANT, assessment_id=asmt.id,
-                            student_id=pick.id,
-                            score=round(asmt.max_marks * R.uniform(0.72, 0.96), 1),
-                            entered_by="Faculty"
-                        ),
-                    )
+            _seed_student_portal_attendance_demo(s, pick, demo_sections)
+            _seed_student_portal_examinations_demo(s, pick, demo_sections)
             any_book = s.query(D.Book).first()
             if any_book:
                 _ensure(
                     s, D.BookLoan, f"loan_bound_{pick.id}",
                     lambda any_book=any_book, pick=pick: D.BookLoan(
                         id=f"loan_bound_{pick.id}", tenant_id=TENANT, book_id=any_book.id,
-                        borrower=pick.id, borrower_name=pick.name,
-                        issued_on=date.today() - timedelta(days=6),
-                        due_on=date.today() + timedelta(days=8), returned=False
+                        borrower=pick.id, student_id=pick.id, borrower_name=pick.name,
+                        issued_on=DEMO_ATTENDANCE_TODAY - timedelta(days=6),
+                        due_on=DEMO_ATTENDANCE_TODAY + timedelta(days=8), returned=False
                     ),
                 )
             invoice = s.query(D.FeeInvoice).filter(D.FeeInvoice.student_id == pick.id).first()
@@ -1470,7 +2497,7 @@ def _bind_portal_accounts(s):
                     payments[0].amount = round(invoice.amount * 0.35)
                     payments[0].method = "upi"
                     payments[0].reference = f"TXN-DEMO-{pick.roll_no}-1"
-                    payments[0].at = datetime.combine(date.today() - timedelta(days=42), datetime.min.time())
+                    payments[0].at = datetime.combine(DEMO_ATTENDANCE_TODAY - timedelta(days=42), datetime.min.time())
                 else:
                     _ensure(
                         s, D.Payment, f"pay_bound_{pick.id}_1",
@@ -1479,7 +2506,7 @@ def _bind_portal_accounts(s):
                             invoice_id=invoice.id, student_id=pick.id,
                             amount=round(invoice.amount * 0.35), method="upi",
                             reference=f"TXN-DEMO-{pick.roll_no}-1",
-                            at=datetime.combine(date.today() - timedelta(days=42), datetime.min.time())
+                            at=datetime.combine(DEMO_ATTENDANCE_TODAY - timedelta(days=42), datetime.min.time())
                         ),
                     )
                 _ensure(
@@ -1489,7 +2516,7 @@ def _bind_portal_accounts(s):
                         invoice_id=invoice.id, student_id=pick.id,
                         amount=round(invoice.amount * 0.15), method="netbanking",
                         reference=f"TXN-DEMO-{pick.roll_no}-2",
-                        at=datetime.combine(date.today() - timedelta(days=11), datetime.min.time())
+                        at=datetime.combine(DEMO_ATTENDANCE_TODAY - timedelta(days=11), datetime.min.time())
                     ),
                 )
             any_room = s.query(D.HostelRoom).first()
@@ -1510,6 +2537,61 @@ def _bind_portal_accounts(s):
                     subject="Scholarship reimbursement status",
                     detail="Student portal showcase complaint used to verify grievance workflows.",
                     status="investigating", severity="high"
+                ),
+            )
+            _ensure_identity_card(s, pick, DEMO_ATTENDANCE_TODAY + timedelta(days=640))
+            program = s.query(D.Program).get(pick.program_id) if pick.program_id else None
+            if demo_sections:
+                _ensure(
+                    s, D.Announcement, f"ann_section_{pick.id}",
+                    lambda pick=pick, sec=demo_sections[0]["section"]: D.Announcement(
+                        id=f"ann_section_{pick.id}", tenant_id=TENANT,
+                        title="Section workshop on applied AI",
+                        body="Your enrolled section has a faculty workshop this week. Attendance is recommended.",
+                        audience="section", campus=pick.campus, department_id=pick.dept_id,
+                        program_id=pick.program_id, section_id=sec.id, student_id=None,
+                        published_at=DEMO_ATTENDANCE_NOW - timedelta(hours=3),
+                        expires_at=DEMO_ATTENDANCE_NOW + timedelta(days=7),
+                        status="published", created_by="Academic Coordinator Office", owner_office_n=17
+                    ),
+                )
+            _ensure(
+                s, D.Announcement, f"ann_dept_{pick.id}",
+                lambda pick=pick: D.Announcement(
+                    id=f"ann_dept_{pick.id}", tenant_id=TENANT,
+                    title="Department mentoring slots open",
+                    body="CSE mentoring bookings are now open for the current week.",
+                    audience="department", campus=pick.campus, department_id=pick.dept_id,
+                    program_id=None, section_id=None, student_id=None,
+                    published_at=DEMO_ATTENDANCE_NOW - timedelta(days=1),
+                    expires_at=DEMO_ATTENDANCE_NOW + timedelta(days=10),
+                    status="published", created_by="Head of Department Office", owner_office_n=10
+                ),
+            )
+            _ensure(
+                s, D.Announcement, f"ann_program_{pick.id}",
+                lambda pick=pick, program=program: D.Announcement(
+                    id=f"ann_program_{pick.id}", tenant_id=TENANT,
+                    title="Programme elective counselling window",
+                    body="Programme electives counselling has opened for your cohort.",
+                    audience="program", campus=pick.campus, department_id=pick.dept_id,
+                    program_id=program.id if program else None, section_id=None, student_id=None,
+                    published_at=DEMO_ATTENDANCE_NOW - timedelta(days=2),
+                    expires_at=DEMO_ATTENDANCE_NOW + timedelta(days=12),
+                    status="published", created_by="Dean Academics Office", owner_office_n=6
+                ),
+            )
+            _ensure(
+                s, D.Announcement, f"ann_direct_{pick.id}",
+                lambda pick=pick: D.Announcement(
+                    id=f"ann_direct_{pick.id}", tenant_id=TENANT,
+                    title="Scholarship document reminder",
+                    body="Please review your scholarship documentation before the due date.",
+                    audience="student", campus=pick.campus, department_id=pick.dept_id,
+                    program_id=pick.program_id, section_id=None, student_id=pick.id,
+                    published_at=DEMO_ATTENDANCE_NOW - timedelta(hours=8),
+                    expires_at=DEMO_ATTENDANCE_NOW + timedelta(days=5),
+                    status="published", created_by="Dean Student Affairs Office", owner_office_n=8
                 ),
             )
 
@@ -1648,9 +2730,19 @@ def _seed_development_backlog_history(s):
 
     Replace these with published Examination data before any production use.
     """
+    portal_student_id = None
+    portal_login = s.query(User).filter(User.username == "student").first()
+    if portal_login:
+        if portal_login.scope_ref and not str(portal_login.scope_ref).startswith("scope_"):
+            portal_student_id = portal_login.scope_ref
+        else:
+            student_row = s.query(D.Student).filter(D.Student.user_id == portal_login.id).first()
+            portal_student_id = student_row.id if student_row else None
     students = s.query(D.Student).order_by(D.Student.roll_no).limit(12).all()
     subjects = [("MAT301", "Engineering Mathematics III"), ("CSE302", "Data Structures"), ("ECE303", "Digital Systems")]
     for index, student in enumerate(students):
+        if portal_student_id and student.id == portal_student_id:
+            continue
         if index % 3 == 0:
             code, title = subjects[index % len(subjects)]
             _ensure(s, D.StudentSubjectResult, f"dev_result_{student.id}_a1", lambda student=student, code=code, title=title:
@@ -1672,6 +2764,408 @@ def _seed_development_backlog_history(s):
     s.commit()
 
 
+def _seed_student_portal_demo_profile(s):
+    stu_login = s.query(User).filter(User.username == "student").first()
+    if not stu_login:
+        return
+
+    student = None
+    if stu_login.scope_ref and not str(stu_login.scope_ref).startswith("scope_"):
+        student = s.query(D.Student).get(stu_login.scope_ref)
+    if not student:
+        student = s.query(D.Student).filter(D.Student.user_id == stu_login.id).order_by(D.Student.roll_no).first()
+    if not student:
+        return
+    s.query(D.ExamScheduleHistory).filter(D.ExamScheduleHistory.id.like(f"exhist_scorehist_{student.id}_%")).delete(synchronize_session=False)
+    s.query(D.ExamScheduleEntry).filter(D.ExamScheduleEntry.id.like(f"exsched_scorehist_{student.id}_%")).delete(synchronize_session=False)
+    s.query(D.Mark).filter(D.Mark.id.like(f"mk_scorehist_{student.id}_%")).delete(synchronize_session=False)
+    s.query(D.Assessment).filter(D.Assessment.id.like(f"asmt_scorehist_{student.id}_%")).delete(synchronize_session=False)
+    s.query(D.Enrollment).filter(D.Enrollment.id.like(f"enr_scorehist_{student.id}_%")).delete(synchronize_session=False)
+    s.query(D.ResultSheet).filter(D.ResultSheet.id.like(f"rsheet_scorehist_{student.id}_%")).delete(synchronize_session=False)
+    s.query(D.StudentSubjectResult).filter(
+        D.StudentSubjectResult.student_id == student.id,
+        D.StudentSubjectResult.source == "development_sample",
+    ).delete(synchronize_session=False)
+    s.query(D.StudentSubjectResult).filter(
+        D.StudentSubjectResult.student_id == student.id,
+        D.StudentSubjectResult.id.like("student_demo_%"),
+    ).delete(synchronize_session=False)
+    s.query(D.StudentSubjectResult).filter(
+        D.StudentSubjectResult.student_id == student.id,
+        D.StudentSubjectResult.id.like(f"scorehist_result_{student.id}_%"),
+    ).delete(synchronize_session=False)
+    s.flush()
+
+    academic_year_by_semester = {
+        1: "2023-24",
+        2: "2023-24",
+        3: "2024-25",
+        4: "2024-25",
+        5: "2025-26",
+        6: "2025-26",
+    }
+    result_publish_dates = {
+        1: datetime(2024, 1, 12, 11, 0),
+        2: datetime(2024, 7, 5, 11, 0),
+        3: datetime(2025, 1, 10, 11, 0),
+        4: datetime(2025, 7, 4, 11, 0),
+        5: datetime(2026, 1, 11, 11, 0),
+        6: datetime(2026, 7, 5, 11, 0),
+    }
+    assessment_months = {
+        1: (2023, 10),
+        2: (2024, 4),
+        3: (2024, 10),
+        4: (2025, 4),
+        5: (2025, 10),
+        6: (2026, 4),
+    }
+    semester_grade_profiles = {
+        1: [(9.0, 89.0), (8.0, 84.0), (8.0, 82.0), (8.0, 80.0)],
+        2: [(8.0, 83.0), (8.0, 81.0), (8.0, 79.0), (0.0, 46.0)],
+        3: [(8.0, 84.0), (8.0, 82.0), (8.0, 80.0), (8.0, 78.0)],
+        4: [(9.0, 88.0), (8.0, 84.0), (8.0, 82.0), (8.0, 80.0)],
+        5: [(8.0, 83.0), (8.0, 81.0), (8.0, 79.0), (8.0, 78.0)],
+        6: [(8.0, 82.0), (8.0, 80.0), (8.0, 78.0), (0.0, 44.0)],
+    }
+
+    def grade_for_point(point: float) -> str:
+        if point >= 9:
+            return "A+"
+        if point >= 8:
+            return "A"
+        if point >= 7:
+            return "B+"
+        if point >= 6:
+            return "B"
+        if point > 0:
+            return "C"
+        return "F"
+
+    all_offering_rows = (
+        s.query(D.Section, D.Course)
+        .join(D.Course, D.Course.id == D.Section.course_id)
+        .order_by(D.Course.semester, D.Course.code, D.Section.section_code)
+        .all()
+    )
+    all_offerings = []
+    seen_courses = set()
+    for section, course in all_offering_rows:
+        if course.id in seen_courses:
+            continue
+        seen_courses.add(course.id)
+        faculty = s.query(D.StaffMember).get(section.faculty_person_id) if section.faculty_person_id else None
+        all_offerings.append({"section": section, "course": course, "faculty": faculty})
+
+    def pick_semester_offerings(semester_value: int):
+        if not all_offerings:
+            return []
+        start_index = (semester_value - 1) * 4
+        rows = (
+            all_offerings[start_index:start_index + 4]
+            if start_index + 4 <= len(all_offerings)
+            else all_offerings[start_index:] + all_offerings[:max(0, (start_index + 4) - len(all_offerings))]
+        )
+        return rows[:4]
+
+    def ensure_completed_enrollment(item, grade: str = ""):
+        enrollment_id = f"enr_scorehist_{student.id}_{item['section'].id}"
+        enrollment = _ensure(
+            s, D.Enrollment, enrollment_id,
+            lambda enrollment_id=enrollment_id, item=item: D.Enrollment(
+                id=enrollment_id,
+                tenant_id=TENANT,
+                student_id=student.id,
+                section_id=item["section"].id,
+                status="completed",
+                grade=grade,
+            ),
+        )
+        enrollment.student_id = student.id
+        enrollment.section_id = item["section"].id
+        enrollment.status = "completed"
+        enrollment.grade = grade
+
+    def create_archived_assessment(item, semester_value: int, academic_year: str, score_pct: float):
+        year_value, month_value = assessment_months[semester_value]
+        templates = [
+            ("quiz", "Quiz 1", 20.0, 1.0, 9),
+            ("mid_term", "Mid Semester", 30.0, 2.0, 17),
+            ("external_final", "External Final", 50.0, 3.0, 24),
+        ]
+        for type_key, label, max_marks, weight, day_value in templates:
+            start_at = datetime(year_value, month_value, day_value, 10, 0)
+            end_at = start_at + timedelta(minutes=90 if type_key != "external_final" else 120)
+            score_value = round((score_pct / 100.0) * max_marks, 1)
+            assessment_id = f"asmt_scorehist_{student.id}_s{semester_value}_{item['course'].code.lower()}_{type_key}"
+            assessment = _ensure(
+                s, D.Assessment, assessment_id,
+                lambda assessment_id=assessment_id, item=item: D.Assessment(
+                    id=assessment_id,
+                    tenant_id=TENANT,
+                    section_id=item["section"].id,
+                    name=f"{item['course'].code} {label}",
+                    max_marks=max_marks,
+                    weight=weight,
+                    locked=False,
+                    assessment_type=type_key,
+                    scheduled_at=start_at,
+                    end_at=end_at,
+                    published=True,
+                    instructions="Archived published score retained from official faculty upload.",
+                    status="completed",
+                ),
+            )
+            assessment.section_id = item["section"].id
+            assessment.name = f"{item['course'].code} {label}"
+            assessment.max_marks = max_marks
+            assessment.weight = weight
+            assessment.locked = False
+            assessment.assessment_type = type_key
+            assessment.scheduled_at = start_at
+            assessment.end_at = end_at
+            assessment.published = True
+            assessment.instructions = "Archived published score retained from official faculty upload."
+            assessment.status = "completed"
+            assessment.academic_year = academic_year
+            assessment.created_by = item["faculty"].name if item["faculty"] else "Faculty"
+            assessment.updated_by = item["faculty"].name if item["faculty"] else "Faculty"
+            assessment.created_at = start_at - timedelta(days=7)
+            assessment.updated_at = end_at + timedelta(hours=1)
+            assessment.published_at = end_at + timedelta(hours=5)
+            assessment.published_by = item["faculty"].name if item["faculty"] else "Faculty"
+
+            schedule_id = f"exsched_scorehist_{student.id}_{assessment_id}"
+            schedule = _ensure(
+                s, D.ExamScheduleEntry, schedule_id,
+                lambda schedule_id=schedule_id, assessment=assessment, item=item: D.ExamScheduleEntry(
+                    id=schedule_id,
+                    tenant_id=TENANT,
+                    assessment_id=assessment.id,
+                    section_id=item["section"].id,
+                    academic_year=academic_year,
+                    semester=semester_value,
+                    exam_type=type_key,
+                    start_at=start_at,
+                    end_at=end_at,
+                    venue=item["section"].room or "Academic Block",
+                    mode="Offline",
+                    status="completed",
+                    version_no=1,
+                    is_active=True,
+                    managed_by_office_n=16 if type_key == "external_final" else 10,
+                    note="Archived examination timetable retained for student score history.",
+                    created_by="Exam Controller Office" if type_key == "external_final" else "Head of Department Office",
+                    updated_by="Exam Controller Office" if type_key == "external_final" else "Head of Department Office",
+                    created_at=start_at - timedelta(days=7),
+                    updated_at=end_at + timedelta(hours=1),
+                ),
+            )
+            schedule.assessment_id = assessment.id
+            schedule.section_id = item["section"].id
+            schedule.academic_year = academic_year
+            schedule.semester = semester_value
+            schedule.exam_type = type_key
+            schedule.start_at = start_at
+            schedule.end_at = end_at
+            schedule.venue = item["section"].room or "Academic Block"
+            schedule.mode = "Offline"
+            schedule.status = "completed"
+            schedule.version_no = 1
+            schedule.is_active = True
+            schedule.managed_by_office_n = 16 if type_key == "external_final" else 10
+            schedule.note = "Archived examination timetable retained for student score history."
+            schedule.created_by = "Exam Controller Office" if type_key == "external_final" else "Head of Department Office"
+            schedule.updated_by = "Exam Controller Office" if type_key == "external_final" else "Head of Department Office"
+            schedule.created_at = start_at - timedelta(days=7)
+            schedule.updated_at = end_at + timedelta(hours=1)
+
+            mark_id = f"mk_scorehist_{student.id}_{assessment_id}"
+            mark = _ensure(
+                s, D.Mark, mark_id,
+                lambda mark_id=mark_id, assessment=assessment: D.Mark(
+                    id=mark_id,
+                    tenant_id=TENANT,
+                    assessment_id=assessment.id,
+                    student_id=student.id,
+                    score=score_value,
+                    entered_by=item["faculty"].name if item["faculty"] else "Faculty",
+                    entered_at=end_at + timedelta(hours=2),
+                    status="published",
+                    published_at=end_at + timedelta(hours=5),
+                    published_by=item["faculty"].name if item["faculty"] else "Faculty",
+                    is_valid=True,
+                    updated_at=end_at + timedelta(hours=5),
+                ),
+            )
+            mark.assessment_id = assessment.id
+            mark.student_id = student.id
+            mark.score = score_value
+            mark.entered_by = item["faculty"].name if item["faculty"] else "Faculty"
+            mark.entered_at = end_at + timedelta(hours=2)
+            mark.status = "published"
+            mark.published_at = end_at + timedelta(hours=5)
+            mark.published_by = item["faculty"].name if item["faculty"] else "Faculty"
+            mark.is_valid = True
+            mark.updated_at = end_at + timedelta(hours=5)
+
+    semester_offerings = {}
+    semester_result_sheet_ids = {}
+    backlog_seed = None
+
+    for semester_value in range(1, 7):
+        offerings = pick_semester_offerings(semester_value)
+        if not offerings:
+            continue
+        semester_offerings[semester_value] = offerings
+        academic_year = academic_year_by_semester[semester_value]
+        publish_at = result_publish_dates[semester_value]
+        result_sheet_id = f"rsheet_scorehist_{student.id}_s{semester_value}"
+        semester_result_sheet_ids[semester_value] = result_sheet_id
+        result_sheet = _ensure(
+            s, D.ResultSheet, result_sheet_id,
+            lambda result_sheet_id=result_sheet_id, offerings=offerings: D.ResultSheet(
+                id=result_sheet_id,
+                tenant_id=TENANT,
+                section_id=offerings[0]["section"].id,
+                term=f"{academic_year} Semester {semester_value}",
+                status="published",
+                published_by="Exam Controller Office",
+                published_at=publish_at,
+                academic_year=academic_year,
+                semester=semester_value,
+                updated_at=publish_at,
+            ),
+        )
+        result_sheet.section_id = offerings[0]["section"].id
+        result_sheet.term = f"{academic_year} Semester {semester_value}"
+        result_sheet.status = "published"
+        result_sheet.published_by = "Exam Controller Office"
+        result_sheet.published_at = publish_at
+        result_sheet.academic_year = academic_year
+        result_sheet.semester = semester_value
+        result_sheet.updated_at = publish_at
+
+        for index, item in enumerate(offerings):
+            grade_point, percentage = semester_grade_profiles[semester_value][min(index, len(semester_grade_profiles[semester_value]) - 1)]
+            outcome = "failed" if grade_point <= 0 else "passed"
+            grade = grade_for_point(grade_point)
+            ensure_completed_enrollment(item, grade=grade)
+            result_id = f"scorehist_result_{student.id}_s{semester_value}_{item['course'].code.lower()}"
+            row = _ensure(
+                s, D.StudentSubjectResult, result_id,
+                lambda result_id=result_id, item=item: D.StudentSubjectResult(
+                    id=result_id,
+                    tenant_id=TENANT,
+                    student_id=student.id,
+                    academic_year=academic_year,
+                    semester=semester_value,
+                    subject_code=item["course"].code,
+                    subject_title=item["course"].title,
+                    attempt=1,
+                    outcome=outcome,
+                    published_at=publish_at,
+                    source="examination",
+                ),
+            )
+            row.student_id = student.id
+            row.academic_year = academic_year
+            row.semester = semester_value
+            row.subject_code = item["course"].code
+            row.subject_title = item["course"].title
+            row.attempt = 1
+            row.outcome = outcome
+            row.published_at = publish_at
+            row.source = "examination"
+            row.course_id = item["course"].id
+            row.section_id = item["section"].id
+            row.result_sheet_id = result_sheet_id
+            row.credits = item["course"].credits
+            row.grade = grade
+            row.grade_point = grade_point
+            row.percentage = percentage
+            row.total_score = percentage
+            row.max_score = 100.0
+            row.updated_at = publish_at
+
+            if semester_value == 2 and outcome == "failed" and backlog_seed is None:
+                backlog_seed = {
+                    "course": item["course"],
+                    "section": item["section"],
+                    "title": item["course"].title,
+                    "credits": item["course"].credits,
+                }
+
+            if semester_value != 6 or outcome != "failed":
+                create_archived_assessment(item, semester_value, academic_year, percentage)
+
+    if 5 in semester_offerings and backlog_seed:
+        retake_publish_at = datetime(2026, 1, 18, 16, 0)
+        retake_result_id = f"scorehist_result_{student.id}_s5_{backlog_seed['course'].code.lower()}_retake"
+        retake = _ensure(
+            s, D.StudentSubjectResult, retake_result_id,
+            lambda retake_result_id=retake_result_id: D.StudentSubjectResult(
+                id=retake_result_id,
+                tenant_id=TENANT,
+                student_id=student.id,
+                academic_year="2025-26",
+                semester=5,
+                subject_code=backlog_seed["course"].code,
+                subject_title=backlog_seed["title"],
+                attempt=2,
+                outcome="passed",
+                published_at=retake_publish_at,
+                source="examination",
+            ),
+        )
+        retake.student_id = student.id
+        retake.academic_year = "2025-26"
+        retake.semester = 5
+        retake.subject_code = backlog_seed["course"].code
+        retake.subject_title = backlog_seed["title"]
+        retake.attempt = 2
+        retake.outcome = "passed"
+        retake.published_at = retake_publish_at
+        retake.source = "examination"
+        retake.course_id = backlog_seed["course"].id
+        retake.section_id = backlog_seed["section"].id
+        retake.result_sheet_id = semester_result_sheet_ids.get(5, "")
+        retake.credits = backlog_seed["credits"]
+        retake.grade = "B+"
+        retake.grade_point = 7.0
+        retake.percentage = 72.0
+        retake.total_score = 72.0
+        retake.max_score = 100.0
+        retake.updated_at = retake_publish_at
+
+    result_rows = (
+        s.query(D.StudentSubjectResult)
+        .filter(
+            D.StudentSubjectResult.student_id == student.id,
+            D.StudentSubjectResult.source == "examination",
+        )
+        .order_by(
+            D.StudentSubjectResult.subject_code,
+            D.StudentSubjectResult.attempt,
+            D.StudentSubjectResult.published_at,
+            D.StudentSubjectResult.updated_at,
+        )
+        .all()
+    )
+    latest_by_subject = {}
+    for row in result_rows:
+        latest_by_subject[row.subject_code] = row
+    credit_rows = [row for row in latest_by_subject.values() if row.grade_point is not None and (row.credits or 0) > 0]
+    if credit_rows:
+        total_credits = sum(float(row.credits or 0) for row in credit_rows)
+        total_points = sum(float(row.grade_point or 0) * float(row.credits or 0) for row in credit_rows)
+        student.cgpa = round(total_points / total_credits, 2) if total_credits else None
+    else:
+        student.cgpa = None
+
+    s.commit()
+
+
 def _seed_development_principal_coverage(s):
     """Fill missing development-only data coverage for Principal reporting.
 
@@ -1681,6 +3175,14 @@ def _seed_development_principal_coverage(s):
     any production deployment.
     """
     students = s.query(D.Student).order_by(D.Student.roll_no).all()
+    portal_student_id = None
+    portal_login = s.query(User).filter(User.username == "student").first()
+    if portal_login:
+        if portal_login.scope_ref and not str(portal_login.scope_ref).startswith("scope_"):
+            portal_student_id = portal_login.scope_ref
+        else:
+            student_row = s.query(D.Student).filter(D.Student.user_id == portal_login.id).first()
+            portal_student_id = student_row.id if student_row else None
     enrolled_sections = {}
     for enrollment in s.query(D.Enrollment).filter(D.Enrollment.status == "enrolled").all():
         enrolled_sections.setdefault(enrollment.student_id, enrollment.section_id)
@@ -1691,6 +3193,8 @@ def _seed_development_principal_coverage(s):
     existing_attendance = {row[0] for row in s.query(D.AttendanceRecord.student_id).distinct().all()}
     today = date.today()
     for index, student in enumerate(students):
+        if portal_student_id and student.id == portal_student_id:
+            continue
         # Do not overwrite real or previously seeded attendance.  Students
         # without records receive ten dated entries, with a controlled subset
         # below 75% so attendance-risk functionality can be exercised.
@@ -1730,7 +3234,7 @@ def _seed_development_principal_coverage(s):
 
 
 def seed_domain():
-    Base.metadata.create_all(engine)
+    ensure_additive_schema()
     s = SessionLocal()
     try:
         _seed_core_domain(s)
@@ -1738,6 +3242,7 @@ def seed_domain():
         _seed_calendar_data(s)
         _seed_chairman_workflows(s)
         _bind_portal_accounts(s)
+        _seed_student_portal_demo_profile(s)
         _seed_principal_dashboard_data(s)
         _seed_principal_schedule_events(s)
         _seed_development_backlog_history(s)

@@ -152,6 +152,18 @@ export const api = {
   createCourse: (b: any) => req('/academics/courses', { method: 'POST', body: JSON.stringify(b) }),
   sections: () => req('/academics/sections'),
   createSection: (b: any) => req('/academics/sections', { method: 'POST', body: JSON.stringify(b) }),
+  sectionTimetable: (sectionId: string) => req(`/academics/section/${sectionId}/timetable`),
+  createTimetableEntry: (sectionId: string, b: any) =>
+    req(`/academics/section/${sectionId}/timetable`, { method: 'POST', body: JSON.stringify(b) }),
+  updateTimetableEntry: (entryId: string, b: any) =>
+    req(`/academics/timetable/${entryId}`, { method: 'PUT', body: JSON.stringify(b) }),
+  deactivateTimetableEntry: (entryId: string) => req(`/academics/timetable/${entryId}/deactivate`, { method: 'POST' }),
+  sectionAssignments: (sectionId: string) => req(`/academics/section/${sectionId}/assignments`),
+  createAssignment: (sectionId: string, b: any) =>
+    req(`/academics/section/${sectionId}/assignments`, { method: 'POST', body: JSON.stringify(b) }),
+  updateAssignment: (assignmentId: string, b: any) =>
+    req(`/academics/assignments/${assignmentId}`, { method: 'PUT', body: JSON.stringify(b) }),
+  publishAnnouncement: (b: any) => req('/academics/announcements', { method: 'POST', body: JSON.stringify(b) }),
 
   // ---- attendance ----
   attendanceSections: () => req('/attendance/sections'),
@@ -161,7 +173,15 @@ export const api = {
   // ---- exams ----
   examSections: () => req('/exams/sections'),
   examAssessments: (sid: string) => req(`/exams/assessments/${sid}`),
+  examTimetable: (sectionId: string) => req(`/exams/timetable/${sectionId}`),
+  createAssessment: (b: any) => req('/exams/assessments', { method: 'POST', body: JSON.stringify(b) }),
+  updateAssessment: (assessmentId: string, b: any) =>
+    req(`/exams/assessments/${assessmentId}`, { method: 'PUT', body: JSON.stringify(b) }),
+  createExamTimetable: (b: any) => req('/exams/timetable', { method: 'POST', body: JSON.stringify(b) }),
+  updateExamTimetable: (scheduleId: string, b: any) =>
+    req(`/exams/timetable/${scheduleId}`, { method: 'PUT', body: JSON.stringify(b) }),
   enterMarks: (b: any) => req('/exams/marks', { method: 'POST', body: JSON.stringify(b) }),
+  publishMarks: (assessment_id: string) => req('/exams/marks/publish', { method: 'POST', body: JSON.stringify({ assessment_id }) }),
   publishResult: (section_id: string) => req('/exams/publish', { method: 'POST', body: JSON.stringify({ section_id }) }),
 
   // ---- admissions ----
@@ -217,9 +237,47 @@ export const api = {
   whoami: () => req('/portal/whoami'),
   studentHome: () => req('/portal/student/home'),
   studentCourses: () => req('/portal/student/courses'),
+  updateStudentCourseView: (sectionId: string, body: any) =>
+    req(`/portal/student/courses/${sectionId}/view`, { method: 'PUT', body: JSON.stringify(body) }),
   studentAttendance: () => req('/portal/student/attendance'),
+  studentExaminations: (params: Record<string, any> = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([key, value]) => {
+      if (value == null || value === '' || value === 'all') return
+      qs.set(key, String(value))
+    })
+    if (!qs.has('status')) qs.set('status', String(params.status || 'all'))
+    return req(`/portal/student/examinations?${qs.toString()}`)
+  },
+  studentScores: (params: Record<string, any> = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([key, value]) => {
+      if (value == null || value === '') return
+      qs.set(key, String(value))
+    })
+    const suffix = qs.toString()
+    return req(`/portal/student/scores${suffix ? `?${suffix}` : ''}`)
+  },
   studentResults: () => req('/portal/student/results'),
   studentFees: () => req('/portal/student/fees'),
+  studentDigitalId: () => req('/portal/student/digital-id'),
+  studentCalendar: (start = '') => {
+    const params = new URLSearchParams()
+    if (start) params.set('start', start)
+    const qs = params.toString()
+    return req(`/portal/student/calendar${qs ? `?${qs}` : ''}`)
+  },
+  createStudentCalendarPersonalEvent: (body: any) =>
+    req('/portal/student/calendar/personal', { method: 'POST', body: JSON.stringify(body) }),
+  updateStudentCalendarPersonalEvent: (id: string, body: any) =>
+    req(`/portal/student/calendar/personal/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  deleteStudentCalendarPersonalEvent: (id: string) =>
+    req(`/portal/student/calendar/personal/${id}`, { method: 'DELETE' }),
+  studentTodayClasses: () => req('/portal/student/today-classes'),
+  studentTasks: () => req('/portal/student/tasks'),
+  studentUpcomingAssessments: () => req('/portal/student/upcoming-assessments'),
+  studentAnnouncements: () => req('/portal/student/announcements'),
+  studentLibraryLoans: () => req('/portal/student/library-loans'),
   facultyHome: () => req('/portal/faculty/home'),
   facultySchedule: () => req('/portal/faculty/schedule'),
   facultySections: () => req('/portal/faculty/sections'),
