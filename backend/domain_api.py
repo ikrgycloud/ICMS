@@ -2761,6 +2761,29 @@ def _governance_snapshots(s):
     )
 
 
+def _governance_period_range(s):
+    snapshots = (s.query(D.InstitutionSnapshot)
+                 .order_by(D.InstitutionSnapshot.snapshot_month.desc()).all())
+    selected = snapshots[0].snapshot_month if snapshots else _month_start(date.today())
+    ranges = [{
+        "start": item.snapshot_month.isoformat(),
+        "end": _month_end(item.snapshot_month).isoformat(),
+        "label": _fmt_range(item.snapshot_month, _month_end(item.snapshot_month)),
+    } for item in snapshots]
+    if not ranges:
+        ranges = [{
+            "start": selected.isoformat(),
+            "end": _month_end(selected).isoformat(),
+            "label": _fmt_range(selected, _month_end(selected)),
+        }]
+    return {
+        "start": selected.isoformat(),
+        "end": _month_end(selected).isoformat(),
+        "label": _fmt_range(selected, _month_end(selected)),
+        "available_ranges": ranges,
+    }
+
+
 def _governance_snapshot_bundle(s, semester: str = ""):
     snapshots = _governance_snapshots(s)
     if not snapshots:
@@ -2927,11 +2950,14 @@ def governance(semester: str = Query("", description="Semester key"), ctx=Depend
     can_edit_dashboard = can(s, ctx, "governance", "edit_dashboard")
     selected, snapshots, compliance_rows, performance_rows = _governance_snapshot_bundle(s, semester)
     if not snapshots or not selected:
-        return _governance_live_fallback(s, can_edit_dashboard)
+        payload = _governance_live_fallback(s, can_edit_dashboard)
+        payload["range"] = _governance_period_range(s)
+        return payload
 
     semesters = [{"key": row.semester_key, "label": row.semester_label} for row in snapshots]
     payload = _governance_payload_from_snapshot(selected, compliance_rows, performance_rows, semesters)
     payload["can_edit"] = can_edit_dashboard
+    payload["range"] = _governance_period_range(s)
     return payload
 
 

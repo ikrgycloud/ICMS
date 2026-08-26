@@ -328,7 +328,7 @@ pipeline {
                                 --fail \
                                 --silent \
                                 --show-error \
-                                http://localhost:8080/ \
+                                http://localhost:84/ \
                                 > /dev/null
 
                             echo "Frontend is UP"

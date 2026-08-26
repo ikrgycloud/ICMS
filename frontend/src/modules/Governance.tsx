@@ -14,25 +14,26 @@ const DEFAULT_COMPLIANCE_OPTIONS = [
   { value: 'policy', label: 'Policy' },
   { value: 'risk', label: 'Risk' },
 ]
-type PeriodMode = 'none' | 'preset' | 'custom'
-type SemesterMode = 'whole' | 'odd' | 'even'
-type RangeMeta = {
+type SemesterOption = {
   key: string
-  semester_label: string
+  label: string
+  year: string
+  semester: 'odd' | 'even' | 'whole'
+}
+type SemesterMode = 'whole' | 'odd' | 'even'
+type PeriodOption = {
   start: string
   end: string
   label: string
   year: string
   semester: 'odd' | 'even'
-} & Record<string, any>
+}
 
 export default function Governance({ user: _user }: { user: any }) {
-  const [selectedStart, setSelectedStart] = useState('')
   const [selectedYear, setSelectedYear] = useState('')
   const [selectedSemesterMode, setSelectedSemesterMode] = useState<SemesterMode>('whole')
-  const [periodMode, setPeriodMode] = useState<PeriodMode>('preset')
-  const [customStart, setCustomStart] = useState('')
-  const [customEnd, setCustomEnd] = useState('')
+  const [selectedSemester, setSelectedSemester] = useState('')
+  const [selectedStart, setSelectedStart] = useState('')
   const [complianceFilter, setComplianceFilter] = useState('all')
   const [data, setData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
@@ -43,129 +44,58 @@ export default function Governance({ user: _user }: { user: any }) {
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
 
-  const availableRanges = useMemo<RangeMeta[]>(() => {
+  const semesterOptions = useMemo<SemesterOption[]>(() => {
+    const rows = data?.semesters || []
+    return rows.map((row: any) => buildSemesterOption(row))
+  }, [data])
+
+  const availablePeriods = useMemo<PeriodOption[]>(() => {
     if (!data?.range) return []
     const ranges = data.range.available_ranges?.length ? data.range.available_ranges : [data.range]
-    return ranges.map(buildRangeMeta)
+    return ranges.map(buildPeriodOption)
   }, [data])
 
   const yearOptions = useMemo(
-    () => Array.from(new Set(availableRanges.map(range => range.year))).sort((left, right) => Number(right) - Number(left)),
-    [availableRanges],
+    () => Array.from(new Set(availablePeriods.map(option => option.year))).sort(compareAcademicYears),
+    [availablePeriods],
   )
 
-  const yearScopedRanges = useMemo(
-    () => availableRanges.filter(range => !selectedYear || range.year === selectedYear),
-    [availableRanges, selectedYear],
+  const yearPeriods = useMemo(
+    () => availablePeriods.filter(option => !selectedYear || option.year === selectedYear),
+    [availablePeriods, selectedYear],
   )
 
-  const filteredRanges = useMemo(
-    () => yearScopedRanges.filter(range => selectedSemesterMode === 'whole' || range.semester === selectedSemesterMode),
-    [yearScopedRanges, selectedSemesterMode],
+  const periodOptions = useMemo(
+    () => yearPeriods.filter(option => selectedSemesterMode === 'whole' || option.semester === selectedSemesterMode),
+    [selectedSemesterMode, yearPeriods],
   )
-
-  const serverSelectedRange = useMemo(
-    () => availableRanges.find(range => range.key === data?.selected_semester?.key) || null,
-    [availableRanges, data?.selected_semester?.key],
-  )
-
-  const activeRange = useMemo(
-    () =>
-      availableRanges.find(range => range.start === selectedStart) ||
-      serverSelectedRange ||
-      filteredRanges[0] ||
-      availableRanges[0] ||
-      null,
-    [availableRanges, filteredRanges, selectedStart, serverSelectedRange],
-  )
-
-  const resolvedYear = selectedYear || serverSelectedRange?.year || availableRanges[0]?.year || String(new Date().getFullYear())
-  const scopedRange = useMemo(
-    () => buildScopeRange(resolvedYear, selectedSemesterMode),
-    [resolvedYear, selectedSemesterMode],
-  )
-
-  const queryRange = useMemo(() => {
-    if (periodMode === 'none') {
-      return {
-        start: scopedRange.start,
-        end: scopedRange.end,
-        label: formatDateRangeLabel(scopedRange.start, scopedRange.end),
-      }
-    }
-
-    if (periodMode === 'custom') {
-      const next = clampRangeToScope(
-        customStart || data?.range?.start || scopedRange.start,
-        customEnd || data?.range?.end || scopedRange.end,
-        scopedRange,
-      )
-      return {
-        ...next,
-        label: formatDateRangeLabel(next.start, next.end),
-      }
-    }
-
-    const presetRange =
-      filteredRanges.find(range => range.start === selectedStart) ||
-      serverSelectedRange ||
-      filteredRanges[0] ||
-      availableRanges[0] ||
-      null
-
-    if (!presetRange) return { start: '', end: '', label: '' }
-    return {
-      start: presetRange.start,
-      end: presetRange.end,
-      label: presetRange.label,
-    }
-  }, [
-    availableRanges,
-    customEnd,
-    customStart,
-    data?.range?.end,
-    data?.range?.start,
-    filteredRanges,
-    periodMode,
-    scopedRange,
-    selectedStart,
-    serverSelectedRange,
-  ])
-
-  const rangeLabel = queryRange.label || data?.range?.label || activeRange?.label || formatDateRangeLabel(scopedRange.start, scopedRange.end)
 
   useEffect(() => {
-    if (!availableRanges.length) return
+    if (!semesterOptions.length) return
+    const serverSelected = semesterOptions.find(option => option.key === data?.selected_semester?.key) || semesterOptions[0]
+    const activePeriod = availablePeriods.find(option => option.start === data?.range?.start) || availablePeriods[0]
     if (!selectedYear || !yearOptions.includes(selectedYear)) {
-      setSelectedYear(serverSelectedRange?.year || availableRanges[0].year)
+      setSelectedYear(activePeriod?.year || String(new Date().getFullYear()))
     }
-  }, [availableRanges, selectedYear, serverSelectedRange, yearOptions])
+    if (!selectedSemester || !semesterOptions.some(option => option.key === selectedSemester)) {
+      setSelectedSemester(serverSelected.key)
+    }
+    if (!selectedStart || !availablePeriods.some(option => option.start === selectedStart)) {
+      setSelectedStart(activePeriod?.start || '')
+    }
+  }, [availablePeriods, data?.range?.start, data?.selected_semester?.key, selectedSemester, selectedStart, selectedYear, semesterOptions, yearOptions])
 
   useEffect(() => {
-    if (selectedSemesterMode === 'whole' || !yearScopedRanges.length) return
-    if (!yearScopedRanges.some(range => range.semester === selectedSemesterMode)) {
+    if (selectedSemesterMode === 'whole' || !yearPeriods.length) return
+    if (!yearPeriods.some(option => option.semester === selectedSemesterMode)) {
       setSelectedSemesterMode('whole')
     }
-  }, [selectedSemesterMode, yearScopedRanges])
+  }, [selectedSemesterMode, yearPeriods])
 
   useEffect(() => {
-    if (periodMode !== 'preset' || !filteredRanges.length) return
-    const currentStart = selectedStart || serverSelectedRange?.start
-    if (!filteredRanges.some(range => range.start === currentStart)) {
-      setSelectedStart(filteredRanges[0].start)
-    }
-  }, [filteredRanges, periodMode, selectedStart, serverSelectedRange?.start])
-
-  useEffect(() => {
-    if (periodMode !== 'custom') return
-    const next = clampRangeToScope(
-      customStart || data?.range?.start || scopedRange.start,
-      customEnd || data?.range?.end || scopedRange.end,
-      scopedRange,
-    )
-    if (next.start !== customStart) setCustomStart(next.start)
-    if (next.end !== customEnd) setCustomEnd(next.end)
-  }, [customEnd, customStart, data?.range?.end, data?.range?.start, periodMode, scopedRange])
+    if (!periodOptions.length || periodOptions.some(option => option.start === selectedStart)) return
+    selectPeriod(periodOptions[0].start)
+  }, [periodOptions, selectedStart])
 
   useEffect(() => {
     let active = true
@@ -175,7 +105,7 @@ export default function Governance({ user: _user }: { user: any }) {
       setError('')
 
       try {
-        const response = await api.governance('', queryRange.start, queryRange.end)
+        const response = await api.governance(selectedSemester)
         if (!active) return
         setData(response)
       } catch (err: any) {
@@ -190,7 +120,7 @@ export default function Governance({ user: _user }: { user: any }) {
     return () => {
       active = false
     }
-  }, [periodMode, queryRange.end, queryRange.start, reloadKey])
+  }, [selectedSemester, reloadKey])
 
   useEffect(() => {
     setComplianceFilter('all')
@@ -200,7 +130,7 @@ export default function Governance({ user: _user }: { user: any }) {
     setEditorOpen(false)
     setDraft(null)
     setSaveError('')
-  }, [data?.selected_semester?.key, periodMode, queryRange.end, queryRange.start])
+  }, [data?.selected_semester?.key])
 
   const filteredCompliance = useMemo(() => {
     const items = data?.compliance?.items || []
@@ -312,7 +242,7 @@ export default function Governance({ user: _user }: { user: any }) {
     try {
       const semesterKey = data.selected_semester.key
       await api.updateGovernance(semesterKey, buildGovernancePayload(draft))
-      const refreshed = await api.governance('', queryRange.start, queryRange.end)
+      const refreshed = await api.governance(semesterKey)
       setData(refreshed)
       setComplianceFilter('all')
       setEditorOpen(false)
@@ -324,32 +254,24 @@ export default function Governance({ user: _user }: { user: any }) {
     }
   }
 
-  function handlePeriodModeChange(nextMode: PeriodMode) {
-    setPeriodMode(nextMode)
-    if (nextMode === 'custom') {
-      const next = clampRangeToScope(queryRange.start || scopedRange.start, queryRange.end || scopedRange.end, scopedRange)
-      setCustomStart(next.start)
-      setCustomEnd(next.end)
-      return
-    }
-    if (!filteredRanges.length) return
-    if (!filteredRanges.some(range => range.start === selectedStart)) {
-      setSelectedStart(filteredRanges[0].start)
-    }
+  function handleYearChange(year: string) {
+    const options = availablePeriods.filter(option => option.year === year)
+    const nextPeriod = options.find(option => selectedSemesterMode === 'whole' || option.semester === selectedSemesterMode) || options[0]
+    setSelectedYear(year)
+    if (nextPeriod) selectPeriod(nextPeriod.start)
   }
 
-  function handleCustomStartChange(value: string) {
-    const nextStart = clampDate(value || scopedRange.start, scopedRange.start, scopedRange.end)
-    const nextEnd = customEnd && customEnd >= nextStart ? customEnd : nextStart
-    setCustomStart(nextStart)
-    setCustomEnd(clampDate(nextEnd, scopedRange.start, scopedRange.end))
-  }
-
-  function handleCustomEndChange(value: string) {
-    const nextEnd = clampDate(value || customStart || scopedRange.end, scopedRange.start, scopedRange.end)
-    const nextStart = customStart && customStart <= nextEnd ? customStart : nextEnd
-    setCustomStart(clampDate(nextStart, scopedRange.start, scopedRange.end))
-    setCustomEnd(nextEnd)
+  function selectPeriod(start: string) {
+    setSelectedStart(start)
+    const period = availablePeriods.find(option => option.start === start)
+    if (!period) return
+    const calendarYear = Number(period.year)
+    const academicStart = period.semester === 'odd' ? calendarYear : calendarYear - 1
+    const matchingSemester = semesterOptions.find(option => {
+      const optionStart = Number(option.label.match(/\b(\d{4})[-/]\d{2,4}\b/)?.[1])
+      return option.semester === period.semester && optionStart === academicStart
+    })
+    if (matchingSemester) setSelectedSemester(matchingSemester.key)
   }
 
   return (
@@ -378,7 +300,7 @@ export default function Governance({ user: _user }: { user: any }) {
             <span className="chair-filter-label">Year</span>
             <span className="chair-filter-control">
               <GovGlyph kind="calendar" />
-              <select value={selectedYear || activeRange?.year || ''} onChange={event => setSelectedYear(event.target.value)}>
+              <select value={selectedYear} onChange={event => handleYearChange(event.target.value)}>
                 {yearOptions.map(year => (
                   <option key={year} value={year}>{year}</option>
                 ))}
@@ -402,79 +324,13 @@ export default function Governance({ user: _user }: { user: any }) {
             <span className="chair-filter-label">Period</span>
             <span className="chair-filter-control">
               <GovGlyph kind="clock" />
-              <select value={periodMode} onChange={event => handlePeriodModeChange(event.target.value as PeriodMode)}>
-                <option value="preset">Semester snapshot</option>
-                <option value="custom">Custom date range</option>
-                <option value="none">None</option>
+              <select value={selectedStart} onChange={event => selectPeriod(event.target.value)}>
+                {periodOptions.map(option => (
+                  <option key={option.start} value={option.start}>{option.label}</option>
+                ))}
               </select>
             </span>
           </label>
-
-          {periodMode === 'preset' && (
-            <label className="chair-filter chair-filter-span">
-              <span className="chair-filter-label">Snapshot</span>
-              <span className="chair-filter-control chair-filter-control-wide">
-                <GovGlyph kind="calendar" />
-                <select value={selectedStart || activeRange?.start || data.range?.start || ''} onChange={event => setSelectedStart(event.target.value)}>
-                  {filteredRanges.map(range => (
-                    <option key={range.key} value={range.start}>{range.label}</option>
-                  ))}
-                </select>
-              </span>
-            </label>
-          )}
-
-          {periodMode === 'custom' && (
-            <div className="chair-date-range-panel">
-              <div className="chair-date-range-head">
-                <div>
-                  <span className="chair-filter-label">Custom range</span>
-                  <strong>{rangeLabel}</strong>
-                </div>
-                <span className="chair-range-badge">Selecting the matching governance snapshot in this year and semester</span>
-              </div>
-
-              <div className="chair-date-range-grid">
-                <label className="chair-filter">
-                  <span className="chair-filter-label">Start date</span>
-                  <span className="chair-filter-control">
-                    <GovGlyph kind="calendar" />
-                    <input
-                      type="date"
-                      value={customStart}
-                      min={scopedRange.start}
-                      max={customEnd || scopedRange.end}
-                      onChange={event => handleCustomStartChange(event.target.value)}
-                    />
-                  </span>
-                </label>
-
-                <label className="chair-filter">
-                  <span className="chair-filter-label">End date</span>
-                  <span className="chair-filter-control">
-                    <GovGlyph kind="calendar" />
-                    <input
-                      type="date"
-                      value={customEnd}
-                      min={customStart || scopedRange.start}
-                      max={scopedRange.end}
-                      onChange={event => handleCustomEndChange(event.target.value)}
-                    />
-                  </span>
-                </label>
-              </div>
-            </div>
-          )}
-
-          {periodMode === 'none' && (
-            <div className="chair-filter-note">
-              <span className="chair-filter-note-icon"><GovGlyph kind="info" /></span>
-              <div>
-                <strong>{rangeLabel}</strong>
-                <span>Using only the selected year and semester without an extra period filter.</span>
-              </div>
-            </div>
-          )}
         </div>
       </section>
 
@@ -766,7 +622,25 @@ function PreviewStat({ label, value, tone }: { label: string; value: string; ton
   )
 }
 
-function buildRangeMeta(range: any): RangeMeta {
+function buildSemesterOption(row: any): SemesterOption {
+  const key = String(row?.key || '')
+  const label = String(row?.label || key)
+  const descriptor = `${key} ${label}`.toLowerCase()
+  const semester = descriptor.includes('odd') ? 'odd' : descriptor.includes('even') ? 'even' : 'whole'
+  const academicStart = Number(label.match(/\b(\d{4})[-/]\d{2,4}\b/)?.[1]
+    || key.match(/(\d{4})[_-]\d{2,4}/)?.[1])
+  const year = academicStart
+    ? String(semester === 'even' ? academicStart + 1 : academicStart)
+    : String(new Date().getFullYear())
+  return {
+    key,
+    label,
+    year,
+    semester,
+  }
+}
+
+function buildPeriodOption(range: any): PeriodOption {
   const [yearPart = '', monthPart = '1'] = String(range?.start || '').split('-')
   const year = String(Number(yearPart) || new Date().getFullYear())
   const month = Number(monthPart) || 1
@@ -777,54 +651,8 @@ function buildRangeMeta(range: any): RangeMeta {
   }
 }
 
-function buildScopeRange(year: string, semester: SemesterMode) {
-  const safeYear = Number(year) || new Date().getFullYear()
-  if (semester === 'odd') {
-    return {
-      start: `${safeYear}-07-01`,
-      end: `${safeYear}-12-31`,
-    }
-  }
-  if (semester === 'even') {
-    return {
-      start: `${safeYear}-01-01`,
-      end: `${safeYear}-06-30`,
-    }
-  }
-  return {
-    start: `${safeYear}-01-01`,
-    end: `${safeYear}-12-31`,
-  }
-}
-
-function clampDate(value: string, min: string, max: string) {
-  if (!value) return min
-  if (value < min) return min
-  if (value > max) return max
-  return value
-}
-
-function clampRangeToScope(start: string, end: string, scope: { start: string; end: string }) {
-  const safeStart = clampDate(start || scope.start, scope.start, scope.end)
-  const safeEnd = clampDate(end || scope.end, scope.start, scope.end)
-  if (safeStart <= safeEnd) {
-    return { start: safeStart, end: safeEnd }
-  }
-  return { start: safeEnd, end: safeEnd }
-}
-
-function formatDateRangeLabel(start: string, end: string) {
-  if (!start || !end) return ''
-  const from = new Date(`${start}T00:00:00`)
-  const to = new Date(`${end}T00:00:00`)
-  const sameYear = from.getFullYear() === to.getFullYear()
-  if (start === end) {
-    return from.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
-  }
-  if (sameYear) {
-    return `${from.toLocaleString('en-IN', { day: '2-digit', month: 'short' })} - ${to.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}`
-  }
-  return `${from.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })} - ${to.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}`
+function compareAcademicYears(left: string, right: string) {
+  return (Number.parseInt(right, 10) || 0) - (Number.parseInt(left, 10) || 0)
 }
 
 function GovGlyph({ kind }: { kind: string }) {
