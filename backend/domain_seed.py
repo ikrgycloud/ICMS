@@ -2516,6 +2516,9 @@ def _bind_portal_accounts(s):
             stu_login.role = pick.name
             stu_login.scope_ref = pick.id
             _seed_student_portal_attendance_demo(s, pick, demo_sections)
+            # Flush portal assessments before examination seeding.
+            s.flush()
+
             _seed_student_portal_examinations_demo(s, pick, demo_sections)
             any_book = s.query(D.Book).first()
             if any_book:
