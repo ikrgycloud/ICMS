@@ -2804,7 +2804,7 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
             .count()
         )
     dept = s.query(D.Department).get(stf.dept_id) if stf.dept_id else None
-<<<<<<< HEAD
+
     course_map = {course.id: course for course in s.query(D.Course).all()}
     enrollments = s.query(D.Enrollment).filter(D.Enrollment.section_id.in_(sec_ids), D.Enrollment.status == "enrolled").all() if sec_ids else []
     enrollment_by_section = {section.id: 0 for section in secs}
@@ -2906,7 +2906,7 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
         "performance": {"assessments": len(assessments), "average_score": round(average_score * 10, 1) if average_score is not None else None,
                         "marks_entered": len(marks), "expected_marks": sum(enrollment_by_section.get(item.section_id, 0) for item in assessments)},
         "role_context": {"active_role": ctx.get("role"), "available_roles": office(ctx["office_n"])["internal_roles"]},
-=======
+
     leave_rows = s.query(D.LeaveRequest).filter(D.LeaveRequest.staff_id == stf.id).all()
     return {
         "profile": {
@@ -2920,7 +2920,6 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
             "students": enrolled_count,
             "leave_requests": len(leave_rows),
         },
->>>>>>> 333f4dd0444992ce746621bc18b059a85033dd51
     }
 
 
