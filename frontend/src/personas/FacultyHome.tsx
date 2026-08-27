@@ -19,9 +19,7 @@ export default function FacultyHome({ user, go }: { user: any; go: (v: string) =
       <section className="faculty-card faculty-timetable"><CardHead title="Teaching Schedule (This Week)" action="View all →" onClick={() => go('my_schedule')}/>{schedule.length ? <div className="faculty-table"><div className="faculty-table-head"><span>Day / Time</span><span>Section</span><span>Subject</span><span>Room</span></div>{schedule.slice(0, 4).map((item: any) => <button key={item.id} onClick={() => go('my_schedule')}><span>{item.day} {item.time}</span><span>{item.course_code}({item.section})</span><strong>{item.subject}</strong><em>{item.room}</em></button>)}</div> : <Empty icon="Schedule" text="No scheduled classes this week." />}</section>
       <section className="faculty-card"><CardHead title="Pending Tasks" action="View all →" onClick={() => go('examinations')}/>{pending.length ? pending.map((task: any) => <button className="faculty-list-row" key={task.id} onClick={() => go(task.kind === 'attendance' ? 'attendance' : 'examinations')}><b>{task.kind === 'attendance' ? 'A' : 'M'}</b><div><strong>{task.title}</strong><span>{task.course}</span></div><em>{task.due || `${task.count} pending`}</em></button>) : <Empty icon="✓" text="No pending attendance or marks tasks." />}</section>
 
-import { DecisionToast, Empty, Modal, Spinner } from '../modules/kit'
 
-export default function FacultyHome({ user, go }: { user: any; go: (v: string) => void }) {
   const [home, setHome] = useState<any>(null)
   const [sections, setSections] = useState<any>(null)
   const [sel, setSel] = useState<any>(null)
