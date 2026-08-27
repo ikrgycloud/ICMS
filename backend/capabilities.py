@@ -110,16 +110,15 @@ MODULE_ACTIONS = {
     "academic_calendar": {"view": "view", "create": "create", "edit": "edit",
                           "delete": "delete"},
     "students":     {"view": "view", "add": "create", "edit": "edit"},
-<<<<<<< HEAD
+
     "academics":    {"view": "view", "create_section": "create", "create_course": "create", "edit": "edit",
                      "assign_faculty": "assign"},
-=======
+
     "academics":    {"view": "view", "create_section": "create", "edit": "edit",
                      "assign_faculty": "assign", "manage_timetable": "edit",
                      "create_task": "create", "edit_task": "edit",
                      "publish_task": "publish", "close_task": "edit",
                      "publish_announcement": "publish"},
->>>>>>> 333f4dd0444992ce746621bc18b059a85033dd51
     "attendance":   {"view": "view", "mark": "create", "correct": "edit"},
     "examinations": {"view": "view", "enter_marks": "create", "moderate": "verify",
                      "publish_result": "publish", "lock": "lock",
