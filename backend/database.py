@@ -168,13 +168,10 @@ DEMO_USERNAMES = {
 
 
 def seed():
-<<<<<<< HEAD
     Base.metadata.create_all(engine)
     _ensure_course_columns()
     _ensure_staff_contact_columns()
-=======
     ensure_additive_schema()
->>>>>>> 333f4dd0444992ce746621bc18b059a85033dd51
     s = SessionLocal()
     try:
         # Tenant + scope tree (Document §6, §11).
