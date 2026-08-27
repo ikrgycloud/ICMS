@@ -1642,14 +1642,56 @@ def _seed_core_domain(s):
             ("Quiz 1", 20, "quiz", 7),
         ]:
             asmt_i += 1
-            s.add(D.Assessment(id=f"asmt_{asmt_i}", tenant_id=TENANT, section_id=sid,
-                               name=aname, max_marks=mx, weight=1.0,
-                               assessment_type=assessment_type,
-                               scheduled_at=datetime.combine(date.today() + timedelta(days=days_out), datetime.min.time()).replace(hour=10),
-                               end_at=datetime.combine(date.today() + timedelta(days=days_out), datetime.min.time()).replace(hour=11),
-                               published=(days_out >= 0),
-                               instructions="Carry your university ID card.",
-                               status="published" if days_out >= 0 else "closed"))
+            assessment_id = f"asmt_{asmt_i}"
+
+            assessment = _ensure(
+                s,
+                D.Assessment,
+                assessment_id,
+                lambda assessment_id=assessment_id,
+                       sid=sid,
+                       aname=aname,
+                       mx=mx,
+                       assessment_type=assessment_type,
+                       days_out=days_out: D.Assessment(
+                    id=assessment_id,
+                    tenant_id=TENANT,
+                    section_id=sid,
+                    name=aname,
+                    max_marks=mx,
+                    weight=1.0,
+                    assessment_type=assessment_type,
+                    scheduled_at=datetime.combine(
+                        date.today() + timedelta(days=days_out),
+                        datetime.min.time()
+                    ).replace(hour=10),
+                    end_at=datetime.combine(
+                        date.today() + timedelta(days=days_out),
+                        datetime.min.time()
+                    ).replace(hour=11),
+                    published=(days_out >= 0),
+                    instructions="Carry your university ID card.",
+                    status="published" if days_out >= 0 else "closed",
+                ),
+            )
+
+            assessment.tenant_id = TENANT
+            assessment.section_id = sid
+            assessment.name = aname
+            assessment.max_marks = mx
+            assessment.weight = 1.0
+            assessment.assessment_type = assessment_type
+            assessment.scheduled_at = datetime.combine(
+                date.today() + timedelta(days=days_out),
+                datetime.min.time()
+            ).replace(hour=10)
+            assessment.end_at = datetime.combine(
+                date.today() + timedelta(days=days_out),
+                datetime.min.time()
+            ).replace(hour=11)
+            assessment.published = days_out >= 0
+            assessment.instructions = "Carry your university ID card."
+            assessment.status = "published" if days_out >= 0 else "closed"
 
     for i in range(1, 26):
         prog = R.choice(list(dept_ids.keys()))
