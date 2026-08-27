@@ -5,14 +5,11 @@ Portal API - persona-scoped views.
 Where domain_api.py serves administrative module data, this router serves the
 signed-in person's own world.
 """
-<<<<<<< HEAD
 from datetime import date, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
-=======
 from datetime import date, datetime, timedelta
 from uuid import uuid4
->>>>>>> 333f4dd0444992ce746621bc18b059a85033dd51
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -21,10 +18,7 @@ from sqlalchemy import and_, desc, or_
 from core import auth, db
 from database import TENANT, office
 import domain_models as D
-<<<<<<< HEAD
 from models import User, Notification
-=======
->>>>>>> 333f4dd0444992ce746621bc18b059a85033dd51
 
 router = APIRouter(prefix="/api/portal")
 
