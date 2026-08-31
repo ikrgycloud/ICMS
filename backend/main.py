@@ -36,6 +36,7 @@ from models import (User, Person, Role, RolePermission, Delegation, WorkflowInst
                     DelegationContext)
 
 from domain_api import router as domain_router
+from admissions_api import router as admissions_router
 from portal_api import router as portal_router
 from integrations_api import router as integrations_router
 from sms_api import router as sms_router
@@ -54,6 +55,7 @@ app = FastAPI(title="ICMS — Integrated College/University Management System",
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                    allow_headers=["*"])
 app.include_router(domain_router)
+app.include_router(admissions_router)
 app.include_router(portal_router)
 app.include_router(integrations_router)
 app.include_router(sms_router)

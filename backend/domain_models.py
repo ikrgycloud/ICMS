@@ -14,7 +14,7 @@ applies uniformly.
 """
 from datetime import datetime, date
 from sqlalchemy import (Column, Integer, String, Boolean, Float, DateTime,
-                        Date, Text, ForeignKey)
+                        Date, Text, ForeignKey, UniqueConstraint)
 from models import Base
 
 
@@ -328,9 +328,7 @@ class ExamSeatAssignment(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
-# --------------------------------------------------------------------------- #
-#  Admissions
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # --------------------------------------------------------------------------- #
 class Application(Base):
     __tablename__ = "applications"
     id = Column(String, primary_key=True)
@@ -341,6 +339,383 @@ class Application(Base):
     program_name = Column(String, default="")
     score = Column(Float, default=0)   # entrance rank/score
     status = Column(String, default="submitted")  # submitted/verified/offered/admitted/rejected
+    # ``status`` is retained for compatibility with the original admissions
+    # endpoints.  New work is driven by the canonical state and version below.
+    current_status = Column(String, default="SUBMITTED", index=True)
+    status_version = Column(Integer, default=0, nullable=False)
+    cycle_id = Column(String, ForeignKey("admission_cycles.id"), nullable=True, index=True)
+    cycle_program_id = Column(String, ForeignKey("admission_cycle_programs.id"), nullable=True, index=True)
+    application_no = Column(String, nullable=True, index=True)
+    phone = Column(String, default="")
+    date_of_birth = Column(Date, nullable=True)
+    gender = Column(String, default="")
+    campus = Column(String, default="")
+    category_code = Column(String, default="")
+    quota_code = Column(String, default="")
+    profile_json = Column(Text, default="{}")
+    selected_program_id = Column(String, ForeignKey("programs.id"), nullable=True)
+    allocated_program_id = Column(String, ForeignKey("programs.id"), nullable=True)
+    submitted_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# --------------------------------------------------------------------------- #
+#  Admissions foundation (Phase 1).  These tables retain detailed process
+#  state; Application.current_status is only the lifecycle projection.
+# --------------------------------------------------------------------------- #
+class AdmissionCycle(Base):
+    __tablename__ = "admission_cycles"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    code = Column(String, index=True)
+    name = Column(String)
+    academic_year = Column(String, index=True)
+    campus = Column(String, default="", index=True)
+    opens_at = Column(DateTime, nullable=True)
+    closes_at = Column(DateTime, nullable=True)
+    status = Column(String, default="draft")
+    configuration_json = Column(Text, default="{}")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AdmissionCycleProgram(Base):
+    __tablename__ = "admission_cycle_programs"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    cycle_id = Column(String, ForeignKey("admission_cycles.id"), index=True)
+    program_id = Column(String, ForeignKey("programs.id"), index=True)
+    campus = Column(String, default="", index=True)
+    application_fee = Column(Float, default=0)
+    admission_fee = Column(Float, default=0)
+    intake = Column(Integer, default=0)
+    assessment_mode = Column(String, default="merit")
+    settings_json = Column(Text, default="{}")
+    active = Column(Boolean, default=True)
+
+
+class AdmissionDocumentRequirement(Base):
+    __tablename__ = "admission_document_requirements"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    cycle_id = Column(String, ForeignKey("admission_cycles.id"), index=True)
+    program_id = Column(String, ForeignKey("programs.id"), nullable=True)
+    document_type = Column(String)
+    mandatory = Column(Boolean, default=True)
+    allowed_mime_types = Column(String, default="")
+    max_size_bytes = Column(Integer, nullable=True)
+    active = Column(Boolean, default=True)
+
+
+class ApplicationPreference(Base):
+    __tablename__ = "application_preferences"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), index=True)
+    program_id = Column(String, ForeignKey("programs.id"), index=True)
+    preference_rank = Column(Integer)
+    submitted_at = Column(DateTime, default=datetime.utcnow)
+    revised_at = Column(DateTime, nullable=True)
+
+
+class ApplicationDocument(Base):
+    __tablename__ = "application_documents"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), index=True)
+    requirement_id = Column(String, ForeignKey("admission_document_requirements.id"), nullable=True)
+    document_type = Column(String)
+    storage_key = Column(String, default="")
+    file_name = Column(String, default="")
+    mime_type = Column(String, default="")
+    checksum = Column(String, default="")
+    verification_status = Column(String, default="pending")
+    verified_by_user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    verified_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ApplicationReview(Base):
+    __tablename__ = "application_reviews"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), index=True)
+    review_type = Column(String)
+    status = Column(String, default="open")
+    reviewer_user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    notes = Column(Text, default="")
+    due_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    resolved_at = Column(DateTime, nullable=True)
+
+
+class AdmissionEligibilityRule(Base):
+    __tablename__ = "admission_eligibility_rules"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    cycle_id = Column(String, ForeignKey("admission_cycles.id"), index=True)
+    program_id = Column(String, ForeignKey("programs.id"), nullable=True)
+    quota_code = Column(String, default="")
+    rule_key = Column(String)
+    criteria_json = Column(Text, default="{}")
+    active = Column(Boolean, default=True)
+    version = Column(Integer, default=1)
+
+
+class ApplicationEligibilityCheck(Base):
+    __tablename__ = "application_eligibility_checks"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), index=True)
+    rule_id = Column(String, ForeignKey("admission_eligibility_rules.id"), nullable=True)
+    check_type = Column(String)
+    outcome = Column(String, default="pending")
+    evaluated_values_json = Column(Text, default="{}")
+    reason = Column(Text, default="")
+    evaluated_by_user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    evaluated_at = Column(DateTime, nullable=True)
+    quota_id = Column(String, ForeignKey("admission_quotas.id"), nullable=True, index=True)
+    evaluation_run_id = Column(String, ForeignKey("eligibility_evaluation_runs.id"), nullable=True, index=True)
+    rule_version = Column(Integer, default=1)
+
+
+class ApplicationAssessment(Base):
+    __tablename__ = "application_assessments"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), index=True)
+    assessment_type = Column(String)
+    score = Column(Float, nullable=True)
+    rank = Column(Integer, nullable=True)
+    percentile = Column(Float, nullable=True)
+    max_score = Column(Float, nullable=True)
+    merit_score = Column(Float, nullable=True, index=True)
+    merit_context_json = Column(Text, default="{}")
+    source = Column(String, default="")
+    status = Column(String, default="pending")
+    verified_by_user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    verified_at = Column(DateTime, nullable=True)
+
+
+class AdmissionCounsellingSession(Base):
+    __tablename__ = "admission_counselling_sessions"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    cycle_id = Column(String, ForeignKey("admission_cycles.id"), index=True)
+    campus = Column(String, default="")
+    scheduled_at = Column(DateTime, nullable=True)
+    mode = Column(String, default="offline")
+    location = Column(String, default="")
+    status = Column(String, default="scheduled")
+
+
+class ApplicationCounselling(Base):
+    __tablename__ = "application_counselling"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), index=True)
+    session_id = Column(String, ForeignKey("admission_counselling_sessions.id"), nullable=True)
+    attendance_status = Column(String, default="pending")
+    choices_json = Column(Text, default="[]")
+    outcome = Column(String, default="pending")
+    counsellor_user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    recorded_at = Column(DateTime, nullable=True)
+    recommended_program_id = Column(String, ForeignKey("programs.id"), nullable=True)
+    recommended_quota_id = Column(String, ForeignKey("admission_quotas.id"), nullable=True)
+    preference_rank = Column(Integer, nullable=True)
+    remarks = Column(Text, default="")
+
+
+class AdmissionQuota(Base):
+    __tablename__ = "admission_quotas"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    cycle_id = Column(String, ForeignKey("admission_cycles.id"), index=True)
+    code = Column(String)
+    name = Column(String)
+    category_code = Column(String, default="")
+    active = Column(Boolean, default=True)
+    program_id = Column(String, ForeignKey("programs.id"), nullable=True, index=True)
+    description = Column(Text, default="")
+    priority = Column(Integer, default=0)
+
+
+class EligibilityEvaluationRun(Base):
+    __tablename__ = "eligibility_evaluation_runs"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), index=True)
+    initiated_by_user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    outcome = Column(String, default="pending")
+    context_json = Column(Text, default="{}")
+    started_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+
+class AdmissionSeatPool(Base):
+    __tablename__ = "admission_seat_pools"
+    __table_args__ = (UniqueConstraint("tenant_id", "cycle_id", "campus", "program_id",
+                                       "quota_id", "category_code", "intake_key",
+                                       name="uq_admission_seat_pool_scope"),)
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    cycle_id = Column(String, ForeignKey("admission_cycles.id"), index=True)
+    campus = Column(String, default="", index=True)
+    program_id = Column(String, ForeignKey("programs.id"), index=True)
+    quota_id = Column(String, ForeignKey("admission_quotas.id"), nullable=True)
+    category_code = Column(String, default="")
+    intake_key = Column(String, default="")
+    capacity = Column(Integer, default=0)
+    reserved_capacity = Column(Integer, default=0)
+    status = Column(String, default="open")
+
+
+class AdmissionSeatAllocation(Base):
+    __tablename__ = "admission_seat_allocations"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), index=True)
+    seat_pool_id = Column(String, ForeignKey("admission_seat_pools.id"), index=True)
+    round_no = Column(Integer, default=1)
+    status = Column(String, default="allocated")
+    merit_rank = Column(Integer, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    waitlist_position = Column(Integer, nullable=True)
+    released_at = Column(DateTime, nullable=True)
+    release_reason = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AdmissionOffer(Base):
+    __tablename__ = "admission_offers"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), index=True)
+    allocation_id = Column(String, ForeignKey("admission_seat_allocations.id"), nullable=True)
+    offer_no = Column(String, index=True)
+    status = Column(String, default="draft")
+    conditions_json = Column(Text, default="[]")
+    issued_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    accepted_at = Column(DateTime, nullable=True)
+    declined_at = Column(DateTime, nullable=True)
+    workflow_id = Column(String, ForeignKey("workflow_instances.id"), nullable=True)
+    program_id = Column(String, ForeignKey("programs.id"), nullable=True)
+    campus = Column(String, default="")
+    quota_id = Column(String, ForeignKey("admission_quotas.id"), nullable=True)
+
+
+class AdmissionFeeResolution(Base):
+    __tablename__ = "admission_fee_resolutions"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), index=True)
+    resolution_type = Column(String)
+    approved_amount = Column(Float, default=0)
+    due_at = Column(DateTime, nullable=True)
+    status = Column(String, default="pending")
+    decided_by_user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    notes = Column(Text, default="")
+
+
+class AdmissionFinanceClearance(Base):
+    __tablename__ = "admission_finance_clearances"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), index=True)
+    invoice_id = Column(String, ForeignKey("fee_invoices.id"), nullable=True)
+    accounts_status = Column(String, default="pending")
+    finance_status = Column(String, default="pending")
+    accounts_user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    finance_user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    notes = Column(Text, default="")
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    total_payable = Column(Float, default=0)
+    total_paid = Column(Float, default=0)
+    total_waived = Column(Float, default=0)
+    balance = Column(Float, default=0)
+    cleared_at = Column(DateTime, nullable=True)
+
+
+class Guardian(Base):
+    __tablename__ = "guardians"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    name = Column(String)
+    email = Column(String, default="")
+    phone = Column(String, default="")
+    address = Column(Text, default="")
+
+
+class ApplicationGuardian(Base):
+    __tablename__ = "application_guardians"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), index=True)
+    guardian_id = Column(String, ForeignKey("guardians.id"), index=True)
+    relationship = Column(String)
+    is_primary = Column(Boolean, default=False)
+
+
+class StudentGuardian(Base):
+    __tablename__ = "student_guardians"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    student_id = Column(String, ForeignKey("students.id"), index=True)
+    guardian_id = Column(String, ForeignKey("guardians.id"), index=True)
+    relationship = Column(String)
+    is_primary = Column(Boolean, default=False)
+
+
+class AdmissionWorkflowLink(Base):
+    __tablename__ = "admission_workflow_links"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), index=True)
+    workflow_id = Column(String, ForeignKey("workflow_instances.id"), index=True)
+    purpose = Column(String)
+    status = Column(String, default="active")
+
+
+class AdmissionConversion(Base):
+    __tablename__ = "admission_conversions"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), unique=True, index=True)
+    student_id = Column(String, ForeignKey("students.id"), nullable=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    status = Column(String, default="pending")
+    student_identifier = Column(String, default="")
+    converted_by_user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    converted_at = Column(DateTime, nullable=True)
+    failure_reason = Column(Text, default="")
+
+
+class ApplicantAccessToken(Base):
+    __tablename__ = "applicant_access_tokens"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), index=True)
+    token_hash = Column(String, unique=True, index=True)
+    purpose = Column(String)
+    expires_at = Column(DateTime)
+    consumed_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+
+
+class ApplicationStatusHistory(Base):
+    __tablename__ = "application_status_history"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), index=True)
+    from_status = Column(String, default="")
+    to_status = Column(String)
+    action = Column(String)
+    status_version = Column(Integer)
+    actor_id = Column(String, nullable=True)
+    actor_name = Column(String, default="")
+    office_n = Column(Integer, nullable=True)
+    reason = Column(Text, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -352,11 +727,80 @@ class FeeInvoice(Base):
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
     student_id = Column(String, ForeignKey("students.id"))
+    application_id = Column(String, ForeignKey("applications.id"), nullable=True, index=True)
     term = Column(String)
+    invoice_type = Column(String, default="student_fee")
+    challan_no = Column(String, default="")
+    issued_at = Column(DateTime, nullable=True)
+    issued_by_user_id = Column(String, ForeignKey("users.id"), nullable=True)
     amount = Column(Float, default=0)
     paid = Column(Float, default=0)
     status = Column(String, default="due")    # due/partial/paid/waived
     due_date = Column(Date, nullable=True)
+
+
+class FeeComponent(Base):
+    __tablename__ = "fee_components"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    code = Column(String, index=True)
+    name = Column(String)
+    component_type = Column(String, default="charge")  # charge / waiver / adjustment
+    active = Column(Boolean, default=True)
+
+
+class FeeStructure(Base):
+    __tablename__ = "fee_structures"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    academic_year = Column(String, index=True)
+    campus = Column(String, default="")
+    program_id = Column(String, ForeignKey("programs.id"), nullable=True, index=True)
+    quota_id = Column(String, ForeignKey("admission_quotas.id"), nullable=True, index=True)
+    cycle_program_id = Column(String, ForeignKey("admission_cycle_programs.id"), nullable=True, index=True)
+    name = Column(String, default="Admission fees")
+    status = Column(String, default="active")
+
+
+class FeeStructureComponent(Base):
+    __tablename__ = "fee_structure_components"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    structure_id = Column(String, ForeignKey("fee_structures.id"), index=True)
+    component_id = Column(String, ForeignKey("fee_components.id"), index=True)
+    amount = Column(Float, default=0)
+    required = Column(Boolean, default=True)
+    sort_order = Column(Integer, default=0)
+
+
+class ApplicantFeeAssignment(Base):
+    __tablename__ = "applicant_fee_assignments"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), index=True)
+    invoice_id = Column(String, ForeignKey("fee_invoices.id"), nullable=True, index=True)
+    component_id = Column(String, ForeignKey("fee_components.id"), nullable=True)
+    component_name = Column(String, default="")
+    amount = Column(Float, default=0)
+    waived_amount = Column(Float, default=0)
+    status = Column(String, default="resolved")
+    resolution_id = Column(String, ForeignKey("admission_fee_resolutions.id"), nullable=True)
+
+
+class AdmissionChallan(Base):
+    __tablename__ = "admission_challans"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), index=True)
+    invoice_id = Column(String, ForeignKey("fee_invoices.id"), index=True)
+    challan_no = Column(String, unique=True, index=True)
+    amount = Column(Float, default=0)
+    due_at = Column(DateTime, nullable=True)
+    status = Column(String, default="GENERATED")
+    generated_at = Column(DateTime, default=datetime.utcnow)
+    payment_reference = Column(String, default="")
+    verified_by_user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    verified_at = Column(DateTime, nullable=True)
 
 
 class Payment(Base):
@@ -369,6 +813,11 @@ class Payment(Base):
     method = Column(String, default="online")
     at = Column(DateTime, default=datetime.utcnow)
     reference = Column(String, default="")
+    status = Column(String, default="recorded")
+    recorded_by_user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    verified_by_user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    verified_at = Column(DateTime, nullable=True)
+    verification_note = Column(Text, default="")
 
 
 class BudgetLine(Base):

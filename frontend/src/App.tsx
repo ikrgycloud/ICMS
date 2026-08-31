@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { HiOutlineAcademicCap, HiOutlineBanknotes, HiOutlineCalendarDays, HiOutlineChartBarSquare, HiOutlineCheckBadge, HiOutlineClipboardDocumentList, HiOutlineCreditCard, HiOutlineDocumentCheck, HiOutlineDocumentCurrencyRupee, HiOutlineGift, HiOutlineLifebuoy, HiOutlineQueueList, HiOutlineScale, HiOutlineSquares2X2, HiOutlineUserGroup, HiOutlineUserPlus, HiOutlineUsers } from 'react-icons/hi2'
 import { api, getUser, logout, saveSession } from './api'
 import Workflows from './views/Workflows'
 import Delegations from './views/Delegations'
@@ -8,6 +9,7 @@ import AuditView from './views/Audit'
 import Permissions from './views/Permissions'
 import OfficeProfile from './views/OfficeProfile'
 import Overview from './modules/Overview'
+import DirectorAdmissionsDashboard from './modules/DirectorAdmissionsDashboard'
 import Calendar from './modules/Calendar'
 import MySchedule from './modules/MySchedule'
 import AcademicCalendar from './modules/AcademicCalendar'
@@ -41,7 +43,6 @@ import FacultyHome from './personas/FacultyHome'
 import FacultySchedule from './personas/FacultySchedule'
 import ParentHome from './personas/ParentHome'
 import FrontDeskWorkspace from './frontdesk/FrontDeskWorkspace'
-import { FiHome, FiUsers, FiCalendar, FiHelpCircle, FiPhone, FiBookOpen, FiCheckCircle } from 'react-icons/fi'
 
 const LEVEL_COLORS: Record<number, string> = {
   1: '#d92d3a',
@@ -111,6 +112,51 @@ const FACULTY_ACTIVE_LABEL: Record<string, string> = {
   research: 'Research & Publications', academic_calendar: 'Academic Calendar', directory: 'Directory',
 }
 
+const DIRECTOR_ADMISSIONS_NAV = [
+  ['Overview', 'Overview', 'overview'],
+  ['Admissions Planning', 'Admission Cycles', 'director_cycles'], ['Admissions Planning', 'Programs & Intake', 'director_programs'], ['Admissions Planning', 'Quotas', 'director_quotas'],
+  ['Applications', 'All Applications', 'director_applications'], ['Applications', 'Corrections', 'director_corrections'], ['Applications', 'Document Verification', 'director_document_verification'], ['Applications', 'Document Status', 'director_documents'],
+  ['Eligibility & Selection', 'Eligibility Queue', 'director_eligibility'], ['Eligibility & Selection', 'Eligibility Rules', 'director_rules'], ['Eligibility & Selection', 'Merit & Rankings', 'director_merit'], ['Eligibility & Selection', 'Counselling', 'director_counselling'],
+  ['Seat Management', 'Seat Pools', 'director_seat_pools'], ['Seat Management', 'Seat Allocation', 'director_allocation'], ['Seat Management', 'Waitlist', 'director_waitlist'],
+  ['Offers', 'Offer Recommendations', 'director_recommendations'], ['Offers', 'Approval Inbox', 'approvals'], ['Offers', 'Issued Offers', 'director_offers'], ['Offers', 'Offer Status', 'director_offer_status'],
+  ['Applicant Finance', 'Finance Status', 'director_finance'], ['Applicant Finance', 'Invoices & Challans', 'director_invoices'], ['Applicant Finance', 'Payment Status', 'director_payment_status'], ['Applicant Finance', 'Accounts Verification', 'director_accounts'], ['Applicant Finance', 'Finance Clearance', 'director_clearance'],
+  ['Final Admission', 'Final Approval', 'director_final_approval'], ['Final Admission', 'Ready to Admit', 'director_ready'], ['Final Admission', 'Enrollment Queue', 'director_enrollment_queue'], ['Final Admission', 'Student Conversion', 'director_conversion'], ['Final Admission', 'Enrollment Status', 'director_enrollment'],
+  ['Special Admissions', 'Scholarship Admissions', 'director_scholarship'], ['Special Admissions', 'International Admissions', 'director_international'],
+  ['Applicant Support', 'Application Status', 'director_applications'], ['Applicant Support', 'Helpdesk / Support', 'workflows'],
+  ['Reports', 'Reports', 'director_reports'], ['Calendar', 'Calendar', 'calendar'],
+] as const
+
+const DIRECTOR_TAB: Record<string, string> = {
+  director_cycles: 'cycles', director_programs: 'program_intake', director_quotas: 'quotas',
+  director_applications: 'applications', director_review: 'review', director_corrections: 'corrections', director_document_verification: 'review', director_documents: 'document_status',
+  director_eligibility: 'eligibility', director_rules: 'rules', director_assessments: 'decisions', director_merit: 'decisions', director_counselling: 'counselling', director_seat_pools: 'seatpools', director_allocation: 'decisions', director_waitlist: 'waitlist', director_recommendations: 'offers', director_offers: 'issued_offers',
+  director_ready: 'ready_to_admit', director_enrollment_queue: 'enrollment_queue', director_conversion: 'student_conversion', director_enrollment: 'enrollment_status', director_finance: 'finance_status', director_invoices: 'invoices_challans', director_payment_status: 'payment_status', director_accounts: 'accounts_verification', director_clearance: 'clearance_status',
+  director_final_approval: 'final_approval',
+  director_offer_status: 'offers', director_scholarship: 'eligibility', director_international: 'applications', director_reports: 'reports',
+}
+
+const ADMISSION_MANAGER_NAV = [
+  ['Overview', 'Overview', 'overview'],
+  ['Admissions Planning', 'Admission Cycles', 'manager_cycles'], ['Admissions Planning', 'Programs & Intake', 'manager_programs'], ['Admissions Planning', 'Quotas', 'manager_quotas'],
+  ['Applications', 'All Applications', 'manager_applications'], ['Applications', 'Corrections', 'manager_corrections'], ['Applications', 'Document Status', 'manager_documents'],
+  ['Eligibility & Selection', 'Eligibility Queue', 'manager_eligibility'], ['Eligibility & Selection', 'Eligibility Rules', 'manager_rules'], ['Eligibility & Selection', 'Assessments & Merit', 'manager_assessments'], ['Eligibility & Selection', 'Counselling', 'manager_counselling'],
+  ['Seat Management', 'Seat Pools', 'manager_seat_pools'], ['Seat Management', 'Allocation', 'manager_allocation'], ['Seat Management', 'Waitlist', 'manager_waitlist'],
+  ['Offers', 'Offer Recommendations', 'manager_recommendations'], ['Offers', 'Offer Status', 'manager_offers'],
+  ['Applicant Finance', 'Finance Status', 'manager_finance'], ['Applicant Finance', 'Invoices & Challans', 'manager_invoices'], ['Applicant Finance', 'Clearance Status', 'manager_clearance'],
+  ['Final Admission', 'Ready to Admit', 'manager_ready'], ['Final Admission', 'Enrollment Status', 'manager_enrollment'],
+  ['Reports', 'Reports', 'manager_reports'], ['Calendar', 'Calendar', 'calendar'],
+] as const
+
+const ADMISSION_MANAGER_TAB: Record<string, string> = {
+  manager_cycles: 'cycles', manager_programs: 'program_intake', manager_quotas: 'quotas',
+  manager_applications: 'applications', manager_review: 'review', manager_corrections: 'corrections', manager_documents: 'document_status',
+  manager_eligibility: 'eligibility', manager_rules: 'rules', manager_assessments: 'decisions', manager_counselling: 'counselling',
+  manager_seat_pools: 'seatpools', manager_allocation: 'decisions', manager_waitlist: 'waitlist',
+  manager_recommendations: 'recommendations', manager_offers: 'issued_offers',
+  manager_finance: 'finance_status', manager_invoices: 'invoices_challans', manager_clearance: 'clearance_status',
+  manager_ready: 'ready_to_admit', manager_enrollment: 'enrollment_status', manager_reports: 'reports',
+}
+
 export default function App({ onLogout }: { onLogout: () => void }) {
   const [user, setUser] = useState<any>(getUser())
   const [ws, setWs] = useState<any>(null)
@@ -120,6 +166,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const [showNotif, setShowNotif] = useState(false)
   const [showRoles, setShowRoles] = useState(false)
   const [switching, setSwitching] = useState(false)
+  const [collapsedDirectorGroups, setCollapsedDirectorGroups] = useState<Record<string, boolean>>({})
 
   function loadWs() {
     api.workspace().then(setWs).catch(() => {})
@@ -142,8 +189,8 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     // Faculty & Staff is a Principal-specific presentation of the authorised
     // HR module.  It has its own route so that the list/profile experience is
     // retained when opened from the dashboard KPI or the Principal sidebar.
-    const principalVirtualModule = user?.office_n === 4 && ['faculty_staff', 'curriculum', 'courses_subjects'].includes(view)
-    if (!principalVirtualModule && !ws.modules.some((module: any) => module.key === view)) {
+    const virtualModule = (user?.office_n === 4 && ['faculty_staff', 'curriculum', 'courses_subjects'].includes(view)) || view.startsWith('director_') || view.startsWith('manager_')
+    if (!virtualModule && !ws.modules.some((module: any) => module.key === view)) {
       setView(ws.modules[0].key)
     }
   }, [ws, view, user?.office_n])
@@ -195,13 +242,18 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const chairmanShell = user.office_n === 1
   const principalShell = user.office_n === 4
   const facultyShell = user.persona === 'faculty'
+  const directorAdmissionsShell = user.office_n === 15 && user.active_role === 'Director of Admissions'
+  // The seeded office role is named “Admissions Manager”; accept the singular
+  // wording from requirements too so both authorised role labels share this shell.
+  const admissionManagerShell = ['Admission Manager', 'Admissions Manager'].includes(user.active_role)
+  const admissionsOperationsShell = directorAdmissionsShell || admissionManagerShell
+  const admissionOfficeSingleRole = user.office_n === 15
   const groups: Record<string, any[]> = {}
   displayModules.forEach((module: any) => {
     ;(groups[module.group] = groups[module.group] || []).push(module)
   })
   const order = chairmanShell ? CHAIRMAN_GROUP_ORDER : GROUP_ORDER
   const groupKeys = [...order.filter(key => groups[key]), ...Object.keys(groups).filter(key => !order.includes(key))]
-  const current = displayModules.find((module: any) => module.key === view) || displayModules[0]
   const principalGroups = PRINCIPAL_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
     const source = displayModules.find((module: any) => module.key === key)
       || (key === 'courses_subjects' ? displayModules.find((module: any) => module.key === 'academics') : undefined)
@@ -214,16 +266,35 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     ;(out[group] = out[group] || []).push({ key, label, group, source, enabled: Boolean(source) })
     return out
   }, {})
+  const directorGroups = DIRECTOR_ADMISSIONS_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
+    const backingKey = DIRECTOR_TAB[key] ? 'admissions' : key
+    const source = displayModules.find((module: any) => module.key === backingKey)
+    ;(out[group] = out[group] || []).push({ key, label, group, source, actions: source?.actions || {}, enabled: Boolean(source), backingKey })
+    return out
+  }, {})
+  const directorGroupKeys = [...new Set(DIRECTOR_ADMISSIONS_NAV.map(([group]) => group))]
+  const managerGroups = ADMISSION_MANAGER_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
+    const backingKey = ADMISSION_MANAGER_TAB[key] ? 'admissions' : key
+    const source = displayModules.find((module: any) => module.key === backingKey)
+    ;(out[group] = out[group] || []).push({ key, label, group, source, actions: source?.actions || {}, enabled: Boolean(source), backingKey })
+    return out
+  }, {})
+  const managerGroupKeys = [...new Set(ADMISSION_MANAGER_NAV.map(([group]) => group))]
+  const activeAdmissionsGroups = directorAdmissionsShell ? directorGroups : managerGroups
+  const activeAdmissionsGroupKeys = directorAdmissionsShell ? directorGroupKeys : managerGroupKeys
+  const current = (admissionsOperationsShell
+    ? Object.values(activeAdmissionsGroups).flat().find((module: any) => module.key === view)
+    : undefined) || displayModules.find((module: any) => module.key === view) || displayModules[0]
 
   return (
-    <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''} ${facultyShell ? 'faculty-shell' : ''}`}>
+    <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''} ${facultyShell ? 'faculty-shell' : ''} ${directorAdmissionsShell ? 'director-admissions-shell' : ''} ${admissionManagerShell ? 'admission-manager-shell' : ''}`}>
       <aside className={`sidebar ${sideOpen ? 'open' : ''}`}>
         <div className="brand">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <div className="seal">IC</div>
             <div>
               <div className="brand-name">ICMS</div>
-              <div className="brand-sub">{principalShell ? 'Principal Portal' : facultyShell ? 'University Group' : 'University Group'}</div>
+              <div className="brand-sub">{principalShell ? 'Principal Portal' : directorAdmissionsShell ? 'Admissions Directorate' : admissionManagerShell ? 'Admissions Operations' : facultyShell ? 'University Group' : 'University Group'}</div>
             </div>
           </div>
         </div>
@@ -237,23 +308,23 @@ export default function App({ onLogout }: { onLogout: () => void }) {
         </div>
 
         <nav className="side-nav">
-          {(principalShell ? Object.keys(principalGroups) : facultyShell ? Object.keys(facultyGroups) : groupKeys).map(group => (
+          {(principalShell ? Object.keys(principalGroups) : facultyShell ? Object.keys(facultyGroups) : admissionsOperationsShell ? activeAdmissionsGroupKeys : groupKeys).map(group => (
             <div key={group}>
-              <div className="side-sec">{group}</div>
-              {(principalShell ? principalGroups[group] : facultyShell ? facultyGroups[group] : groups[group]).map((module: any) => (
+              {admissionsOperationsShell ? <button className="side-sec director-nav-group" onClick={() => setCollapsedDirectorGroups(current => ({ ...current, [group]: !current[group] }))} type="button">{group}<span>{collapsedDirectorGroups[group] ? '+' : '−'}</span></button> : <div className="side-sec">{group}</div>}
+              {(!admissionsOperationsShell || !collapsedDirectorGroups[group]) && (principalShell ? principalGroups[group] : facultyShell ? facultyGroups[group] : admissionsOperationsShell ? activeAdmissionsGroups[group] : groups[group]).map((module: any) => (
                 <button
-                  key={(principalShell || facultyShell) ? `${group}-${module.label}` : module.key}
-                  className={`nav-item ${(facultyShell ? FACULTY_ACTIVE_LABEL[view] === module.label : view === module.key) && (!(principalShell || facultyShell) || module.enabled) ? 'on' : ''} ${(principalShell || facultyShell) && !module.enabled ? 'nav-item-disabled' : ''}`}
+                  key={(principalShell || facultyShell || admissionsOperationsShell) ? `${group}-${module.label}` : module.key}
+                  className={`nav-item ${(facultyShell ? FACULTY_ACTIVE_LABEL[view] === module.label : view === module.key) && (!(principalShell || facultyShell || admissionsOperationsShell) || module.enabled) ? 'on' : ''} ${(principalShell || facultyShell || admissionsOperationsShell) && !module.enabled ? 'nav-item-disabled' : ''}`}
                   onClick={() => {
-                    if ((principalShell || facultyShell) && !module.enabled) return
+                    if ((principalShell || facultyShell || admissionsOperationsShell) && !module.enabled) return
                     setView(module.key)
                     setSideOpen(false)
                   }}
-                  title={(principalShell || facultyShell) && !module.enabled ? 'This module is not available for your current role' : module.label}
+                  title={(principalShell || facultyShell || admissionsOperationsShell) && !module.enabled ? 'This module is not available for your current role' : module.label}
                   type="button"
                 >
                   <span className="ico">
-                    <NavGlyph moduleKey={module.key} />
+                    <NavGlyph moduleKey={module.backingKey || module.key} label={admissionsOperationsShell ? module.label : undefined} />
                   </span>
                   <span className="nav-label">{module.label}</span>
                   {module.key === 'workflows' && notifs.unread > 0 && (
@@ -277,12 +348,12 @@ export default function App({ onLogout }: { onLogout: () => void }) {
 
           <div className="top-right">
             <div style={{ position: 'relative' }}>
-              <button className="role-btn" onClick={() => setShowRoles(open => !open)} type="button">
+              <button className="role-btn" onClick={() => !admissionOfficeSingleRole && setShowRoles(open => !open)} type="button">
                 <span className="role-dot" style={{ background: color }} />
                 <span className="role-label">{user.active_role}</span>
-                <span className="role-caret"><ChevronDownIcon /></span>
+                {!admissionOfficeSingleRole && <span className="role-caret"><ChevronDownIcon /></span>}
               </button>
-              {showRoles && (
+              {!admissionOfficeSingleRole && showRoles && (
                 <div className="role-panel">
                   <div className="rp-head">Switch role - {user.office}</div>
                   <div className="rp-sub">
@@ -380,10 +451,17 @@ export default function App({ onLogout }: { onLogout: () => void }) {
 }
 
 function ModuleView({ view, module, user, onChange, go }: any) {
-  if (user.office_n === 35) return <FrontDeskWorkspace view={view} />
   const caps = module?.actions || {}
+  if (user.office_n === 35) return <FrontDeskWorkspace view={view} />
+  if (view.startsWith('director_')) {
+    if (DIRECTOR_TAB[view]) return <Admissions caps={caps} initialTab={DIRECTOR_TAB[view]} sidebarNavigation />
+  }
+  if (view.startsWith('manager_')) {
+    if (ADMISSION_MANAGER_TAB[view]) return <Admissions caps={caps} initialTab={ADMISSION_MANAGER_TAB[view]} sidebarNavigation />
+  }
   switch (view) {
     case 'overview':
+      if (user.office_n === 15 && user.active_role === 'Director of Admissions') return <DirectorAdmissionsDashboard user={user} go={go} />
       if (user.persona === 'student') return <StudentHome user={user} go={go} />
       if (user.persona === 'faculty') return <FacultyHome user={user} go={go} />
       if (user.persona === 'parent') return <ParentHome user={user} />
@@ -477,7 +555,6 @@ function ModuleView({ view, module, user, onChange, go }: any) {
 }
 
 function displayMeta(user: any, module: any) {
-  if (user.office_n === 35) return {}
   if (user.office_n !== 1) return {}
   return CHAIRMAN_DISPLAY[module.key] || {}
 }
@@ -522,16 +599,59 @@ function ChevronDownIcon() {
   )
 }
 
-function NavGlyph({ moduleKey }: { moduleKey: string }) {
-    if (moduleKey === 'frontdesk_dashboard') return <FiHome />
-    if (moduleKey === 'frontdesk_visitors') return <FiUsers />
-    if (moduleKey === 'frontdesk_verify') return <FiCheckCircle />
-    if (moduleKey === 'frontdesk_appointments') return <FiCalendar />
-    if (moduleKey === 'frontdesk_helpdesk') return <FiHelpCircle />
-    if (moduleKey === 'frontdesk_calls') return <FiPhone />
-    if (moduleKey === 'frontdesk_directory') return <FiBookOpen />
-    if (moduleKey === 'frontdesk_delegations') return <FiCheckCircle />
+function NavGlyph({ moduleKey, label }: { moduleKey: string, label?: string }) {
+  const admissionIcons: Record<string, any> = {
+    'Overview': HiOutlineSquares2X2,
+    'Admission Cycles': HiOutlineCalendarDays,
+    'Programs & Intake': HiOutlineAcademicCap,
+    'Quotas': HiOutlineUsers,
+    'All Applications': HiOutlineClipboardDocumentList,
+    'Corrections': HiOutlineDocumentCheck,
+    'Document Verification': HiOutlineDocumentCheck,
+    'Document Status': HiOutlineClipboardDocumentList,
+    'Eligibility Queue': HiOutlineScale,
+    'Eligibility Rules': HiOutlineScale,
+    'Merit & Rankings': HiOutlineChartBarSquare,
+    'Assessments & Merit': HiOutlineChartBarSquare,
+    'Counselling': HiOutlineUserGroup,
+    'Seat Pools': HiOutlineQueueList,
+    'Seat Allocation': HiOutlineQueueList,
+    'Allocation': HiOutlineQueueList,
+    'Waitlist': HiOutlineUsers,
+    'Offer Recommendations': HiOutlineGift,
+    'Approval Inbox': HiOutlineCheckBadge,
+    'Issued Offers': HiOutlineGift,
+    'Offer Status': HiOutlineGift,
+    'Finance Status': HiOutlineBanknotes,
+    'Invoices & Challans': HiOutlineDocumentCurrencyRupee,
+    'Payment Status': HiOutlineCreditCard,
+    'Accounts Verification': HiOutlineDocumentCheck,
+    'Finance Clearance': HiOutlineCheckBadge,
+    'Clearance Status': HiOutlineCheckBadge,
+    'Final Approval': HiOutlineCheckBadge,
+    'Ready to Admit': HiOutlineUserPlus,
+    'Enrollment Queue': HiOutlineQueueList,
+    'Student Conversion': HiOutlineUserPlus,
+    'Enrollment Status': HiOutlineAcademicCap,
+    'Scholarship Admissions': HiOutlineGift,
+    'International Admissions': HiOutlineUsers,
+    'Application Status': HiOutlineClipboardDocumentList,
+    'Helpdesk / Support': HiOutlineLifebuoy,
+    'Reports': HiOutlineChartBarSquare,
+    'Calendar': HiOutlineCalendarDays,
+  }
+  const AdmissionIcon = label ? admissionIcons[label] : null
+  if (AdmissionIcon) return <AdmissionIcon />
   switch (moduleKey) {
+    case 'frontdesk_dashboard':
+    case 'frontdesk_visitors':
+    case 'frontdesk_verify':
+    case 'frontdesk_appointments':
+    case 'frontdesk_helpdesk':
+    case 'frontdesk_calls':
+    case 'frontdesk_directory':
+    case 'frontdesk_delegations':
+      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="8" r="3" /><path d="M5 21a7 7 0 0 1 14 0M4 4h16v16H4z" /></svg>
     case 'overview':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 11.5 12 5l8 6.5V20a1 1 0 0 1-1 1h-4.5v-6h-5v6H5a1 1 0 0 1-1-1v-8.5Z" /></svg>
     case 'calendar':

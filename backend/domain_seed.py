@@ -5,13 +5,14 @@ Domain seed for ICMS.
 The seed is intentionally idempotent so repeated app startups keep enriching an
 existing local database instead of short-circuiting after the first run.
 """
+import json
 import random
 from datetime import date, datetime, timedelta
 
 from database import (SessionLocal, TENANT, engine, DEMO_USERNAMES, CAMPUS_SCOPES,
-                      slug, ensure_additive_schema)
+                      slug, ensure_additive_schema, ensure_versioned_migrations)
 from matrices import APPROVAL_MATRIX
-from models import (Base, User, Delegation, DelegationPolicy, DelegationProfile,
+from models import (Base, Person, Role, User, UserRole, Delegation, DelegationPolicy, DelegationProfile,
                     WorkflowInstance, WorkflowProfile, Approval, Notification,
                     DelegationOption, DelegationContext)
 import domain_models as D
@@ -3278,7 +3279,199 @@ def _seed_development_principal_coverage(s):
     s.commit()
 
 
+def _seed_admissions_phase2(s):
+    """Minimal relational Phase 2 reference data; never seeds later decisions."""
+    programs = s.query(D.Program).order_by(D.Program.code).limit(3).all()
+    if not programs:
+        return
+    now = datetime.utcnow()
+    published = s.query(D.AdmissionCycle).filter(D.AdmissionCycle.id == "adm_cycle_phase2_published").first()
+    if not published:
+        published = D.AdmissionCycle(id="adm_cycle_phase2_published", tenant_id=TENANT,
+            code="ADM-PH2-OPEN", name="Undergraduate Admissions", academic_year=f"{now.year}-{str(now.year + 1)[-2:]}",
+            campus=CAMPUS_SCOPES[0], opens_at=now - timedelta(days=15), closes_at=now + timedelta(days=45),
+            status="PUBLISHED", configuration_json="{}")
+        s.add(published)
+    draft_cycle = s.query(D.AdmissionCycle).filter(D.AdmissionCycle.id == "adm_cycle_phase2_draft").first()
+    if not draft_cycle:
+        s.add(D.AdmissionCycle(id="adm_cycle_phase2_draft", tenant_id=TENANT, code="ADM-PH2-DRAFT",
+            name="Next Admissions Cycle", academic_year=f"{now.year + 1}-{str(now.year + 2)[-2:]}",
+            campus=CAMPUS_SCOPES[0], status="DRAFT", configuration_json="{}"))
+    s.flush()
+    for index, program in enumerate(programs):
+        binding_id = f"adm_cycle_program_phase2_{index + 1}"
+        if not s.get(D.AdmissionCycleProgram, binding_id):
+            s.add(D.AdmissionCycleProgram(id=binding_id, tenant_id=TENANT, cycle_id=published.id,
+                program_id=program.id, campus=CAMPUS_SCOPES[0], application_fee=1000, admission_fee=75000,
+                intake=60, assessment_mode="merit", active=True, settings_json='{"entrance_required": false, "counselling_required": false}'))
+    if not s.get(D.AdmissionDocumentRequirement, "adm_doc_phase2_marks"):
+        s.add(D.AdmissionDocumentRequirement(id="adm_doc_phase2_marks", tenant_id=TENANT, cycle_id=published.id,
+            document_type="Qualifying examination marksheet", mandatory=True, allowed_mime_types="application/pdf,image/jpeg", max_size_bytes=5242880))
+    if not s.get(D.AdmissionDocumentRequirement, "adm_doc_phase2_identity"):
+        s.add(D.AdmissionDocumentRequirement(id="adm_doc_phase2_identity", tenant_id=TENANT, cycle_id=published.id,
+            document_type="Government identity", mandatory=True, allowed_mime_types="application/pdf,image/jpeg", max_size_bytes=5242880))
+    s.flush()
+    binding = s.get(D.AdmissionCycleProgram, "adm_cycle_program_phase2_1")
+    if binding and not s.get(D.Application, "app_phase2_draft"):
+        program = s.get(D.Program, binding.program_id)
+        s.add(D.Application(id="app_phase2_draft", tenant_id=TENANT, cycle_id=published.id, cycle_program_id=binding.id,
+            application_no="APP-PH2-DRAFT", applicant_name="Phase Two Draft", email="phase2.draft@example.test",
+            phone="9000000001", program_id=program.id, selected_program_id=program.id, program_name=program.name,
+            campus=binding.campus, status="submitted", current_status="DRAFT", status_version=0))
+    if binding and not s.get(D.Application, "app_phase2_submitted"):
+        program = s.get(D.Program, binding.program_id)
+        s.add(D.Application(id="app_phase2_submitted", tenant_id=TENANT, cycle_id=published.id, cycle_program_id=binding.id,
+            application_no="APP-PH2-SUBMITTED", applicant_name="Phase Two Submitted", email="phase2.submitted@example.test",
+            phone="9000000002", program_id=program.id, selected_program_id=program.id, program_name=program.name,
+            campus=binding.campus, status="submitted", current_status="SUBMITTED", status_version=1, submitted_at=now))
+    s.commit()
+
+
+def _seed_admissions_phase3(s):
+    """Deterministic eligibility fixtures using only persisted application data."""
+    cycle = s.get(D.AdmissionCycle, "adm_cycle_phase2_published")
+    bindings = (s.query(D.AdmissionCycleProgram).filter_by(cycle_id="adm_cycle_phase2_published", active=True)
+                .order_by(D.AdmissionCycleProgram.id).all())
+    if not cycle or not bindings:
+        return
+    for code, name, category, priority in [
+        ("REGULAR", "Regular quota", "GENERAL", 10),
+        ("SPORTS", "Sports quota", "SPORTS", 20),
+    ]:
+        row = s.query(D.AdmissionQuota).filter_by(tenant_id=TENANT, cycle_id=cycle.id, code=code).first()
+        if not row:
+            s.add(D.AdmissionQuota(id=f"adm_quota_phase3_{code.lower()}", tenant_id=TENANT, cycle_id=cycle.id,
+                code=code, name=name, category_code=category, description=f"Phase 3 {name.lower()} example.",
+                priority=priority, active=True))
+    s.flush()
+    rules = [
+        ("adm_rule_phase3_minimum", "", "MINIMUM_VALUE", {"rule_type": "MINIMUM_VALUE", "field": "qualifying_percentage", "operator": ">=", "value": 60}),
+        ("adm_rule_phase3_marksheet", "", "REQUIRED_DOCUMENT", {"rule_type": "REQUIRED_DOCUMENT", "document_type": "Qualifying examination marksheet"}),
+        ("adm_rule_phase3_regular", "REGULAR", "MINIMUM_VALUE", {"rule_type": "MINIMUM_VALUE", "field": "qualifying_percentage", "operator": ">=", "value": 70}),
+        ("adm_rule_phase3_sports", "SPORTS", "EQUALS", {"rule_type": "EQUALS", "field": "sports_category", "operator": "==", "value": "yes"}),
+    ]
+    for rule_id, quota_code, key, criteria in rules:
+        if not s.get(D.AdmissionEligibilityRule, rule_id):
+            s.add(D.AdmissionEligibilityRule(id=rule_id, tenant_id=TENANT, cycle_id=cycle.id, quota_code=quota_code,
+                rule_key=key, criteria_json=json.dumps(criteria), active=True, version=1))
+    samples = [
+        ("app_phase3_regular", "APP-PH3-REGULAR", "Phase Three Regular", {"qualifying_percentage": 74, "sports_category": "no"}, bindings[0]),
+        ("app_phase3_multiple", "APP-PH3-MULTIPLE", "Phase Three Multiple", {"qualifying_percentage": 81, "sports_category": "yes"}, bindings[0]),
+        ("app_phase3_fail", "APP-PH3-FAIL", "Phase Three Mandatory Fail", {"qualifying_percentage": 48, "sports_category": "yes"}, bindings[0]),
+        ("app_phase3_missing", "APP-PH3-MISSING", "Phase Three Missing Data", {"sports_category": "no"}, bindings[0]),
+    ]
+    for app_id, number, name, profile, binding in samples:
+        app = s.get(D.Application, app_id)
+        program = s.get(D.Program, binding.program_id)
+        if not app:
+            app = D.Application(id=app_id, tenant_id=TENANT, cycle_id=cycle.id, cycle_program_id=binding.id,
+                application_no=number, applicant_name=name, email=f"{app_id}@example.test", program_id=program.id,
+                selected_program_id=program.id, program_name=program.name, campus=binding.campus, status="submitted",
+                current_status="DOCUMENT_VERIFIED", status_version=3, submitted_at=datetime.utcnow(), profile_json=json.dumps(profile))
+            s.add(app); s.flush()
+        if app_id != "app_phase3_missing" and not s.query(D.ApplicationDocument).filter_by(application_id=app.id, document_type="Qualifying examination marksheet").first():
+            s.add(D.ApplicationDocument(id=f"{app_id}_marks", tenant_id=TENANT, application_id=app.id,
+                requirement_id="adm_doc_phase2_marks", document_type="Qualifying examination marksheet",
+                storage_key=f"seed/{app_id}/marksheet.pdf", file_name="marksheet.pdf", mime_type="application/pdf",
+                verification_status="verified"))
+    s.commit()
+
+
+def _seed_admissions_phase4(s):
+    """Idempotent Phase 4 decision-pipeline fixtures; no finance or conversion rows."""
+    cycle=s.get(D.AdmissionCycle,"adm_cycle_phase2_published"); binding=s.get(D.AdmissionCycleProgram,"adm_cycle_program_phase2_1")
+    if not cycle or not binding: return
+    program=s.get(D.Program,binding.program_id); quota=s.query(D.AdmissionQuota).filter_by(tenant_id=TENANT,cycle_id=cycle.id,code="REGULAR").first()
+    if not program: return
+    pool=s.get(D.AdmissionSeatPool,"adm_pool_phase4_regular")
+    if not pool:
+        pool=D.AdmissionSeatPool(id="adm_pool_phase4_regular",tenant_id=TENANT,cycle_id=cycle.id,campus=binding.campus,program_id=program.id,quota_id=quota.id if quota else None,category_code="GENERAL",intake_key="phase4",capacity=5,status="open");s.add(pool)
+    states=["ELIGIBLE","ASSESSMENT_PENDING","ASSESSMENT_QUALIFIED","COUNSELLING_PENDING","COUNSELLING_COMPLETED","ALLOCATION_PENDING","ALLOCATED","WAITLISTED","OFFER_RECOMMENDATION_PENDING","OFFER_APPROVAL_PENDING","OFFERED","OFFER_ACCEPTED","OFFER_DECLINED","OFFER_EXPIRED"]
+    active={"ALLOCATED","OFFER_RECOMMENDATION_PENDING","OFFER_APPROVAL_PENDING","OFFERED","OFFER_ACCEPTED"}
+    now=datetime.utcnow()
+    for index,state in enumerate(states,1):
+        app_id=f"app_phase4_{state.lower()}"; app=s.get(D.Application,app_id)
+        if not app:
+            app=D.Application(id=app_id,tenant_id=TENANT,cycle_id=cycle.id,cycle_program_id=binding.id,program_id=program.id,selected_program_id=program.id,program_name=program.name,campus=binding.campus,application_no=f"APP-PH4-{index:02d}",applicant_name=f"Phase Four {state.title()}",email=f"phase4.{index}@example.test",status="submitted",current_status=state,status_version=index,submitted_at=now,profile_json=json.dumps({"qualifying_percentage":70+index,"sports_category":"no"}));s.add(app);s.flush()
+        if state != "ELIGIBLE" and not s.get(D.ApplicationAssessment,f"assess_{app_id}"):
+            s.add(D.ApplicationAssessment(id=f"assess_{app_id}",tenant_id=TENANT,application_id=app.id,assessment_type="ACADEMIC_MERIT",score=70+index,merit_score=70+index,rank=index,status="CALCULATED",source="phase4_seed",verified_at=now,merit_context_json=json.dumps({"seed":True})))
+        if state in {"COUNSELLING_COMPLETED","ALLOCATION_PENDING"} and not s.get(D.ApplicationCounselling,f"counsel_{app_id}"):
+            s.add(D.ApplicationCounselling(id=f"counsel_{app_id}",tenant_id=TENANT,application_id=app.id,attendance_status="attended",outcome="COMPLETED",recommended_program_id=program.id,recommended_quota_id=quota.id if quota else None,preference_rank=1,recorded_at=now,remarks="Phase 4 seed"))
+        if state in active|{"WAITLISTED","OFFER_DECLINED","OFFER_EXPIRED"}:
+            alloc=s.get(D.AdmissionSeatAllocation,f"alloc_{app_id}")
+            if not alloc:
+                allocation_status="WAITLISTED" if state=="WAITLISTED" else ("RELEASED" if state in {"OFFER_DECLINED","OFFER_EXPIRED"} else "ALLOCATED")
+                s.add(D.AdmissionSeatAllocation(id=f"alloc_{app_id}",tenant_id=TENANT,application_id=app.id,seat_pool_id=pool.id,round_no=1,status=allocation_status,merit_rank=index,waitlist_position=1 if state=="WAITLISTED" else None,created_at=now,released_at=now if allocation_status=="RELEASED" else None,release_reason="Seed final offer" if allocation_status=="RELEASED" else ""))
+        if state.startswith("OFFER_") and state not in {"OFFER_RECOMMENDATION_PENDING","OFFER_APPROVAL_PENDING"}:
+            offer=s.get(D.AdmissionOffer,f"offer_{app_id}")
+            if not offer:
+                offer_status={"OFFERED":"ISSUED","OFFER_ACCEPTED":"ACCEPTED","OFFER_DECLINED":"DECLINED","OFFER_EXPIRED":"EXPIRED"}[state]
+                s.add(D.AdmissionOffer(id=f"offer_{app_id}",tenant_id=TENANT,application_id=app.id,allocation_id=f"alloc_{app_id}",offer_no=f"OFF-PH4-{index:02d}",status=offer_status,issued_at=now,expires_at=now+timedelta(days=7),accepted_at=now if state=="OFFER_ACCEPTED" else None,declined_at=now if state=="OFFER_DECLINED" else None,program_id=program.id,campus=binding.campus,quota_id=quota.id if quota else None,conditions_json="[]"))
+    s.commit()
+
+
+def _seed_admissions_phase5(s):
+    """Idempotent, server-backed Phase 5 finance and conversion examples."""
+    cycle=s.get(D.AdmissionCycle,"adm_cycle_phase2_published"); binding=s.get(D.AdmissionCycleProgram,"adm_cycle_program_phase2_1")
+    if not cycle or not binding: return
+    program=s.get(D.Program,binding.program_id)
+    if not program: return
+    components=[("fee_component_admission","ADMISSION","Admission Fee",2500), ("fee_component_tuition","TUITION","Tuition",12000)]
+    for component_id,code,name,_ in components:
+        if not s.get(D.FeeComponent,component_id): s.add(D.FeeComponent(id=component_id,tenant_id=TENANT,code=code,name=name))
+    structure=s.get(D.FeeStructure,"fee_structure_phase5")
+    if not structure:
+        structure=D.FeeStructure(id="fee_structure_phase5",tenant_id=TENANT,academic_year=cycle.academic_year,campus=binding.campus,program_id=program.id,cycle_program_id=binding.id,name="Phase 5 admission fee");s.add(structure);s.flush()
+    for index,(component_id,_,_,amount) in enumerate(components,1):
+        if not s.get(D.FeeStructureComponent,f"fee_structure_component_{index}"): s.add(D.FeeStructureComponent(id=f"fee_structure_component_{index}",tenant_id=TENANT,structure_id=structure.id,component_id=component_id,amount=amount,sort_order=index))
+    states=["OFFER_ACCEPTED","FEE_RESOLUTION_PENDING","INVOICE_ISSUED","PAYMENT_PENDING","PAYMENT_RECORDED","ACCOUNTS_VERIFIED","FINANCE_CLEARED","FINAL_APPROVAL_PENDING","READY_TO_ADMIT","ENROLLED"]
+    now=datetime.utcnow(); pool=s.get(D.AdmissionSeatPool,"adm_pool_phase4_regular")
+    for index,state in enumerate(states,1):
+        app_id=f"app_phase5_{state.lower()}"; app=s.get(D.Application,app_id)
+        if not app:
+            app=D.Application(id=app_id,tenant_id=TENANT,cycle_id=cycle.id,cycle_program_id=binding.id,program_id=program.id,selected_program_id=program.id,program_name=program.name,campus=binding.campus,application_no=f"APP-PH5-{index:02d}",applicant_name=f"Phase Five {state.title()}",email=f"phase5.{index}@example.test",status="submitted",current_status=state,status_version=index,submitted_at=now,profile_json=json.dumps({"qualifying_percentage":80}));s.add(app);s.flush()
+        if pool and not s.get(D.AdmissionSeatAllocation,f"alloc_{app_id}"): s.add(D.AdmissionSeatAllocation(id=f"alloc_{app_id}",tenant_id=TENANT,application_id=app.id,seat_pool_id=pool.id,status="ALLOCATED"))
+        if not s.get(D.AdmissionOffer,f"offer_{app_id}"): s.add(D.AdmissionOffer(id=f"offer_{app_id}",tenant_id=TENANT,application_id=app.id,allocation_id=f"alloc_{app_id}",offer_no=f"OFF-PH5-{index:02d}",status="ACCEPTED",issued_at=now,accepted_at=now,program_id=program.id,campus=binding.campus,conditions_json="[]"))
+        if state != "OFFER_ACCEPTED":
+            for component_id,_,name,amount in components:
+                if not s.get(D.ApplicantFeeAssignment,f"assign_{app_id}_{component_id}"): s.add(D.ApplicantFeeAssignment(id=f"assign_{app_id}_{component_id}",tenant_id=TENANT,application_id=app.id,component_id=component_id,component_name=name,amount=amount,status="resolved"))
+        if state in states[2:]:
+            invoice=s.get(D.FeeInvoice,f"invoice_{app_id}")
+            if not invoice:
+                invoice=D.FeeInvoice(id=f"invoice_{app_id}",tenant_id=TENANT,student_id=None,application_id=app.id,term=cycle.academic_year,invoice_type="admission_fee",challan_no=f"CH-PH5-{index:02d}",issued_at=now,amount=14500,paid=14500 if state in states[5:] else 0,status="paid" if state in states[5:] else "due");s.add(invoice)
+            if not s.get(D.AdmissionChallan,f"challan_{app_id}"): s.add(D.AdmissionChallan(id=f"challan_{app_id}",tenant_id=TENANT,application_id=app.id,invoice_id=f"invoice_{app_id}",challan_no=f"CH-PH5-{index:02d}",amount=14500,due_at=now+timedelta(days=14),status="PAID" if state in states[5:] else "GENERATED",generated_at=now))
+        if state in states[4:]:
+            if not s.get(D.Payment,f"payment_{app_id}"): s.add(D.Payment(id=f"payment_{app_id}",tenant_id=TENANT,invoice_id=f"invoice_{app_id}",student_id="",amount=14500,method="challan",reference=f"PAY-PH5-{index:02d}",status="VERIFIED" if state in states[5:] else "RECORDED"))
+        if state in states[6:]:
+            if not s.get(D.AdmissionFinanceClearance,f"clearance_{app_id}"): s.add(D.AdmissionFinanceClearance(id=f"clearance_{app_id}",tenant_id=TENANT,application_id=app.id,invoice_id=f"invoice_{app_id}",accounts_status="VERIFIED",finance_status="CLEARED",total_payable=14500,total_paid=14500,balance=0,cleared_at=now))
+        if state in {"FINAL_APPROVAL_PENDING","READY_TO_ADMIT","ENROLLED"}:
+            workflow=s.get(WorkflowInstance,f"workflow_{app_id}")
+            if not workflow:
+                workflow=WorkflowInstance(id=f"workflow_{app_id}",tenant_id=TENANT,process_key="student_admission",label="Final admission",office_n=15,title=f"Final admission {app.application_no}",state="submitted" if state=="FINAL_APPROVAL_PENDING" else "approved",initiator_id="u_admissions",initiator_name="Admissions",current_stage=1,scope_level="campus");s.add(workflow)
+            if not s.get(D.AdmissionWorkflowLink,f"link_{app_id}"): s.add(D.AdmissionWorkflowLink(id=f"link_{app_id}",tenant_id=TENANT,application_id=app.id,workflow_id=f"workflow_{app_id}",purpose="final_admission",status="active"))
+        if state == "ENROLLED":
+            person_id=f"person_{app_id}"; user_id=f"user_{app_id}"; student_id=f"student_{app_id}"
+            if not s.get(Person,person_id): s.add(Person(id=person_id,tenant_id=TENANT,name=app.applicant_name,email=app.email,contact=""))
+            if not s.get(User,user_id): s.add(User(id=user_id,tenant_id=TENANT,person_id=person_id,username=f"student-{app_id}",password_hash="seed",office_n=36,role="Student",scope_level="individual",scope_ref=""))
+            role=s.query(Role).filter_by(tenant_id=TENANT,office_n=36).first()
+            if role and not s.query(UserRole).filter_by(user_id=user_id,role_id=role.id).first(): s.add(UserRole(id=f"role_{app_id}",user_id=user_id,role_id=role.id,org_scope_id=TENANT))
+            if not s.get(D.Student,student_id): s.add(D.Student(id=student_id,tenant_id=TENANT,roll_no="26CSEPH510",name=app.applicant_name,email=app.email,program_id=program.id,dept_id=program.dept_id,campus=binding.campus,batch=cycle.academic_year,semester=1,user_id=user_id))
+            section=s.query(D.Section).filter_by(tenant_id=TENANT,dept_id=program.dept_id).first()
+            if not section:
+                course=s.get(D.Course,"course_phase5_conversion")
+                if not course:
+                    course=D.Course(id="course_phase5_conversion",tenant_id=TENANT,dept_id=program.dept_id,program_id=program.id,code="ADM101",title="Admission Foundation",credits=0,semester=1);s.add(course);s.flush()
+                section=D.Section(id="section_phase5_conversion",tenant_id=TENANT,course_id=course.id,dept_id=program.dept_id,term=f"{cycle.academic_year}-Odd",section_code="ADM",scope_ref=program.dept_id)
+                s.add(section);s.flush()
+            if section and not s.get(D.Enrollment,f"enrollment_{app_id}"): s.add(D.Enrollment(id=f"enrollment_{app_id}",tenant_id=TENANT,student_id=student_id,section_id=section.id,status="enrolled"))
+            if not s.get(D.AdmissionConversion,f"conversion_{app_id}"): s.add(D.AdmissionConversion(id=f"conversion_{app_id}",tenant_id=TENANT,application_id=app.id,student_id=student_id,user_id=user_id,status="completed",student_identifier="26CSEPH510",converted_by_user_id="u_admissions",converted_at=now))
+            invoice=s.get(D.FeeInvoice,f"invoice_{app_id}")
+            if invoice: invoice.student_id=student_id
+    s.commit()
+
+
 def seed_domain():
+    ensure_versioned_migrations()
     ensure_additive_schema()
     s = SessionLocal()
     try:
@@ -3292,6 +3485,10 @@ def seed_domain():
         _seed_principal_schedule_events(s)
         _seed_development_backlog_history(s)
         _seed_development_principal_coverage(s)
+        _seed_admissions_phase2(s)
+        _seed_admissions_phase3(s)
+        _seed_admissions_phase4(s)
+        _seed_admissions_phase5(s)
         return {
             "status": "domain-seeded",
             "schools": s.query(D.School).count(),

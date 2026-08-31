@@ -43,7 +43,7 @@ def uid() -> str:
 
 
 def write_audit(s, actor, actor_name, office_n, action, entity,
-                prev_state="", new_state="", reason="", auth_level="mfa"):
+                prev_state="", new_state="", reason="", auth_level="mfa", commit=True):
     last = s.query(AuditLog).order_by(desc(AuditLog.id)).first()
     prev = last.hash if last else "0" * 64
     rec = {"actor": actor, "action": action, "entity": entity, "new_state": new_state}
@@ -52,7 +52,10 @@ def write_audit(s, actor, actor_name, office_n, action, entity,
                    action=action, entity=entity, prev_state=prev_state, new_state=new_state,
                    reason=reason, auth_level=auth_level, prev_hash=prev, hash=h)
     s.add(row)
-    s.commit()
+    if commit:
+        s.commit()
+    else:
+        s.flush()
     return row
 
 

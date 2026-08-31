@@ -108,6 +108,12 @@ def ensure_additive_schema():
                 conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"))
 
 
+def ensure_versioned_migrations():
+    """Apply Admissions schema revisions without resetting existing data."""
+    from migrations.runner import upgrade
+    upgrade(engine)
+
+
 def office(n: int) -> dict:
     for o in OFFICES:
         if o["n"] == n:
@@ -172,6 +178,7 @@ def seed():
     _ensure_course_columns()
     _ensure_staff_contact_columns()
     ensure_additive_schema()
+    ensure_versioned_migrations()
     s = SessionLocal()
     try:
         # Tenant + scope tree (Document §6, §11).
