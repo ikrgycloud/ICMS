@@ -3403,6 +3403,9 @@ def _seed_admissions_phase4(s):
                 allocation_status="WAITLISTED" if state=="WAITLISTED" else ("RELEASED" if state in {"OFFER_DECLINED","OFFER_EXPIRED"} else "ALLOCATED")
                 s.add(D.AdmissionSeatAllocation(id=f"alloc_{app_id}",tenant_id=TENANT,application_id=app.id,seat_pool_id=pool.id,round_no=1,status=allocation_status,merit_rank=index,waitlist_position=1 if state=="WAITLISTED" else None,created_at=now,released_at=now if allocation_status=="RELEASED" else None,release_reason="Seed final offer" if allocation_status=="RELEASED" else ""))
         if state.startswith("OFFER_") and state not in {"OFFER_RECOMMENDATION_PENDING","OFFER_APPROVAL_PENDING"}:
+            # AdmissionOffer has a foreign key to this allocation; flush it
+            # first because the seed does not declare an ORM relationship.
+            s.flush()
             offer=s.get(D.AdmissionOffer,f"offer_{app_id}")
             if not offer:
                 offer_status={"OFFERED":"ISSUED","OFFER_ACCEPTED":"ACCEPTED","OFFER_DECLINED":"DECLINED","OFFER_EXPIRED":"EXPIRED"}[state]
@@ -3434,6 +3437,10 @@ def _seed_admissions_phase5(s):
         if not app:
             app=D.Application(id=app_id,tenant_id=TENANT,cycle_id=cycle.id,cycle_program_id=binding.id,program_id=program.id,selected_program_id=program.id,program_name=program.name,campus=binding.campus,application_no=f"APP-PH5-{index:02d}",applicant_name=f"Phase Five {state.title()}",email=f"phase5.{index}@example.test",status="submitted",current_status=state,status_version=index,submitted_at=now,profile_json=json.dumps({"qualifying_percentage":80}));s.add(app);s.flush()
         if pool and not s.get(D.AdmissionSeatAllocation,f"alloc_{app_id}"): s.add(D.AdmissionSeatAllocation(id=f"alloc_{app_id}",tenant_id=TENANT,application_id=app.id,seat_pool_id=pool.id,status="ALLOCATED"))
+        # The offer's allocation_id is a PostgreSQL foreign key.  Persist the
+        # allocation before creating the offer because these seed models have
+        # no ORM relationship to establish insert ordering automatically.
+        s.flush()
         if not s.get(D.AdmissionOffer,f"offer_{app_id}"): s.add(D.AdmissionOffer(id=f"offer_{app_id}",tenant_id=TENANT,application_id=app.id,allocation_id=f"alloc_{app_id}",offer_no=f"OFF-PH5-{index:02d}",status="ACCEPTED",issued_at=now,accepted_at=now,program_id=program.id,campus=binding.campus,conditions_json="[]"))
         if state != "OFFER_ACCEPTED":
             for component_id,_,name,amount in components:
@@ -3442,6 +3449,8 @@ def _seed_admissions_phase5(s):
             invoice=s.get(D.FeeInvoice,f"invoice_{app_id}")
             if not invoice:
                 invoice=D.FeeInvoice(id=f"invoice_{app_id}",tenant_id=TENANT,student_id=None,application_id=app.id,term=cycle.academic_year,invoice_type="admission_fee",challan_no=f"CH-PH5-{index:02d}",issued_at=now,amount=14500,paid=14500 if state in states[5:] else 0,status="paid" if state in states[5:] else "due");s.add(invoice)
+            # Admission challans and payments reference the invoice by FK.
+            s.flush()
             if not s.get(D.AdmissionChallan,f"challan_{app_id}"): s.add(D.AdmissionChallan(id=f"challan_{app_id}",tenant_id=TENANT,application_id=app.id,invoice_id=f"invoice_{app_id}",challan_no=f"CH-PH5-{index:02d}",amount=14500,due_at=now+timedelta(days=14),status="PAID" if state in states[5:] else "GENERATED",generated_at=now))
         if state in states[4:]:
             if not s.get(D.Payment,f"payment_{app_id}"): s.add(D.Payment(id=f"payment_{app_id}",tenant_id=TENANT,invoice_id=f"invoice_{app_id}",student_id="",amount=14500,method="challan",reference=f"PAY-PH5-{index:02d}",status="VERIFIED" if state in states[5:] else "RECORDED"))
@@ -3451,6 +3460,7 @@ def _seed_admissions_phase5(s):
             workflow=s.get(WorkflowInstance,f"workflow_{app_id}")
             if not workflow:
                 workflow=WorkflowInstance(id=f"workflow_{app_id}",tenant_id=TENANT,process_key="student_admission",label="Final admission",office_n=15,title=f"Final admission {app.application_no}",state="submitted" if state=="FINAL_APPROVAL_PENDING" else "approved",initiator_id="u_admissions",initiator_name="Admissions",current_stage=1,scope_level="campus");s.add(workflow)
+            s.flush()
             if not s.get(D.AdmissionWorkflowLink,f"link_{app_id}"): s.add(D.AdmissionWorkflowLink(id=f"link_{app_id}",tenant_id=TENANT,application_id=app.id,workflow_id=f"workflow_{app_id}",purpose="final_admission",status="active"))
         if state == "ENROLLED":
             person_id=f"person_{app_id}"; user_id=f"user_{app_id}"; student_id=f"student_{app_id}"
@@ -3467,7 +3477,8 @@ def _seed_admissions_phase5(s):
                 section=D.Section(id="section_phase5_conversion",tenant_id=TENANT,course_id=course.id,dept_id=program.dept_id,term=f"{cycle.academic_year}-Odd",section_code="ADM",scope_ref=program.dept_id)
                 s.add(section);s.flush()
             if section and not s.get(D.Enrollment,f"enrollment_{app_id}"): s.add(D.Enrollment(id=f"enrollment_{app_id}",tenant_id=TENANT,student_id=student_id,section_id=section.id,status="enrolled"))
-            if not s.get(D.AdmissionConversion,f"conversion_{app_id}"): s.add(D.AdmissionConversion(id=f"conversion_{app_id}",tenant_id=TENANT,application_id=app.id,student_id=student_id,user_id=user_id,status="completed",student_identifier="26CSEPH510",converted_by_user_id="u_admissions",converted_at=now))
+            s.flush()
+            if not s.get(D.AdmissionConversion,f"conversion_{app_id}"): s.add(D.AdmissionConversion(id=f"conversion_{app_id}",tenant_id=TENANT,application_id=app.id,student_id=student_id,user_id=user_id,status="completed",student_identifier="26CSEPH510",converted_by_user_id="user_15",converted_at=now))
             invoice=s.get(D.FeeInvoice,f"invoice_{app_id}")
             if invoice: invoice.student_id=student_id
     s.commit()
