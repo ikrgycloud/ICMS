@@ -27,6 +27,7 @@ MODULES = {
     "frontdesk_delegations": {"label": "Delegations", "icon": "⤳", "group": "Front Desk"},
     "frontdesk_verify": {"label": "Verify / Scan", "icon": "⌗", "group": "Front Desk"},
     "curriculum":   {"label": "Curriculum", "icon": "Curr", "group": "Academics"},
+    "rollover":     {"label": "Academic Rollover", "icon": "Rollover", "group": "Academics"},
     "overview":     {"label": "Overview",      "icon": "◆", "group": "Workspace"},
     "my_schedule":  {"label": "My Schedule",   "icon": "📅", "group": "Workspace"},
     "calendar":     {"label": "Calendar",      "icon": "📆", "group": "Workspace"},
@@ -69,9 +70,9 @@ OFFICE_MODULES = {
     1:  ["governance", "analytics", "finance", "hr", "integrations", "approvals"], # Chairman
     2:  ["governance", "analytics", "finance", "approvals"],                       # Vice Chairman
     3:  ["analytics", "academics", "finance", "hr", "approvals"],                  # Campus Head
-    4:  ["my_schedule", "analytics", "academics", "students", "admissions", "attendance", "examinations", "finance", "hr", "procurement", "assets", "hostel", "transport", "grievance", "approvals"],  # Principal: branch oversight views
+    4:  ["my_schedule", "analytics", "academics", "students", "admissions", "attendance", "examinations", "finance", "rollover", "hr", "procurement", "assets", "hostel", "transport", "grievance", "approvals"],  # Principal: branch oversight views
     5:  ["academics", "students", "attendance", "examinations", "approvals"],      # Vice Principal
-    6:  ["academics", "students", "examinations", "research", "approvals"],        # Dean Academics
+    6:  ["academics", "students", "examinations", "rollover", "research", "approvals"],        # Dean Academics
     7:  ["hr", "procurement", "assets", "finance", "approvals"],                   # Dean Administration
     8:  ["students", "grievance", "hostel", "approvals"],                          # Dean Student Affairs
     9:  ["research", "analytics", "approvals"],                                    # Dean R&D / IQAC
@@ -82,12 +83,12 @@ OFFICE_MODULES = {
     14: ["my_schedule", "academics", "attendance", "examinations"],              # Lecturer
     15: ["admissions", "students", "approvals"],                                   # Admission Office
     16: ["examinations", "students", "approvals"],                                 # Exam Controller
-    17: ["academics", "attendance", "approvals"],                                  # Academic Coordinator
+    17: ["academics", "attendance", "rollover", "approvals"],                                  # Academic Coordinator
     18: ["placements", "students", "analytics"],                                   # Placement Office
     19: ["library"],                                                              # Library
     20: ["grievance", "students"],                                                 # Grievance
     21: ["grievance", "students"],                                                 # Discipline
-    22: ["finance", "students", "approvals", "analytics"],                         # Finance Manager
+    22: ["finance", "students", "rollover", "approvals", "analytics"],                         # Finance Manager
     23: ["finance", "students", "approvals"],                                      # Accounts
     24: ["hr", "approvals", "analytics"],                                          # HR Manager
     25: ["hr", "approvals"],                                                       # HR Executive

@@ -23,6 +23,21 @@ async function req(path: string, opts: RequestInit = {}) {
   return data
 }
 
+async function download(path: string) {
+  const headers: Record<string, string> = {}
+  const t = tok()
+  if (t) headers.Authorization = `Bearer ${t}`
+  const res = await fetch(`${BASE}${path}`, { headers })
+  if (!res.ok) throw new Error('Could not download the receipt')
+
+  const url = URL.createObjectURL(await res.blob())
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'ICMS-payment-receipt.pdf'
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
 export const api = {
   frontdeskDashboard: () => req('/frontdesk/dashboard'),
   frontdeskVisitors: (status = '', q = '') => req(`/frontdesk/visitors?status=${encodeURIComponent(status)}&q=${encodeURIComponent(q)}`),
@@ -263,10 +278,36 @@ export const api = {
 
   // ---- finance ----
   invoices: () => req('/finance/invoices'),
+  academicRollovers: () => req('/academic-rollover'),
+  academicRolloverPolicy: () => req('/academic-rollover/policy'),
+  updateAcademicRolloverPolicy: (body: any) => req('/academic-rollover/policy', { method: 'PUT', body: JSON.stringify(body) }),
+  startAcademicRollover: (body: any) => req('/academic-rollover', { method: 'POST', body: JSON.stringify(body) }),
+  decideAcademicRollover: (id: string, body: any) => req(`/academic-rollover/${id}/decision`, { method: 'POST', body: JSON.stringify(body) }),
+  submitAcademicRollover: (id: string) => req(`/academic-rollover/${id}/submit`, { method: 'POST' }),
+  approveAcademicRollover: (id: string) => req(`/academic-rollover/${id}/approve`, { method: 'POST' }),
+  executeAcademicRollover: (id: string) => req(`/academic-rollover/${id}/execute`, { method: 'POST' }),
   budget: () => req('/finance/budget'),
-  recordPayment: (invoice_id: string, amount: number) =>
-    req('/finance/payment', { method: 'POST', body: JSON.stringify({ invoice_id, amount }) }),
+  recordPayment: (invoice_id: string, amount: number, method = 'cash', reference = '') =>
+    req('/finance/payment', { method: 'POST', body: JSON.stringify({ invoice_id, amount, method, reference }) }),
+  clearOfflinePayment: (payment_id: string, action: 'cleared' | 'bounced') =>
+    req(`/finance/payments/${payment_id}/clear`, { method: 'POST', body: JSON.stringify({ action }) }),
+  downloadFinanceReceipt: (invoice_id: string, payment_id = '') => download(`/finance/invoices/${invoice_id}/receipt.pdf${payment_id ? `?payment_id=${encodeURIComponent(payment_id)}` : ''}`),
   waiveFee: (b: any) => req('/finance/waive', { method: 'POST', body: JSON.stringify(b) }),
+  feeReferenceData: () => req('/fees/reference-data'),
+  feeHeads: (includeInactive = false) => req(`/fees/heads?include_inactive=${includeInactive}`),
+  createFeeHead: (b: any) => req('/fees/heads', { method: 'POST', body: JSON.stringify(b) }),
+  updateFeeHead: (id: string, b: any) => req(`/fees/heads/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+  setFeeHeadStatus: (id: string, is_active: boolean) => req(`/fees/heads/${id}/status`, { method: 'PATCH', body: JSON.stringify({ is_active }) }),
+  feeStructures: (filters: Record<string, string> = {}) => {
+    const qs = new URLSearchParams(Object.entries(filters).filter(([, value]) => value))
+    return req(`/fee-structures${qs.size ? `?${qs}` : ''}`)
+  },
+  feeStructure: (id: string) => req(`/fee-structures/${id}`),
+  feeStructureAffectedStudents: (id: string) => req(`/fee-structures/${id}/affected-students`),
+  createFeeStructure: (b: any) => req('/fee-structures', { method: 'POST', body: JSON.stringify(b) }),
+  updateFeeStructure: (id: string, b: any) => req(`/fee-structures/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+  publishFeeStructure: (id: string) => req(`/fee-structures/${id}/publish`, { method: 'POST' }),
+  submitFeeStructure: (id: string) => req(`/fee-structures/${id}/submit`, { method: 'POST' }),
 
   // ---- library ----
   books: (q = '') => req(`/library/books?q=${encodeURIComponent(q)}`),
@@ -332,6 +373,13 @@ export const api = {
   },
   studentResults: () => req('/portal/student/results'),
   studentFees: () => req('/portal/student/fees'),
+  studentChallans: () => req('/portal/student/fees/challans'),
+  createStudentChallan: (invoice_id: string, amount?: number) => req('/portal/student/fees/challans', { method: 'POST', body: JSON.stringify({ invoice_id, ...(amount !== undefined ? { amount } : {}) }) }),
+  downloadStudentChallan: (challan_id: string) => download(`/portal/student/fees/challans/${challan_id}/pdf`),
+  submitOfflineProof: (body: any) => req('/portal/student/fees/offline-proofs', { method: 'POST', body: JSON.stringify(body) }),
+  createRazorpayOrder: (invoice_id: string, amount?: number) => req('/portal/student/fees/razorpay/order', { method: 'POST', body: JSON.stringify({ invoice_id, ...(amount !== undefined ? { amount } : {}) }) }),
+  verifyRazorpayPayment: (body: any) => req('/portal/student/fees/razorpay/verify', { method: 'POST', body: JSON.stringify(body) }),
+  downloadStudentReceipt: (invoice_id: string, payment_id = '') => download(`/portal/student/fees/invoices/${invoice_id}/receipt.pdf${payment_id ? `?payment_id=${encodeURIComponent(payment_id)}` : ''}`),
   studentDigitalId: () => req('/portal/student/digital-id'),
   studentCalendar: (start = '') => {
     const params = new URLSearchParams()
@@ -355,6 +403,11 @@ export const api = {
   facultySections: () => req('/portal/faculty/sections'),
   facultySectionStudents: (id: string) => req(`/portal/faculty/section/${id}/students`),
   parentHome: () => req('/portal/parent/home'),
+  createParentRazorpayOrder: (invoice_id: string, amount?: number) => req('/portal/parent/fees/razorpay/order', { method: 'POST', body: JSON.stringify({ invoice_id, ...(amount !== undefined ? { amount } : {}) }) }),
+  verifyParentRazorpayPayment: (body: any) => req('/portal/parent/fees/razorpay/verify', { method: 'POST', body: JSON.stringify(body) }),
+  downloadParentReceipt: (invoice_id: string) => download(`/portal/parent/fees/invoices/${invoice_id}/receipt.pdf`),
+  pendingPayments: () => req('/finance/payments/pending'),
+  verifyOfflinePayment: (payment_id: string, action: string, remarks = '') => req(`/finance/payments/${payment_id}/clear`, { method: 'POST', body: JSON.stringify({ action, remarks }) }),
 
   // ---- integrations ----
   integrations: () => req('/integrations'),

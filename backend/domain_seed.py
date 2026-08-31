@@ -3421,7 +3421,10 @@ def _seed_admissions_phase5(s):
         if not s.get(D.FeeComponent,component_id): s.add(D.FeeComponent(id=component_id,tenant_id=TENANT,code=code,name=name))
     structure=s.get(D.FeeStructure,"fee_structure_phase5")
     if not structure:
-        structure=D.FeeStructure(id="fee_structure_phase5",tenant_id=TENANT,academic_year=cycle.academic_year,campus=binding.campus,program_id=program.id,cycle_program_id=binding.id,name="Phase 5 admission fee");s.add(structure);s.flush()
+        year_id=f"academic_year_{cycle.academic_year.replace('-', '_')}"
+        semester_id=f"semester_{cycle.academic_year.replace('-', '_')}_1"
+        campus_id=f"campus_{slug(binding.campus)}"
+        structure=D.FeeStructure(id="fee_structure_phase5",tenant_id=TENANT,academic_year=cycle.academic_year,campus=binding.campus,program_id=program.id,cycle_program_id=binding.id,name="Phase 5 admission fee",academic_year_id=year_id,semester_id=semester_id,campus_id=campus_id,batch_id="batch_2026",student_type_id="student_type_regular");s.add(structure);s.flush()
     for index,(component_id,_,_,amount) in enumerate(components,1):
         if not s.get(D.FeeStructureComponent,f"fee_structure_component_{index}"): s.add(D.FeeStructureComponent(id=f"fee_structure_component_{index}",tenant_id=TENANT,structure_id=structure.id,component_id=component_id,amount=amount,sort_order=index))
     states=["OFFER_ACCEPTED","FEE_RESOLUTION_PENDING","INVOICE_ISSUED","PAYMENT_PENDING","PAYMENT_RECORDED","ACCOUNTS_VERIFIED","FINANCE_CLEARED","FINAL_APPROVAL_PENDING","READY_TO_ADMIT","ENROLLED"]
@@ -3470,12 +3473,54 @@ def _seed_admissions_phase5(s):
     s.commit()
 
 
+def _seed_fee_setup_reference_data(s):
+    """Create the reference records needed by fee setup and automatic rollover."""
+    for year in ("2025-26", "2026-27", "2027-28"):
+        year_id = f"academic_year_{year.replace('-', '_')}"
+        _ensure(s, D.AcademicYear, year_id,
+                lambda year_id=year_id, year=year: D.AcademicYear(
+                    id=year_id, tenant_id=TENANT, name=year))
+        for sequence in range(1, 9):
+            semester_id = f"semester_{year.replace('-', '_')}_{sequence}"
+            _ensure(s, D.Semester, semester_id,
+                    lambda semester_id=semester_id, year_id=year_id, sequence=sequence: D.Semester(
+                        id=semester_id, tenant_id=TENANT, academic_year_id=year_id,
+                        name=f"Semester {sequence}", sequence=sequence))
+    for campus in CAMPUS_SCOPES:
+        campus_id = f"campus_{slug(campus)}"
+        _ensure(s, D.Campus, campus_id,
+                lambda campus_id=campus_id, campus=campus: D.Campus(
+                    id=campus_id, tenant_id=TENANT, code=slug(campus).upper(), name=campus))
+    batches = {str(row[0]) for row in s.query(D.Student.batch).all() if row[0]}
+    for batch in sorted(batches | {"2026", "2027"}):
+        _ensure(s, D.Batch, f"batch_{batch}",
+                lambda batch=batch: D.Batch(id=f"batch_{batch}", tenant_id=TENANT, name=batch))
+    types = {str(row[0]) for row in s.query(D.Student.student_type).all() if row[0]}
+    for student_type in sorted(types | {"Regular", "Management"}):
+        _ensure(s, D.StudentType, f"student_type_{slug(student_type)}",
+                lambda student_type=student_type: D.StudentType(
+                    id=f"student_type_{slug(student_type)}", tenant_id=TENANT, name=student_type))
+    heads = [("TUITION", "Tuition", "TUITION", True), ("EXAM", "Exam", "EXAM", True),
+             ("LIBRARY", "Library", "LIBRARY", True), ("HOSTEL", "Hostel", "HOSTEL", False),
+             ("TRANSPORT", "Transport", "TRANSPORT", False), ("LAB", "Lab", "LAB", False),
+             ("DEVELOPMENT", "Development", "DEVELOPMENT", True), ("ADMISSION", "Admission", "ADMISSION", True),
+             ("OTHER", "Other", "OTHER", False)]
+    for order, (code, name, category, mandatory) in enumerate(heads, 1):
+        _ensure(s, D.FeeHead, f"fee_head_{code.lower()}",
+                lambda code=code, name=name, category=category, mandatory=mandatory, order=order: D.FeeHead(
+                    id=f"fee_head_{code.lower()}", tenant_id=TENANT, code=code, name=name,
+                    category=category, is_mandatory=mandatory, display_order=order,
+                    created_by="system", updated_by="system"))
+    s.commit()
+
+
 def seed_domain():
     ensure_versioned_migrations()
     ensure_additive_schema()
     s = SessionLocal()
     try:
         _seed_core_domain(s)
+        _seed_fee_setup_reference_data(s)
         _seed_reference_extensions(s)
         _seed_calendar_data(s)
         _seed_chairman_workflows(s)

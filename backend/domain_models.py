@@ -733,6 +733,15 @@ class FeeInvoice(Base):
     challan_no = Column(String, default="")
     issued_at = Column(DateTime, nullable=True)
     issued_by_user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    invoice_number = Column(String, default="")
+    academic_year_id = Column(String, nullable=True, index=True)
+    semester_id = Column(String, nullable=True, index=True)
+    fee_assignment_id = Column(String, default="")
+    fee_structure_id = Column(String, ForeignKey("fee_structures.id"), nullable=True, index=True)
+    gross_amount = Column(Float, default=0)
+    scholarship_amount = Column(Float, default=0)
+    waiver_amount = Column(Float, default=0)
+    net_amount = Column(Float, default=0)
     amount = Column(Float, default=0)
     paid = Column(Float, default=0)
     status = Column(String, default="due")    # due/partial/paid/waived
@@ -760,6 +769,128 @@ class FeeStructure(Base):
     cycle_program_id = Column(String, ForeignKey("admission_cycle_programs.id"), nullable=True, index=True)
     name = Column(String, default="Admission fees")
     status = Column(String, default="active")
+    code = Column(String, default="", index=True)
+    academic_year_id = Column(String, nullable=True, index=True)
+    semester_id = Column(String, nullable=True, index=True)
+    campus_id = Column(String, nullable=True, index=True)
+    batch_id = Column(String, nullable=True, index=True)
+    student_type_id = Column(String, nullable=True, index=True)
+    version = Column(Integer, default=1)
+    workflow_id = Column(String, nullable=True, index=True)
+    description = Column(Text, default="")
+    notes = Column(Text, default="")
+    created_by = Column(String, default="")
+    updated_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AcademicYear(Base):
+    __tablename__ = "academic_years"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    name = Column(String, nullable=False, unique=True)
+    start_date = Column(Date, nullable=True)
+    end_date = Column(Date, nullable=True)
+    is_active = Column(Boolean, default=True)
+
+
+class Campus(Base):
+    __tablename__ = "campuses"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    name = Column(String, nullable=False, unique=True)
+    code = Column(String, nullable=False, unique=True)
+    is_active = Column(Boolean, default=True)
+
+
+class Batch(Base):
+    __tablename__ = "batches"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    name = Column(String, nullable=False, unique=True)
+    is_active = Column(Boolean, default=True)
+
+
+class StudentType(Base):
+    __tablename__ = "student_types"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    name = Column(String, nullable=False, unique=True)
+    is_active = Column(Boolean, default=True)
+
+
+class Semester(Base):
+    __tablename__ = "semesters"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    academic_year_id = Column(String, ForeignKey("academic_years.id"), nullable=False)
+    name = Column(String, nullable=False)
+    sequence = Column(Integer, nullable=False)
+    start_date = Column(Date, nullable=True)
+    end_date = Column(Date, nullable=True)
+    is_active = Column(Boolean, default=True)
+    __table_args__ = (UniqueConstraint("academic_year_id", "sequence", name="uq_semester_year_sequence"),)
+
+
+class AcademicRollover(Base):
+    __tablename__ = "academic_rollovers"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    source_academic_year = Column(String, nullable=False)
+    source_semester = Column(Integer, nullable=False)
+    target_academic_year = Column(String, nullable=False)
+    target_semester = Column(Integer, nullable=False)
+    status = Column(String, default="draft")
+    created_by = Column(String, default="")
+    approved_by = Column(String, default="")
+    executed_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    approved_at = Column(DateTime, nullable=True)
+    executed_at = Column(DateTime, nullable=True)
+    remarks = Column(Text, default="")
+
+
+class AcademicRolloverDecision(Base):
+    __tablename__ = "academic_rollover_decisions"
+    id = Column(String, primary_key=True)
+    rollover_id = Column(String, ForeignKey("academic_rollovers.id"), index=True)
+    student_id = Column(String, ForeignKey("students.id"), index=True)
+    decision = Column(String, default="pending")
+    note = Column(Text, default="")
+    academic_status = Column(String, default="PENDING")
+    finance_status = Column(String, default="CLEAR")
+    outstanding_amount = Column(Float, default=0)
+    carry_forward_amount = Column(Float, default=0)
+    processed_at = Column(DateTime, nullable=True)
+    __table_args__ = (UniqueConstraint("rollover_id", "student_id", name="uq_rollover_student"),)
+
+
+class StudentAcademicHistory(Base):
+    __tablename__ = "student_academic_history"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    student_id = Column(String, ForeignKey("students.id"), nullable=False, index=True)
+    rollover_id = Column(String, ForeignKey("academic_rollovers.id"), nullable=False, index=True)
+    source_academic_year = Column(String, nullable=False)
+    source_semester = Column(Integer, nullable=False)
+    target_academic_year = Column(String, nullable=False)
+    target_semester = Column(Integer, nullable=False)
+    decision = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    __table_args__ = (UniqueConstraint("rollover_id", "student_id", name="uq_student_academic_history_rollover"),)
+
+
+class AcademicProgressionPolicy(Base):
+    __tablename__ = "academic_progression_policies"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, unique=True, index=True)
+    max_backlogs = Column(Integer, default=0)
+    minimum_attendance_pct = Column(Float, default=75)
+    fee_policy = Column(String, default="carry_forward")
+    discipline_policy = Column(String, default="high_severity_block")
+    updated_by = Column(String, default="")
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 
 class FeeStructureComponent(Base):
@@ -818,6 +949,110 @@ class Payment(Base):
     verified_by_user_id = Column(String, ForeignKey("users.id"), nullable=True)
     verified_at = Column(DateTime, nullable=True)
     verification_note = Column(Text, default="")
+    challan_id = Column(String, ForeignKey("fee_challans.id"), nullable=True, index=True)
+    cleared_at = Column(DateTime, nullable=True)
+    cleared_by = Column(String, default="")
+    remarks = Column(String, default="")
+
+
+class FeeHead(Base):
+    __tablename__ = "fee_heads"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    code = Column(String, nullable=False, unique=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, default="")
+    category = Column(String, default="OTHER")
+    is_mandatory = Column(Boolean, default=True)
+    is_active = Column(Boolean, default=True)
+    display_order = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_by = Column(String, default="")
+    updated_by = Column(String, default="")
+
+
+class FeeStructureLine(Base):
+    __tablename__ = "fee_structure_lines"
+    id = Column(String, primary_key=True)
+    fee_structure_id = Column(String, ForeignKey("fee_structures.id", ondelete="CASCADE"), nullable=False, index=True)
+    fee_head_id = Column(String, ForeignKey("fee_heads.id"), nullable=False, index=True)
+    amount = Column(Float, default=0)
+    installment_no = Column(Integer, default=1)
+    installment_name = Column(String, default="")
+    due_date = Column(Date, nullable=True)
+    is_mandatory = Column(Boolean, default=True)
+    description = Column(Text, default="")
+    __table_args__ = (UniqueConstraint("fee_structure_id", "fee_head_id", "installment_no", name="uq_fee_structure_line_installment"),)
+
+
+class FeeChallan(Base):
+    __tablename__ = "fee_challans"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    challan_number = Column(String, unique=True, index=True, nullable=False)
+    student_id = Column(String, ForeignKey("students.id"), nullable=False, index=True)
+    invoice_id = Column(String, ForeignKey("fee_invoices.id"), nullable=False, index=True)
+    amount = Column(Float, nullable=False, default=0)
+    issue_date = Column(Date, default=date.today)
+    due_date = Column(Date, nullable=True)
+    status = Column(String, default="GENERATED")
+    created_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    payment_reference = Column(String, default="")
+
+
+class PaymentProof(Base):
+    __tablename__ = "payment_proofs"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    payment_id = Column(String, ForeignKey("payments.id"), unique=True, nullable=False, index=True)
+    reference_number = Column(String, default="")
+    transaction_date = Column(Date, nullable=True)
+    bank_name = Column(String, default="")
+    remarks = Column(String, default="")
+    file_name = Column(String, default="")
+    file_type = Column(String, default="")
+    file_data = Column(Text, default="")
+    submitted_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PaymentAllocation(Base):
+    __tablename__ = "payment_allocations"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    payment_id = Column(String, ForeignKey("payments.id"), unique=True, nullable=False, index=True)
+    invoice_id = Column(String, ForeignKey("fee_invoices.id"), nullable=False, index=True)
+    student_id = Column(String, ForeignKey("students.id"), nullable=False, index=True)
+    amount = Column(Float, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PaymentReceipt(Base):
+    __tablename__ = "payment_receipts"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    receipt_number = Column(String, unique=True, nullable=False, index=True)
+    payment_id = Column(String, ForeignKey("payments.id"), unique=True, nullable=False, index=True)
+    invoice_id = Column(String, ForeignKey("fee_invoices.id"), nullable=False, index=True)
+    student_id = Column(String, ForeignKey("students.id"), nullable=False, index=True)
+    challan_id = Column(String, ForeignKey("fee_challans.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RazorpayOrder(Base):
+    __tablename__ = "razorpay_orders"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    invoice_id = Column(String, ForeignKey("fee_invoices.id"), nullable=False, index=True)
+    student_id = Column(String, ForeignKey("students.id"), nullable=False, index=True)
+    razorpay_order_id = Column(String, unique=True, nullable=False, index=True)
+    amount = Column(Float, nullable=False)
+    status = Column(String, default="created")
+    razorpay_payment_id = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    paid_at = Column(DateTime, nullable=True)
 
 
 class BudgetLine(Base):
@@ -1188,6 +1423,7 @@ class Complaint(Base):
     tenant_id = Column(String, index=True)
     kind = Column(String, default="Grievance")   # Grievance/Ragging/Discipline
     raised_by = Column(String, default="")
+    student_id = Column(String, ForeignKey("students.id"), nullable=True, index=True)
     subject = Column(String)
     detail = Column(Text, default="")
     status = Column(String, default="open")      # open/investigating/resolved

@@ -9,13 +9,15 @@ return 403 with the engine's reason — the same verdict the UI uses to disable
 the control.
 """
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from fastapi.responses import Response
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import and_, desc, func, or_
 
 from core import db, auth, uid, write_audit, notify, active_delegation_for
 from database import office, TENANT, slug
-from authority import authorize, ALLOW
+from authority import authorize, ALLOW, pwhash
 from matrices import rbac_for, scope_for, approval_limit_for, APPROVAL_LIMITS
 from capabilities import (modules_for_office, module_meta, MODULE_ACTIONS,
                           MODULES, action_allowed_for_office)
@@ -23,6 +25,30 @@ import domain_models as D
 from models import User, Person, OrgScope, WorkflowInstance, Notification
 
 router = APIRouter(prefix="/api")
+
+
+def _ensure_student_portal_account(s, student):
+    """Give an invoiced student a portal account, without duplicating existing users."""
+    username = (student.roll_no or "").strip().lower()
+    if not username:
+        return False
+    user = s.query(User).filter(func.lower(User.username) == username).first()
+    if user:
+        if student.user_id != user.id:
+            student.user_id = user.id
+        return False
+
+    person_id = f"person_student_{username}"
+    if not s.get(Person, person_id):
+        s.add(Person(id=person_id, tenant_id=TENANT, name=student.name,
+                     email=student.email or f"{username}@icms.edu", contact=""))
+    user = User(id=f"user_student_{username}", tenant_id=TENANT, person_id=person_id,
+                username=username, password_hash=pwhash("demo123"), status="active",
+                mfa_enabled=False, office_n=36, role="Student", scope_level="individual",
+                scope_ref=student.id)
+    s.add(user)
+    student.user_id = user.id
+    return True
 
 # Which module actions are monetary approvals (limit-checked & escalatable).
 MONETARY = {("finance", "waive"): ("fee_waiver", "Vice-Chancellor"),
@@ -2177,6 +2203,100 @@ class PublishResultIn(BaseModel):
     section_id: str
 
 
+def _auto_rollover_after_results(s, academic_year: str, semester: int | None, actor_id: str, actor_name_value: str):
+    """Automatically progress a student only after every enrolled subject result is published.
+
+    This is deliberately per-student and idempotent: publishing one course cannot
+    move a student until all of that semester's enrolled courses have outcomes.
+    """
+    if not semester:
+        return 0
+    policy = s.query(D.AcademicProgressionPolicy).filter(D.AcademicProgressionPolicy.tenant_id == TENANT).first()
+    if not policy:
+        policy = D.AcademicProgressionPolicy(id=uid(), tenant_id=TENANT)
+        s.add(policy); s.flush()
+    target_semester = semester + 1
+    target_year = s.query(D.AcademicYear).filter(D.AcademicYear.name == academic_year, D.AcademicYear.is_active == True).first()
+    if not target_year or not s.query(D.Semester).filter(D.Semester.academic_year_id == target_year.id, D.Semester.sequence == target_semester, D.Semester.is_active == True).first():
+        return 0
+    row = (s.query(D.AcademicRollover).filter_by(source_academic_year=academic_year, source_semester=semester,
+        target_academic_year=academic_year, target_semester=target_semester, status="completed").first())
+    if not row:
+        row = D.AcademicRollover(id=uid(), tenant_id=TENANT, source_academic_year=academic_year,
+            source_semester=semester, target_academic_year=academic_year, target_semester=target_semester,
+            status="completed", created_by=actor_id, approved_by=actor_id, executed_by=actor_id,
+            approved_at=datetime.utcnow(), executed_at=datetime.utcnow(), remarks="Automatic rollover after final result publication")
+        s.add(row); s.flush()
+    progressed = 0
+    for student in s.query(D.Student).filter(D.Student.status == "active", D.Student.semester == semester).all():
+        enrolled = (s.query(D.Enrollment).join(D.Section, D.Enrollment.section_id == D.Section.id)
+                    .join(D.Course, D.Section.course_id == D.Course.id)
+                    .filter(D.Enrollment.student_id == student.id, D.Enrollment.status == "enrolled", D.Course.semester == semester).all())
+        if not enrolled:
+            continue
+        section_ids = {enrollment.section_id for enrollment in enrolled}
+        results = s.query(D.StudentSubjectResult).filter(D.StudentSubjectResult.student_id == student.id,
+            D.StudentSubjectResult.academic_year == academic_year, D.StudentSubjectResult.semester == semester,
+            D.StudentSubjectResult.section_id.in_(section_ids)).all()
+        if len({result.section_id for result in results}) != len(section_ids):
+            continue
+        history = s.query(D.StudentAcademicHistory).filter_by(rollover_id=row.id, student_id=student.id).first()
+        if history:
+            continue
+        backlog_count = sum(1 for result in results if result.outcome == "failed")
+        attendance_rows = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.student_id == student.id, D.AttendanceRecord.section_id.in_(section_ids)).all()
+        attendance_pct = (100 * sum(1 for record in attendance_rows if record.present) / len(attendance_rows)) if attendance_rows else None
+        outstanding = float(s.query(func.coalesce(func.sum(D.FeeInvoice.amount - D.FeeInvoice.paid), 0)).filter(D.FeeInvoice.student_id == student.id).scalar() or 0)
+        active_discipline = s.query(D.Complaint).filter(D.Complaint.student_id == student.id, D.Complaint.kind == "Discipline", D.Complaint.status != "resolved", D.Complaint.severity == "high").first()
+        eligible = (backlog_count <= policy.max_backlogs and
+                    (attendance_pct is None or attendance_pct >= policy.minimum_attendance_pct) and
+                    not active_discipline and
+                    not (policy.fee_policy == "block" and outstanding > 0))
+        decision = "promoted" if eligible else ("hold" if active_discipline or (attendance_pct is not None and attendance_pct < policy.minimum_attendance_pct) or (policy.fee_policy == "block" and outstanding > 0) else "repeating")
+        s.add(D.StudentAcademicHistory(id=uid(), tenant_id=TENANT, student_id=student.id, rollover_id=row.id,
+            source_academic_year=academic_year, source_semester=semester, target_academic_year=academic_year,
+            target_semester=target_semester, decision=decision))
+        s.add(D.AcademicRolloverDecision(id=uid(), rollover_id=row.id, student_id=student.id,
+            decision=decision, academic_status="ELIGIBLE" if eligible else "NOT_ELIGIBLE", finance_status="DUE_EXISTS" if outstanding > 0 else "CLEAR", outstanding_amount=outstanding, carry_forward_amount=outstanding if eligible and outstanding > 0 else 0))
+        if eligible:
+            student.semester = target_semester
+            notify(s, student.user_id, "Academic progression complete", f"You have been progressed to Semester {target_semester} after published results.", "info")
+            progressed += 1
+    return progressed
+
+
+class ProgressionPolicyIn(BaseModel):
+    max_backlogs: int = Field(0, ge=0, le=20)
+    minimum_attendance_pct: float = Field(75, ge=0, le=100)
+    fee_policy: str = "carry_forward"
+
+
+def _progression_policy_payload(s):
+    row = s.query(D.AcademicProgressionPolicy).filter(D.AcademicProgressionPolicy.tenant_id == TENANT).first()
+    if not row:
+        row = D.AcademicProgressionPolicy(id=uid(), tenant_id=TENANT); s.add(row); s.commit()
+    return {"max_backlogs": row.max_backlogs, "minimum_attendance_pct": row.minimum_attendance_pct,
+            "fee_policy": row.fee_policy, "discipline_policy": row.discipline_policy}
+
+
+@router.get("/academic-rollover/policy")
+def get_progression_policy(ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] not in {4, 6, 10, 17}: raise HTTPException(403, "Academic leadership may view progression policy")
+    return _progression_policy_payload(s)
+
+
+@router.put("/academic-rollover/policy")
+def update_progression_policy(body: ProgressionPolicyIn, ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] not in {4, 6, 10, 17}: raise HTTPException(403, "Academic leadership may update progression policy")
+    if body.fee_policy not in {"carry_forward", "block"}: raise HTTPException(422, "Fee policy must be carry_forward or block")
+    _progression_policy_payload(s)
+    row = s.query(D.AcademicProgressionPolicy).filter(D.AcademicProgressionPolicy.tenant_id == TENANT).first()
+    row.max_backlogs, row.minimum_attendance_pct, row.fee_policy = body.max_backlogs, body.minimum_attendance_pct, body.fee_policy
+    row.updated_by, row.updated_at = ctx["sub"], datetime.utcnow(); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.progression_policy", "progression_policy", "", "updated", "Automatic progression policy updated")
+    return _progression_policy_payload(s)
+
+
 @router.post("/exams/publish")
 def publish_result(body: PublishResultIn, ctx=Depends(auth), s=Depends(db)):
     # Result publication is a distinct authority from marks entry (SoD invariant).
@@ -2209,11 +2329,12 @@ def publish_result(body: PublishResultIn, ctx=Depends(auth), s=Depends(db)):
                 mark.published_by = who
                 mark.updated_at = rs.published_at
     published_rows = _publish_section_subject_results(s, section, rs, who)
+    auto_progressed = _auto_rollover_after_results(s, rs.academic_year, rs.semester, ctx["sub"], who)
     s.commit()
     write_audit(s, ctx["sub"], who, ctx["office_n"], "result.publish",
                 f"section:{body.section_id}", "moderated", "published",
                 "Result published")
-    return {"status": "published", "published_results": published_rows, "decision": dec.as_dict()}
+    return {"status": "published", "published_results": published_rows, "automatically_progressed": auto_progressed, "decision": dec.as_dict()}
 
 
 class ExamTimetableUpsertIn(BaseModel):
@@ -2405,6 +2526,130 @@ def decide_application(body: AdmissionDecisionIn, ctx=Depends(auth), s=Depends(d
 # --------------------------------------------------------------------------- #
 #  FINANCE
 # --------------------------------------------------------------------------- #
+class RolloverStartIn(BaseModel):
+    source_academic_year: str
+    source_semester: int
+    target_academic_year: str
+    target_semester: int
+
+
+class RolloverDecisionIn(BaseModel):
+    student_id: str
+    decision: str
+    note: str = ""
+
+
+def _rollover_payload(s, row):
+    students = {student.id: student for student in s.query(D.Student).all()}
+    decisions = s.query(D.AcademicRolloverDecision).filter(D.AcademicRolloverDecision.rollover_id == row.id).all()
+    summary = {"total": len(decisions), "eligible": 0, "detained": 0, "on_hold": 0, "exceptions": 0, "outstanding": 0}
+    items = []
+    for item in decisions:
+        summary["outstanding"] += float(item.outstanding_amount or 0)
+        if item.decision == "promoted": summary["eligible"] += 1
+        elif item.decision in {"detained", "repeating"}: summary["detained"] += 1
+        elif item.decision == "hold": summary["on_hold"] += 1
+        elif item.decision == "exception": summary["exceptions"] += 1
+        student = students.get(item.student_id)
+        items.append({"student_id": item.student_id, "roll_no": student.roll_no if student else "",
+            "name": student.name if student else "", "decision": item.decision, "note": item.note,
+            "academic_status": item.academic_status, "finance_status": item.finance_status,
+            "outstanding_amount": item.outstanding_amount, "carry_forward_amount": item.carry_forward_amount})
+    return {"id": row.id, "source_academic_year": row.source_academic_year, "source_semester": row.source_semester,
+            "target_academic_year": row.target_academic_year, "target_semester": row.target_semester,
+            "status": row.status, "created_at": row.created_at.isoformat() if row.created_at else "",
+            "executed_at": row.executed_at.isoformat() if row.executed_at else "", "summary": summary, "decisions": items}
+
+
+@router.get("/academic-rollover")
+def academic_rollovers(ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] not in {4, 6, 10, 17, 22}:
+        raise HTTPException(403, "Academic rollover is restricted to academic leadership and Finance")
+    rows = s.query(D.AcademicRollover).order_by(desc(D.AcademicRollover.created_at)).all()
+    years = [row.name for row in s.query(D.AcademicYear).filter(D.AcademicYear.is_active == True).order_by(D.AcademicYear.name).all()]
+    return {"rollovers": [_rollover_payload(s, row) for row in rows], "academic_years": years,
+            "can_review": ctx["office_n"] in {6, 10, 17}, "can_approve": ctx["office_n"] == 4,
+            "finance_ready": [row.id for row in rows if row.status == "approved"]}
+
+
+@router.post("/academic-rollover")
+def start_academic_rollover(body: RolloverStartIn, ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] not in {6, 10, 17}: raise HTTPException(403, "Only the Academic Coordinator or academic leadership may start rollover")
+    students = s.query(D.Student).filter(D.Student.status == "active", D.Student.semester == body.source_semester).all()
+    if not students: raise HTTPException(409, "No active students found in the selected source semester")
+    row = D.AcademicRollover(id=uid(), tenant_id=TENANT, **body.model_dump(), created_by=ctx["sub"])
+    s.add(row); s.flush()
+    for student in students:
+        outstanding = float(s.query(func.coalesce(func.sum(D.FeeInvoice.amount - D.FeeInvoice.paid), 0)).filter(D.FeeInvoice.student_id == student.id).scalar() or 0)
+        result = s.query(D.StudentSubjectResult).filter(D.StudentSubjectResult.student_id == student.id, D.StudentSubjectResult.status == "published").first()
+        academic_status = "ELIGIBLE" if result else "RESULT_PENDING"
+        finance_status = "DUE_EXISTS" if outstanding > 0 else "CLEAR"
+        s.add(D.AcademicRolloverDecision(id=uid(), rollover_id=row.id, student_id=student.id,
+            academic_status=academic_status, finance_status=finance_status, outstanding_amount=outstanding,
+            decision="pending"))
+    s.commit(); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.rollover.start", f"rollover:{row.id}", "", "draft", f"{len(students)} students selected")
+    return _rollover_payload(s, row)
+
+
+@router.post("/academic-rollover/{rollover_id}/decision")
+def decide_academic_rollover(rollover_id: str, body: RolloverDecisionIn, ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] not in {6, 10, 17}: raise HTTPException(403, "Only academic leadership may review progression")
+    row = s.get(D.AcademicRollover, rollover_id); item = s.query(D.AcademicRolloverDecision).filter_by(rollover_id=rollover_id, student_id=body.student_id).first()
+    if not row or not item or row.status != "draft": raise HTTPException(409, "This rollover is not open for review")
+    if body.decision not in {"promoted", "detained", "repeating", "hold", "exception"}: raise HTTPException(422, "Choose a valid progression decision")
+    item.decision, item.note = body.decision, body.note.strip(); s.commit()
+    return _rollover_payload(s, row)
+
+
+@router.post("/academic-rollover/{rollover_id}/submit")
+def submit_academic_rollover(rollover_id: str, ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] not in {6, 10, 17}: raise HTTPException(403, "Only academic leadership may submit rollover")
+    row = s.get(D.AcademicRollover, rollover_id)
+    if not row or row.status != "draft": raise HTTPException(409, "Rollover is not in draft")
+    pending = s.query(D.AcademicRolloverDecision).filter_by(rollover_id=row.id, decision="pending").count()
+    if pending: raise HTTPException(409, f"Review all students before submission ({pending} pending)")
+    row.status = "awaiting_principal"; s.commit()
+    for user in s.query(User).filter(User.office_n == 4, User.active == True).all(): notify(s, user.id, "Academic rollover approval", f"Review progression for Semester {row.source_semester} before Finance is notified.", "warning")
+    return _rollover_payload(s, row)
+
+
+@router.post("/academic-rollover/{rollover_id}/approve")
+def approve_academic_rollover(rollover_id: str, ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] != 4: raise HTTPException(403, "Principal approval is required")
+    row = s.get(D.AcademicRollover, rollover_id)
+    if not row or row.status != "awaiting_principal": raise HTTPException(409, "Rollover is not awaiting Principal approval")
+    row.status, row.approved_by, row.approved_at = "approved", ctx["sub"], datetime.utcnow(); s.commit()
+    for user in s.query(User).filter(User.office_n == 22, User.active == True).all(): notify(s, user.id, "Next-semester fee setup ready", f"Rollover approved: publish fee structure for {row.target_academic_year}, Semester {row.target_semester}.", "warning")
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.rollover.approve", f"rollover:{row.id}", "awaiting_principal", "approved", "Finance notified")
+    return _rollover_payload(s, row)
+
+
+@router.post("/academic-rollover/{rollover_id}/execute")
+def execute_academic_rollover(rollover_id: str, ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] not in {4, 6, 10, 17}: raise HTTPException(403, "Academic leadership may execute an approved rollover")
+    row = s.get(D.AcademicRollover, rollover_id)
+    if not row or row.status != "approved": raise HTTPException(409, "Rollover must be approved before execution")
+    target_year = s.query(D.AcademicYear).filter(D.AcademicYear.name == row.target_academic_year, D.AcademicYear.is_active == True).first()
+    if not target_year: raise HTTPException(409, "NEXT_ACADEMIC_YEAR_NOT_ACTIVE")
+    target_semester = s.query(D.Semester).filter(D.Semester.academic_year_id == target_year.id, D.Semester.sequence == row.target_semester, D.Semester.is_active == True).first()
+    if not target_semester: raise HTTPException(409, "NEXT_SEMESTER_NOT_CONFIGURED")
+    promoted = s.query(D.AcademicRolloverDecision).filter_by(rollover_id=row.id, decision="promoted").all()
+    for item in promoted:
+        student = s.get(D.Student, item.student_id)
+        if not student or student.status != "active": continue
+        history = s.query(D.StudentAcademicHistory).filter_by(rollover_id=row.id, student_id=student.id).first()
+        if history: continue
+        s.add(D.StudentAcademicHistory(id=uid(), tenant_id=TENANT, student_id=student.id, rollover_id=row.id,
+            source_academic_year=row.source_academic_year, source_semester=row.source_semester,
+            target_academic_year=row.target_academic_year, target_semester=row.target_semester, decision=item.decision))
+        student.semester = row.target_semester
+        item.carry_forward_amount = item.outstanding_amount
+        item.processed_at = datetime.utcnow()
+    row.status, row.executed_by, row.executed_at = "completed", ctx["sub"], datetime.utcnow()
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.rollover.execute", f"rollover:{row.id}", "approved", "completed", f"Processed {len(promoted)} promoted students")
+    return _rollover_payload(s, row)
+
 @router.get("/finance/invoices")
 def list_invoices(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "finance", "view")[0])
@@ -2421,7 +2666,14 @@ def list_invoices(ctx=Depends(auth), s=Depends(db)):
         "total_collected": s.query(func.coalesce(func.sum(D.FeeInvoice.paid), 0)).scalar() or 0,
         "outstanding": s.query(func.coalesce(func.sum(D.FeeInvoice.amount - D.FeeInvoice.paid), 0)).scalar() or 0,
     }
-    return {"invoices": out, "summary": summary,
+    payments = s.query(D.Payment).order_by(desc(D.Payment.at)).limit(300).all()
+    payment_rows = []
+    for payment in payments:
+        roll, name = stu_map.get(payment.student_id, ("", ""))
+        payment_rows.append({"id": payment.id, "invoice_id": payment.invoice_id, "roll_no": roll,
+                             "name": name, "amount": payment.amount, "method": payment.method,
+                             "reference": payment.reference, "status": payment.status or "success", "at": payment.at.isoformat() if payment.at else ""})
+    return {"invoices": out, "payments": payment_rows, "summary": summary,
             "can_record": can(s, ctx, "finance", "record_payment"),
             "can_waive": can(s, ctx, "finance", "waive")}
 
@@ -2439,6 +2691,8 @@ def list_budget(ctx=Depends(auth), s=Depends(db)):
 class RecordPaymentIn(BaseModel):
     invoice_id: str
     amount: float
+    method: str = "cash"
+    reference: str = ""
 
 
 @router.post("/finance/payment")
@@ -2448,14 +2702,91 @@ def record_payment(body: RecordPaymentIn, ctx=Depends(auth), s=Depends(db)):
     inv = s.query(D.FeeInvoice).get(body.invoice_id)
     if not inv:
         raise HTTPException(404, "Invoice not found")
-    inv.paid = min(inv.amount, inv.paid + body.amount)
-    inv.status = "paid" if inv.paid >= inv.amount else "partial"
-    s.add(D.Payment(id=uid(), tenant_id=TENANT, invoice_id=inv.id, student_id=inv.student_id,
-                    amount=body.amount, method="counter", reference=f"RC{uid().upper()}"))
+    if body.amount <= 0:
+        raise HTTPException(400, "Amount must be greater than zero")
+    if body.amount > (inv.amount - inv.paid):
+        body.amount = max(0, inv.amount - inv.paid)
+    method = (body.method or "cash").strip().lower()
+    if method not in {"cash", "cheque", "dd", "bank_transfer", "online", "counter"}:
+        method = "cash"
+    reference = (body.reference or "").strip() or f"{method.upper()}-{uid()[:8].upper()}"
+    pending = method in {"cheque", "dd", "bank_transfer"}
+    payment = D.Payment(id=uid(), tenant_id=TENANT, invoice_id=inv.id, student_id=inv.student_id,
+                    amount=body.amount, method=method, reference=reference,
+                    status="pending_clearance" if pending else "success")
+    s.add(payment)
+    s.flush()
+    if not pending:
+        from portal_api import _settle_payment
+        _settle_payment(s, payment, ctx["sub"])
     s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.payment",
-                f"invoice:{inv.id}", "", inv.status, f"Recorded ₹{body.amount:,.0f}")
-    return {"status": inv.status, "paid": inv.paid, "decision": dec.as_dict()}
+                f"invoice:{inv.id}", "", inv.status,
+                f"Recorded ₹{body.amount:,.0f} via {method} ({reference})")
+    return {"status": "pending_clearance" if pending else inv.status, "paid": inv.paid, "payment_id": payment.id, "decision": dec.as_dict(), "method": method, "reference": reference}
+
+
+@router.get("/finance/invoices/{invoice_id}/receipt.pdf")
+def finance_payment_receipt(invoice_id: str, payment_id: str = "", ctx=Depends(auth), s=Depends(db)):
+    """Finance may issue the same official receipt after a recorded cash payment."""
+    require(gate(s, ctx, "finance", "view")[0])
+    invoice = s.get(D.FeeInvoice, invoice_id)
+    if not invoice or not invoice.paid:
+        raise HTTPException(404, "A confirmed payment receipt is not available for this invoice")
+    student = s.get(D.Student, invoice.student_id)
+    if not student:
+        raise HTTPException(404, "Student not found")
+    from portal_api import _receipt_pdf
+    payment = s.get(D.Payment, payment_id) if payment_id else None
+    if payment and (payment.invoice_id != invoice.id or payment.status != "success"):
+        raise HTTPException(404, "A confirmed receipt is not available for this payment")
+    return Response(_receipt_pdf(student, invoice, s, payment.id if payment else None), media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="ICMS-receipt-{student.roll_no}-{invoice.id}.pdf"'})
+
+class ClearPaymentIn(BaseModel):
+    action: str
+    remarks: str = ""
+
+@router.get("/finance/payments/pending")
+def pending_payment_verification(ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "finance", "record_payment")[0])
+    rows = s.query(D.Payment).filter(D.Payment.status.in_(("pending_verification", "pending_clearance"))).order_by(desc(D.Payment.at)).all()
+    out = []
+    for p in rows:
+        proof = s.query(D.PaymentProof).filter(D.PaymentProof.payment_id == p.id).first()
+        student = s.get(D.Student, p.student_id)
+        challan = s.get(D.FeeChallan, p.challan_id) if p.challan_id else None
+        out.append({"id": p.id, "student": student.name if student else "", "roll_no": student.roll_no if student else "",
+            "invoice_id": p.invoice_id, "challan_number": challan.challan_number if challan else "", "amount": p.amount,
+            "method": p.method, "reference": p.reference, "status": p.status, "submitted_at": p.at.isoformat() if p.at else "",
+            "proof": {"file_name": proof.file_name, "file_type": proof.file_type, "file_data": proof.file_data} if proof else None})
+    return {"payments": out}
+
+@router.post("/finance/payments/{payment_id}/clear")
+def clear_payment(payment_id: str, body: ClearPaymentIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "finance", "record_payment")
+    require(dec)
+    payment = s.get(D.Payment, payment_id)
+    if not payment or payment.status not in {"pending_verification", "pending_clearance"}:
+        raise HTTPException(409, "Payment is not awaiting verification or clearance")
+    actions = {"cleared", "bounced", "verified", "rejected"}
+    if body.action not in actions: raise HTTPException(422, "Invalid payment action")
+    if payment.status == "pending_verification" and body.action not in {"verified", "rejected"}:
+        raise HTTPException(422, "Bank-transfer payments must be verified or rejected")
+    if payment.status == "pending_clearance" and body.action not in {"cleared", "bounced"}:
+        raise HTTPException(422, "Cheque/DD payments must be cleared or bounced")
+    if body.action in {"bounced", "rejected"} and not body.remarks.strip(): raise HTTPException(422, "Remarks are required")
+    if body.action in {"cleared", "verified"}:
+        payment.status = "success"
+        from portal_api import _settle_payment
+        _settle_payment(s, payment, ctx["sub"])
+    else:
+        payment.status = "bounced" if body.action == "bounced" else "rejected"
+    payment.remarks = body.remarks.strip()
+    payment.cleared_at, payment.cleared_by = datetime.utcnow(), ctx["sub"]
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.payment.clearance", f"payment:{payment.id}", "pending_clearance", payment.status, payment.reference)
+    return {"payment_id": payment.id, "status": payment.status, "decision": dec.as_dict()}
 
 
 class WaiveIn(BaseModel):
@@ -2486,6 +2817,370 @@ def waive_fee(body: WaiveIn, ctx=Depends(auth), s=Depends(db)):
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.waive",
                 f"invoice:{inv.id}", "", "waived", f"Waived ₹{body.amount:,.0f}: {body.reason}")
     return {"status": "waived", "decision": dec.as_dict()}
+
+
+# --------------------------------------------------------------------------- #
+#  FINANCE · Phase 1 fee setup (draft structures only)
+# --------------------------------------------------------------------------- #
+def _fee_setup_gate(s, ctx, action):
+    if action == "view" and ctx["office_n"] in (3, 4, 22, 40):
+        require(gate(s, ctx, "finance", "view")[0])
+        return
+    if ctx["office_n"] != 22:
+        raise HTTPException(403, "Only the Finance Manager can manage fee setup")
+    require(gate(s, ctx, "finance", action)[0])
+
+
+def _fee_head_payload(row):
+    return {"id": row.id, "code": row.code, "name": row.name, "description": row.description or "",
+            "category": row.category, "is_mandatory": row.is_mandatory, "is_active": row.is_active,
+            "display_order": row.display_order, "created_at": row.created_at, "updated_at": row.updated_at}
+
+
+def _fee_structure_payload(s, row):
+    years = {x.id: x.name for x in s.query(D.AcademicYear).all()}
+    semesters = {x.id: x.name for x in s.query(D.Semester).all()}
+    campuses = {x.id: x.name for x in s.query(D.Campus).all()}
+    programs = {x.id: x.name for x in s.query(D.Program).all()}
+    batches = {x.id: x.name for x in s.query(D.Batch).all()}
+    student_types = {x.id: x.name for x in s.query(D.StudentType).all()}
+    heads = {x.id: x for x in s.query(D.FeeHead).all()}
+    lines = s.query(D.FeeStructureLine).filter(D.FeeStructureLine.fee_structure_id == row.id).order_by(D.FeeStructureLine.fee_head_id, D.FeeStructureLine.installment_no).all()
+    line_payloads = [{"id": line.id, "fee_head_id": line.fee_head_id,
+                      "fee_head_code": heads.get(line.fee_head_id).code if heads.get(line.fee_head_id) else "",
+                      "fee_head_name": heads.get(line.fee_head_id).name if heads.get(line.fee_head_id) else "",
+                      "amount": line.amount, "installment_no": line.installment_no,
+                      "installment_name": line.installment_name or "", "due_date": line.due_date,
+                      "is_mandatory": line.is_mandatory, "description": line.description or ""} for line in lines]
+    return {"id": row.id, "name": row.name, "code": row.code, "academic_year_id": row.academic_year_id,
+            "academic_year": years.get(row.academic_year_id, ""), "semester_id": row.semester_id,
+            "semester": semesters.get(row.semester_id, ""), "campus_id": row.campus_id,
+            "campus": campuses.get(row.campus_id, ""), "program_id": row.program_id,
+            "program": programs.get(row.program_id, ""), "batch_id": row.batch_id,
+            "batch": batches.get(row.batch_id, ""), "student_type_id": row.student_type_id,
+            "student_type": student_types.get(row.student_type_id, ""), "version": row.version,
+            "status": row.status, "effective_from": row.effective_from, "effective_to": row.effective_to,
+            "description": row.description or "", "notes": row.notes or "", "created_at": row.created_at,
+            "updated_at": row.updated_at, "gross_total": sum((line.amount for line in lines), Decimal("0")),
+            "lines": line_payloads}
+
+
+class FeeHeadIn(BaseModel):
+    code: str = Field(min_length=1, max_length=60)
+    name: str = Field(min_length=1, max_length=160)
+    description: str = ""
+    category: str = "OTHER"
+    is_mandatory: bool = True
+    display_order: int = 0
+
+
+class FeeHeadStatusIn(BaseModel):
+    is_active: bool
+
+
+class FeeStructureLineIn(BaseModel):
+    fee_head_id: str
+    amount: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+    installment_no: int = Field(default=1, ge=1)
+    installment_name: str = ""
+    due_date: date | None = None
+    is_mandatory: bool = True
+    description: str = ""
+
+    @field_validator("due_date", mode="before")
+    @classmethod
+    def blank_due_date_is_null(cls, value):
+        return None if value == "" else value
+
+
+class FeeStructureIn(BaseModel):
+    name: str = Field(default="", max_length=160)
+    code: str = Field(default="", max_length=80)
+    academic_year_id: str
+    semester_id: str
+    campus_id: str
+    program_id: str
+    batch_id: str
+    student_type_id: str
+    version: int = Field(default=1, ge=1)
+    effective_from: date | None = None
+    effective_to: date | None = None
+    description: str = ""
+    notes: str = ""
+    lines: list[FeeStructureLineIn] = Field(min_length=1)
+
+    @field_validator("effective_from", "effective_to", mode="before")
+    @classmethod
+    def blank_effective_date_is_null(cls, value):
+        return None if value == "" else value
+
+
+def _validate_fee_structure(s, body, structure_id: str | None = None):
+    references = ((D.AcademicYear, body.academic_year_id, "Academic year"), (D.Semester, body.semester_id, "Semester"),
+                  (D.Campus, body.campus_id, "Campus"), (D.Program, body.program_id, "Program"),
+                  (D.Batch, body.batch_id, "Batch"), (D.StudentType, body.student_type_id, "Student type"))
+    for model, ref_id, label in references:
+        item = s.get(model, ref_id)
+        if not item or getattr(item, "is_active", True) is False:
+            raise HTTPException(422, f"{label} does not exist or is inactive")
+    semester = s.get(D.Semester, body.semester_id)
+    if semester.academic_year_id != body.academic_year_id:
+        raise HTTPException(422, "Semester does not belong to the selected academic year")
+    if body.effective_from and body.effective_to and body.effective_to < body.effective_from:
+        raise HTTPException(422, "Effective-to date cannot be before effective-from date")
+    seen = set()
+    for line in body.lines:
+        key = (line.fee_head_id, line.installment_no)
+        if key in seen:
+            raise HTTPException(422, "Duplicate fee head installment in this structure")
+        seen.add(key)
+        head = s.get(D.FeeHead, line.fee_head_id)
+        if not head:
+            raise HTTPException(422, "Fee head does not exist")
+        if not head.is_active:
+            raise HTTPException(422, f"Inactive fee head '{head.code}' cannot be used")
+    duplicate = s.query(D.FeeStructure).filter(
+        D.FeeStructure.academic_year_id == body.academic_year_id, D.FeeStructure.semester_id == body.semester_id,
+        D.FeeStructure.campus_id == body.campus_id, D.FeeStructure.program_id == body.program_id,
+        D.FeeStructure.batch_id == body.batch_id, D.FeeStructure.student_type_id == body.student_type_id,
+        D.FeeStructure.version == body.version).first()
+    if duplicate and duplicate.id != structure_id:
+        raise HTTPException(409, "A fee structure already exists for this context and version")
+
+
+@router.get("/fees/reference-data")
+def fee_reference_data(ctx=Depends(auth), s=Depends(db)):
+    _fee_setup_gate(s, ctx, "view")
+    return {"academic_years": [{"id": x.id, "name": x.name} for x in s.query(D.AcademicYear).filter(D.AcademicYear.is_active == True).all()],
+            "semesters": [{"id": x.id, "academic_year_id": x.academic_year_id, "name": x.name, "sequence": x.sequence} for x in s.query(D.Semester).filter(D.Semester.is_active == True).all()],
+            "campuses": [{"id": x.id, "name": x.name} for x in s.query(D.Campus).filter(D.Campus.is_active == True).all()],
+            "programs": [{"id": x.id, "name": x.name, "code": x.code} for x in s.query(D.Program).all()],
+            "batches": [{"id": x.id, "name": x.name} for x in s.query(D.Batch).filter(D.Batch.is_active == True).all()],
+            "student_types": [{"id": x.id, "name": x.name} for x in s.query(D.StudentType).filter(D.StudentType.is_active == True).all()]}
+
+
+@router.get("/fees/heads")
+def list_fee_heads(include_inactive: bool = False, ctx=Depends(auth), s=Depends(db)):
+    _fee_setup_gate(s, ctx, "view")
+    query = s.query(D.FeeHead)
+    if not include_inactive: query = query.filter(D.FeeHead.is_active == True)
+    return {"heads": [_fee_head_payload(x) for x in query.order_by(D.FeeHead.display_order, D.FeeHead.name).all()]}
+
+
+@router.post("/fees/heads")
+def create_fee_head(body: FeeHeadIn, ctx=Depends(auth), s=Depends(db)):
+    _fee_setup_gate(s, ctx, "create")
+    code = body.code.strip().upper(); name = body.name.strip()
+    if s.query(D.FeeHead).filter(D.FeeHead.code == code).first(): raise HTTPException(409, "Fee head code already exists")
+    now = datetime.utcnow(); row = D.FeeHead(id=uid(), tenant_id=TENANT, code=code, name=name, description=body.description,
+        category=body.category, is_mandatory=body.is_mandatory, display_order=body.display_order, created_at=now, updated_at=now, created_by=ctx["sub"], updated_by=ctx["sub"])
+    s.add(row); s.commit(); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee_head.create", f"fee_head:{row.id}", "", "active", f"Created fee head {code}")
+    return {"head": _fee_head_payload(row)}
+
+
+@router.put("/fees/heads/{head_id}")
+def update_fee_head(head_id: str, body: FeeHeadIn, ctx=Depends(auth), s=Depends(db)):
+    _fee_setup_gate(s, ctx, "edit"); row = s.get(D.FeeHead, head_id)
+    if not row: raise HTTPException(404, "Fee head not found")
+    code = body.code.strip().upper(); existing = s.query(D.FeeHead).filter(D.FeeHead.code == code, D.FeeHead.id != head_id).first()
+    if existing: raise HTTPException(409, "Fee head code already exists")
+    row.code, row.name, row.description, row.category = code, body.name.strip(), body.description, body.category
+    row.is_mandatory, row.display_order, row.updated_by, row.updated_at = body.is_mandatory, body.display_order, ctx["sub"], datetime.utcnow()
+    s.commit(); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee_head.update", f"fee_head:{row.id}", "", "updated", f"Updated fee head {code}")
+    return {"head": _fee_head_payload(row)}
+
+
+@router.patch("/fees/heads/{head_id}/status")
+def set_fee_head_status(head_id: str, body: FeeHeadStatusIn, ctx=Depends(auth), s=Depends(db)):
+    _fee_setup_gate(s, ctx, "edit"); row = s.get(D.FeeHead, head_id)
+    if not row: raise HTTPException(404, "Fee head not found")
+    row.is_active, row.updated_by, row.updated_at = body.is_active, ctx["sub"], datetime.utcnow(); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee_head.status", f"fee_head:{row.id}", "", "active" if body.is_active else "inactive", f"Changed fee head status")
+    return {"head": _fee_head_payload(row)}
+
+
+@router.get("/fee-structures")
+def list_fee_structures(academic_year_id: str = "", semester_id: str = "", campus_id: str = "", program_id: str = "", batch_id: str = "", student_type_id: str = "", status: str = "", ctx=Depends(auth), s=Depends(db)):
+    _fee_setup_gate(s, ctx, "view"); query = s.query(D.FeeStructure)
+    for field, value in ((D.FeeStructure.academic_year_id, academic_year_id), (D.FeeStructure.semester_id, semester_id), (D.FeeStructure.campus_id, campus_id), (D.FeeStructure.program_id, program_id), (D.FeeStructure.batch_id, batch_id), (D.FeeStructure.student_type_id, student_type_id), (D.FeeStructure.status, status)):
+        if value: query = query.filter(field == value)
+    return {"structures": [_fee_structure_payload(s, x) for x in query.order_by(desc(D.FeeStructure.updated_at)).all()]}
+
+
+@router.get("/fee-structures/{structure_id}")
+def get_fee_structure(structure_id: str, ctx=Depends(auth), s=Depends(db)):
+    _fee_setup_gate(s, ctx, "view"); row = s.get(D.FeeStructure, structure_id)
+    if not row: raise HTTPException(404, "Fee structure not found")
+    return {"structure": _fee_structure_payload(s, row)}
+
+
+@router.get("/fee-structures/{structure_id}/affected-students")
+def fee_structure_affected_students(structure_id: str, ctx=Depends(auth), s=Depends(db)):
+    """Students and invoices created by a published fee structure."""
+    _fee_setup_gate(s, ctx, "view")
+    row = s.get(D.FeeStructure, structure_id)
+    if not row:
+        raise HTTPException(404, "Fee structure not found")
+    students = {student.id: student for student in s.query(D.Student).all()}
+    invoices = (s.query(D.FeeInvoice)
+                .filter(D.FeeInvoice.fee_structure_id == row.id)
+                .order_by(D.FeeInvoice.student_id, D.FeeInvoice.due_date, D.FeeInvoice.id)
+                .all())
+    grouped = {}
+    for invoice in invoices:
+        student = students.get(invoice.student_id)
+        if not student:
+            continue
+        item = grouped.setdefault(student.id, {
+            "student_id": student.id, "roll_no": student.roll_no, "name": student.name,
+            "email": student.email, "section": student.section, "semester": student.semester,
+            "student_type": student.student_type, "invoiced": 0, "paid": 0,
+            "balance": 0, "invoice_count": 0, "status": "due",
+        })
+        item["invoiced"] += float(invoice.amount or 0)
+        item["paid"] += float(invoice.paid or 0)
+        item["balance"] += float((invoice.amount or 0) - (invoice.paid or 0))
+        item["invoice_count"] += 1
+    for item in grouped.values():
+        item["status"] = "paid" if item["balance"] <= 0 else ("partial" if item["paid"] else "due")
+    return {"structure": _fee_structure_payload(s, row), "students": list(grouped.values()),
+            "student_count": len(grouped), "invoice_count": len(invoices)}
+
+
+def _save_fee_structure(s, row, body, ctx):
+    _validate_fee_structure(s, body, row.id if row else None)
+    now = datetime.utcnow()
+    program = s.get(D.Program, body.program_id)
+    year = s.get(D.AcademicYear, body.academic_year_id)
+    semester = s.get(D.Semester, body.semester_id)
+    batch = s.get(D.Batch, body.batch_id)
+    student_type = s.get(D.StudentType, body.student_type_id)
+    generated_name = f"{program.code if program else body.program_id} · {year.name if year else body.academic_year_id} · {semester.name if semester else body.semester_id} · {student_type.name if student_type else body.student_type_id}"
+    generated_code = slug(f"{program.code if program else body.program_id}-{batch.name if batch else body.batch_id}-{semester.sequence if semester else body.semester_id}-{student_type.name if student_type else body.student_type_id}-v{body.version}").upper()
+    name = (body.name or "").strip() or generated_name
+    code = (body.code or "").strip().upper() or generated_code
+    if not row and s.query(D.FeeStructure).filter(D.FeeStructure.code == code).first():
+        code = f"{code}-{uid()[:4].upper()}"
+    if not row:
+        row = D.FeeStructure(id=uid(), tenant_id=TENANT, status="DRAFT", created_by=ctx["sub"], created_at=now)
+        s.add(row)
+    for field in ("name", "code", "academic_year_id", "semester_id", "campus_id", "program_id", "batch_id", "student_type_id", "version", "effective_from", "effective_to", "description", "notes"):
+        setattr(row, field, getattr(body, field))
+    row.name, row.code = name, code
+    row.updated_by, row.updated_at = ctx["sub"], now
+    s.flush()
+    s.query(D.FeeStructureLine).filter(D.FeeStructureLine.fee_structure_id == row.id).delete(synchronize_session=False)
+    for line in body.lines:
+        s.add(D.FeeStructureLine(id=uid(), fee_structure_id=row.id, fee_head_id=line.fee_head_id, amount=line.amount,
+              installment_no=line.installment_no, installment_name=line.installment_name, due_date=line.due_date,
+              is_mandatory=line.is_mandatory, description=line.description, created_at=now, updated_at=now))
+    return row
+
+
+@router.post("/fee-structures")
+def create_fee_structure(body: FeeStructureIn, ctx=Depends(auth), s=Depends(db)):
+    _fee_setup_gate(s, ctx, "create")
+    try:
+        row = _save_fee_structure(s, None, body, ctx); s.commit()
+    except HTTPException: s.rollback(); raise
+    except Exception: s.rollback(); raise HTTPException(409, "Could not save fee structure; check uniqueness and references")
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee_structure.create", f"fee_structure:{row.id}", "", "DRAFT", f"Created draft {row.code}")
+    return {"structure": _fee_structure_payload(s, row)}
+
+
+@router.put("/fee-structures/{structure_id}")
+def update_fee_structure(structure_id: str, body: FeeStructureIn, ctx=Depends(auth), s=Depends(db)):
+    _fee_setup_gate(s, ctx, "edit"); row = s.get(D.FeeStructure, structure_id)
+    if not row: raise HTTPException(404, "Fee structure not found")
+    if row.status != "DRAFT": raise HTTPException(409, "Only DRAFT fee structures can be edited")
+    try:
+        row = _save_fee_structure(s, row, body, ctx); s.commit()
+    except HTTPException: s.rollback(); raise
+    except Exception: s.rollback(); raise HTTPException(409, "Could not update fee structure; check uniqueness and references")
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee_structure.update", f"fee_structure:{row.id}", "DRAFT", "DRAFT", f"Updated draft {row.code}")
+    return {"structure": _fee_structure_payload(s, row)}
+
+
+@router.post("/fee-structures/{structure_id}/submit")
+def submit_fee_structure(structure_id: str, ctx=Depends(auth), s=Depends(db)):
+    _fee_setup_gate(s, ctx, "edit")
+    row = s.get(D.FeeStructure, structure_id)
+    if not row:
+        raise HTTPException(404, "Fee structure not found")
+    if row.status != "DRAFT":
+        raise HTTPException(409, "Only DRAFT fee structures can be submitted")
+    if not s.query(D.FeeStructureLine).filter(D.FeeStructureLine.fee_structure_id == row.id).first():
+        raise HTTPException(422, "A fee structure must contain at least one fee line")
+    wf = WorkflowInstance(id=uid(), tenant_id=TENANT, process_key="fee_structure",
+                          label="Fee structure approval", office_n=22,
+                          title=f"Approve fee structure: {row.name}", state="submitted",
+                          initiator_id=ctx["sub"], initiator_name=actor_name(s, ctx),
+                          # A fee structure applies to its selected campus.  The Finance
+                          # Manager may have university scope, but the Principal must be
+                          # able to approve the campus-level request.
+                          current_stage=1, scope_level="campus")
+    s.add(wf); s.flush(); row.workflow_id = wf.id; row.status = "SUBMITTED"; row.updated_by = ctx["sub"]; row.updated_at = datetime.utcnow(); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee_structure.submit", f"fee_structure:{row.id}", "DRAFT", "SUBMITTED", "Submitted for approval")
+    return {"structure": _fee_structure_payload(s, row), "workflow_id": wf.id}
+
+
+@router.post("/fee-structures/{structure_id}/publish")
+def publish_fee_structure(structure_id: str, ctx=Depends(auth), s=Depends(db)):
+    """Publish a reviewed structure and apply its installments to matching students.
+
+    Existing invoices linked to this structure are reused, so retries cannot create duplicates.
+    """
+    _fee_setup_gate(s, ctx, "edit")
+    row = s.get(D.FeeStructure, structure_id)
+    if not row:
+        raise HTTPException(404, "Fee structure not found")
+    if row.status == "DRAFT":
+        raise HTTPException(409, "Fee structure must be approved before publishing")
+    if row.status == "PUBLISHED":
+        published_students = (s.query(D.Student).join(D.FeeInvoice, D.FeeInvoice.student_id == D.Student.id)
+                              .filter(D.FeeInvoice.fee_structure_id == row.id).distinct().all())
+        accounts_created = sum(1 for student in published_students if _ensure_student_portal_account(s, student))
+        if accounts_created:
+            s.commit()
+        return {"structure": _fee_structure_payload(s, row), "matched_students": len(published_students),
+                "invoices_created": 0, "student_accounts_created": accounts_created}
+    if row.status != "APPROVED":
+        raise HTTPException(409, "Only APPROVED fee structures can be published")
+    lines = s.query(D.FeeStructureLine).filter(D.FeeStructureLine.fee_structure_id == row.id).all()
+    if not lines:
+        raise HTTPException(422, "A fee structure must contain at least one fee line")
+    students = s.query(D.Student).filter(
+        D.Student.program_id == row.program_id,
+        D.Student.batch == s.get(D.Batch, row.batch_id).name,
+        D.Student.campus == s.get(D.Campus, row.campus_id).name,
+        D.Student.student_type == s.get(D.StudentType, row.student_type_id).name,
+        D.Student.status == "active",
+    ).all()
+    created = 0
+    accounts_created = 0
+    for student in students:
+        accounts_created += int(_ensure_student_portal_account(s, student))
+        for line in lines:
+            existing = s.query(D.FeeInvoice).filter(
+                D.FeeInvoice.student_id == student.id,
+                D.FeeInvoice.fee_structure_id == row.id,
+                D.FeeInvoice.term == f"{row.academic_year_id}:{row.semester_id}:line:{line.id}",
+            ).first()
+            if existing:
+                continue
+            s.add(D.FeeInvoice(id=uid(), tenant_id=TENANT, student_id=student.id,
+                               term=f"{row.academic_year_id}:{row.semester_id}:line:{line.id}",
+                               amount=float(line.amount), paid=0, status="due",
+                               due_date=line.due_date, fee_structure_id=row.id))
+            created += 1
+    row.status = "PUBLISHED"
+    row.updated_by, row.updated_at = ctx["sub"], datetime.utcnow()
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee_structure.publish",
+                f"fee_structure:{row.id}", "DRAFT", "PUBLISHED",
+                f"Applied fee structure to {len(students)} matching students")
+    return {"structure": _fee_structure_payload(s, row), "matched_students": len(students),
+            "invoices_created": created, "student_accounts_created": accounts_created}
 
 
 # --------------------------------------------------------------------------- #
