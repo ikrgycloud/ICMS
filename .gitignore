@@ -5,6 +5,10 @@
 .env.*
 !.env.example
 
+# Backend environment files
+backend/.env
+backend/.envm
+
 # ================================
 # Node / React
 # ================================
