@@ -1,60 +1,738 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
-import { Empty, Spinner } from '../modules/kit'
+import { DecisionToast, Empty, Modal, Spinner } from '../modules/kit'
 
-const statIcons = ['⌑', '▤', '♧', '▣', '▧', '♙']
-const quickActions = [
-  ['♧', 'Mark Attendance', 'attendance'], ['▧', 'Create Assignment', 'academics'],
-  ['▣', 'Create Assessment', 'examinations'], ['✎', 'Enter Marks', 'examinations'],
-  ['▱', 'Message Students', 'students'], ['⇧', 'Upload Materials', 'academics'],
-]
-
-function greeting() { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening' }
-function initials(name: string) { return name.split(' ').map(x => x[0]).slice(0, 2).join('') }
-
-export default function FacultyHome({ user, go }: { user: any; go: (v: string) => void }) {
+export default function FacultyHome({
+  user,
+  go,
+}: {
+  user: any
+  go: (v: string) => void
+}) {
   const [home, setHome] = useState<any>(null)
-  useEffect(() => { setHome(null); api.facultyHome().then(setHome).catch(() => setHome({ error: true })) }, [user?.active_role])
-  if (!home) return <Spinner />
-  if (home.error) return <Empty icon="!" text="Professor overview could not be loaded." />
+  const [sections, setSections] = useState<any>(null)
+  const [sel, setSel] = useState<any>(null)
+  const [students, setStudents] = useState<any>(null)
+  const [tasks, setTasks] = useState<any>({ assignments: [] })
+  const [assessments, setAssessments] = useState<any>({
+    assessments: [],
+  })
 
-  const profile = home.profile || {}, kpis = home.kpis || {}, sections = home.sections || []
-  const schedule = home.teaching_schedule || [], pending = home.pending_tasks || [], notes = home.announcements || []
-  const today = new Date().toISOString().slice(0, 10)
-  const classes = schedule.filter((x: any) => x.date === today)
-  const totalStudents = kpis.students ?? sections.reduce((n: number, x: any) => n + (x.enrolled || 0), 0)
-  const assessments = home.performance?.assessments ?? 0
-  const attendanceRisk = Math.max(0, sections.filter((x: any) => x.attendance_pct != null && x.attendance_pct < 75).length)
-  const associate = user?.office_n === 12 ? home.associate_context || {} : null
-  const stats = associate ? [
-    ['Assigned Courses', associate.assigned_courses ?? 0], ['Assigned Sections', sections.length], ['Students Mapped', totalStudents],
-    ['Classes This Week', kpis.classes_this_week ?? 0], ['Attendance Pending', attendanceRisk], ['Marks Pending', kpis.marks_entry_pending ?? 0],
-  ] : [
-    ['Assigned Courses', kpis.sections ?? sections.length], ['Total Sections', sections.length], ['Students Mapped', totalStudents],
-    ['Classes Today', classes.length], ['Pending Assessments', kpis.marks_entry_pending ?? assessments], ['Research Scholars', 0],
-  ]
-  const title = profile.name ? profile.name.replace(/^Dr\.\s*/i, '') : 'Professor'
+  const [showTask, setShowTask] = useState(false)
+  const [showAssessment, setShowAssessment] = useState(false)
+  const [decision, setDecision] = useState<any>(null)
 
-  return <main className="prof-overview fade-in">
-    <div className="prof-heading"><div><h1>Welcome, {associate ? 'Associate Professor' : 'Professor'}</h1><p>{associate ? 'Mid-senior faculty responsible for assigned teaching, coordination, and student advising.' : 'Senior teaching &amp; research faculty delivering courses, mentoring students, and guiding academic progress.'}</p></div><button className="prof-primary" onClick={() => go('my_schedule')} type="button">▣ &nbsp; View Full Schedule</button></div>
-    <section className="prof-stat-grid">{stats.map(([label, value], i) => <article className={`prof-stat p${i}`} key={String(label)}><span>{statIcons[i]}</span><div><b>{value}</b><small>{label}</small></div></article>)}</section>
-    <section className="prof-layout">
-      <div className="prof-left">
-        <article className="prof-card prof-schedule"><header><h2>▣ &nbsp; Today’s Schedule</h2><button onClick={() => go('my_schedule')} type="button">View full schedule</button></header><div className="prof-card-body">
-          {classes.map((item: any, i: number) => <div className="prof-class" key={item.id}><i className={`prof-dot d${i}`} /><time>{item.time || 'Time pending'}</time><div><b>{item.course_code} {item.subject}</b><p><span>{item.section || 'Section'}</span><span>{item.room || 'Room TBD'}</span><span>Lecture</span></p></div><em>{i === 0 ? 'Ongoing' : i === 1 ? 'Upcoming' : 'Later'}</em></div>)}
-          {!classes.length && <Empty icon="○" text="No classes scheduled for today." />}
-        </div></article>
-        <article className="prof-card prof-sections"><header><h2>▤ &nbsp; My Sections</h2><button onClick={() => go('academics')} type="button">View all sections</button></header><div className="prof-table-wrap"><table className="prof-table"><thead><tr><th>Course</th><th>Section</th><th>Students</th><th>Attendance Avg</th><th>Next Activity</th><th>Action</th></tr></thead><tbody>
-          {sections.map((x: any, i: number) => <tr key={x.id}><td><b>{x.course_code} {x.title}</b></td><td>{x.section}</td><td>{x.enrolled || 0}</td><td><span className="prof-progress"><i style={{ width: `${x.attendance_pct || 0}%` }} /></span>{x.attendance_pct == null ? '—' : `${Math.round(x.attendance_pct)}%`}</td><td><b>{pending[i]?.title || 'No activity'}</b></td><td><button onClick={() => go('academics')} type="button">Open</button></td></tr>)}
-          {!sections.length && <tr><td colSpan={6}>No sections assigned.</td></tr>}</tbody></table></div></article>
+  const [taskForm, setTaskForm] = useState({
+    title: '',
+    description: '',
+    due_at: '',
+    status: 'published',
+    reference_url: '',
+  })
+
+  const [assessmentForm, setAssessmentForm] = useState({
+    name: '',
+    max_marks: 20,
+    assessment_type: 'quiz',
+    scheduled_at: '',
+    end_at: '',
+    published: true,
+    instructions: '',
+  })
+
+  useEffect(() => {
+    api.facultyHome().then(setHome).catch(() => {
+      setHome({ error: true })
+    })
+
+    api.facultySections().then(setSections).catch(() => {
+      setSections({ sections: [] })
+    })
+  }, [user?.active_role])
+
+  function loadSectionData(section: any) {
+    setStudents(null)
+
+    Promise.allSettled([
+      api.facultySectionStudents(section.id),
+      api.sectionAssignments(section.id),
+      api.examAssessments(section.id),
+    ]).then(([studentsRes, tasksRes, assessmentsRes]) => {
+      setStudents(
+        studentsRes.status === 'fulfilled'
+          ? studentsRes.value
+          : { students: [] }
+      )
+
+      setTasks(
+        tasksRes.status === 'fulfilled'
+          ? tasksRes.value
+          : { assignments: [] }
+      )
+
+      setAssessments(
+        assessmentsRes.status === 'fulfilled'
+          ? assessmentsRes.value
+          : { assessments: [] }
+      )
+    })
+  }
+
+  function openSection(section: any) {
+    setSel(section)
+    loadSectionData(section)
+  }
+
+  async function createTask() {
+    if (!sel) return
+
+    try {
+      const response = await api.createAssignment(sel.id, taskForm)
+
+      setDecision(response.decision)
+      setShowTask(false)
+
+      setTaskForm({
+        title: '',
+        description: '',
+        due_at: '',
+        status: 'published',
+        reference_url: '',
+      })
+
+      loadSectionData(sel)
+    } catch (error: any) {
+      setDecision({
+        outcome: 'DENY',
+        reason: error.message,
+      })
+    }
+  }
+
+  async function createAssessment() {
+    if (!sel) return
+
+    try {
+      const response = await api.createAssessment({
+        ...assessmentForm,
+        section_id: sel.id,
+      })
+
+      setDecision(response.decision)
+      setShowAssessment(false)
+
+      setAssessmentForm({
+        name: '',
+        max_marks: 20,
+        assessment_type: 'quiz',
+        scheduled_at: '',
+        end_at: '',
+        published: true,
+        instructions: '',
+      })
+
+      loadSectionData(sel)
+    } catch (error: any) {
+      setDecision({
+        outcome: 'DENY',
+        reason: error.message,
+      })
+    }
+  }
+
+  if (!home) {
+    return <Spinner />
+  }
+
+  if (home.error) {
+    return (
+      <Empty
+        icon="!"
+        text="Professor overview could not be loaded."
+      />
+    )
+  }
+
+  const profile = home.profile || {}
+  const kpis = home.kpis || {}
+
+  const initials = (profile.name || 'F')
+    .split(' ')
+    .map((part: string) => part[0])
+    .slice(0, 2)
+    .join('')
+
+  const sectionList = sections?.sections || []
+  const studentList = students?.students || []
+  const assignmentList = tasks?.assignments || []
+  const assessmentList = assessments?.assessments || []
+
+  return (
+    <div className="fade-in">
+
+      {/* =========================================================
+          FACULTY PROFILE
+         ========================================================= */}
+
+      <div className="profile-band">
+        <div className="pb-avatar">
+          {initials}
+        </div>
+
+        <div>
+          <div className="pb-name">
+            {profile.name || 'Faculty'}
+          </div>
+
+          <div className="pb-meta">
+            <span className="mono">
+              {profile.emp_id || '-'}
+            </span>
+
+            {' • '}
+
+            {profile.designation || 'Faculty'}
+
+            {' • '}
+
+            {profile.department || 'Department not set'}
+          </div>
+        </div>
+
+        <div className="pb-stats">
+          <div className="pb-stat">
+            <div className="pb-stat-v">
+              {kpis.sections ?? sectionList.length}
+            </div>
+            <div className="pb-stat-l">
+              Sections
+            </div>
+          </div>
+
+          <div className="pb-stat">
+            <div className="pb-stat-v">
+              {kpis.students ?? 0}
+            </div>
+            <div className="pb-stat-l">
+              Students
+            </div>
+          </div>
+
+          <div className="pb-stat">
+            <div className="pb-stat-v">
+              {kpis.classes_this_week ?? 0}
+            </div>
+            <div className="pb-stat-l">
+              Classes this week
+            </div>
+          </div>
+        </div>
       </div>
-      <div className="prof-right">
-        <article className="prof-card"><header><h2>♧ &nbsp; Teaching Alerts</h2></header><div className="prof-alerts"><div><span>♧</span>{attendanceRisk || 0} section(s) below 75% attendance <b>{attendanceRisk}</b></div><div><span>▧</span>{pending.length} academic task(s) require attention <b>{pending.length}</b></div><div><span>▣</span>{kpis.marks_entry_pending || 0} marks submissions due <b>{kpis.marks_entry_pending || 0}</b></div><div><span>♧</span>Attendance review requests pending <b>0</b></div></div></article>
-        <div className="prof-two"><article className="prof-card"><header><h2>▧ &nbsp; Pending Academic Work</h2></header><div className="prof-checks">{pending.slice(0,4).map((x:any) => <button onClick={() => go(x.kind === 'attendance' ? 'attendance' : 'examinations')} key={x.id} type="button"><i />{x.title}</button>)}{!pending.length && <p>No pending academic work.</p>}</div></article>
-        <article className="prof-card"><header><h2>♧ &nbsp; Mentoring &amp; Students</h2></header><div className="prof-mentor-stats"><span><b>{totalStudents}</b>Advisee Students</span><span><b>{attendanceRisk}</b>At-risk Students</span><span><b>{classes.length}</b>Meetings this week</span></div><div className="prof-student-list">{sections.slice(0,2).map((x:any, i:number) => <div key={x.id}><i>{initials(x.title || `S${i}`)}</i><p><b>{x.title}</b><small>{x.course_code} · {x.section}</small></p><em>{x.attendance_pct == null ? 'Review' : `${Math.round(x.attendance_pct)}% attendance`}</em></div>)}</div></article></div>
-        <article className="prof-card prof-research"><header><h2>♧ &nbsp; Research Snapshot</h2></header><div>{[['♙','0','Active Projects'],['♧','0','Research Scholars'],['▧','0','Draft Papers'],['▣','0','Upcoming Review']].map(x => <span key={x[2]}><i>{x[0]}</i><b>{x[1]}</b><small>{x[2]}</small></span>)}</div></article>
+
+      {/* =========================================================
+          SECTION / STUDENT AREA
+         ========================================================= */}
+
+      <div className="split">
+
+        {/* -------------------------------------------------------
+            SECTIONS
+           ------------------------------------------------------- */}
+
+        <div
+          className="card"
+          style={{ flex: '0 0 340px' }}
+        >
+          <div className="card-h">
+            <h3>My sections</h3>
+
+            <span className="hint">
+              {sectionList.length} this term
+            </span>
+          </div>
+
+          <div className="list">
+            {sectionList.map((section: any) => (
+              <button
+                key={section.id}
+                className={`list-item ${
+                  sel?.id === section.id ? 'on' : ''
+                }`}
+                onClick={() => openSection(section)}
+                type="button"
+              >
+                <div>
+                  <div className="li-title mono">
+                    {section.course_code} • {section.section}
+                  </div>
+
+                  <div className="li-sub">
+                    {section.title}
+                  </div>
+                </div>
+
+                <div className="li-metric">
+                  {section.enrolled ?? 0}
+                </div>
+              </button>
+            ))}
+
+            {sectionList.length === 0 && (
+              <Empty
+                icon="Books"
+                text="No sections assigned"
+              />
+            )}
+          </div>
+        </div>
+
+        {/* -------------------------------------------------------
+            SELECTED SECTION
+           ------------------------------------------------------- */}
+
+        <div
+          className="card"
+          style={{ flex: 1 }}
+        >
+          {!sel && (
+            <Empty
+              icon="Class"
+              text="Select a section to see your class roster"
+            />
+          )}
+
+          {sel && !students && <Spinner />}
+
+          {sel && students && (
+            <>
+              <div className="card-h">
+                <h3>
+                  {sel.course_code} • Section {sel.section}
+                  {' — '}
+                  {studentList.length} students
+                </h3>
+
+                <div className="row-actions">
+                  <button
+                    className="btn btn-sm btn-out"
+                    onClick={() => go('attendance')}
+                    type="button"
+                  >
+                    Mark attendance
+                  </button>
+
+                  <button
+                    className="btn btn-sm btn-out"
+                    onClick={() => setShowTask(true)}
+                    type="button"
+                  >
+                    Create task
+                  </button>
+
+                  <button
+                    className="btn btn-sm btn-out"
+                    onClick={() => setShowAssessment(true)}
+                    type="button"
+                  >
+                    Schedule quiz / test
+                  </button>
+
+                  <button
+                    className="btn btn-sm btn-crimson"
+                    onClick={() => go('examinations')}
+                    type="button"
+                  >
+                    Enter marks
+                  </button>
+                </div>
+              </div>
+
+              {/* -------------------------------------------------
+                  STUDENT TABLE
+                 ------------------------------------------------- */}
+
+              <div className="tbl-scroll">
+                <table className="tbl">
+                  <thead>
+                    <tr>
+                      <th>Roll No</th>
+                      <th>Name</th>
+                      <th>CGPA</th>
+                      <th>Attendance</th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {studentList.map((student: any) => (
+                      <tr key={student.roll_no}>
+                        <td className="mono">
+                          {student.roll_no}
+                        </td>
+
+                        <td>
+                          <b>{student.name}</b>
+                        </td>
+
+                        <td>
+                          {student.cgpa != null
+                            ? Number(student.cgpa).toFixed(2)
+                            : '-'}
+                        </td>
+
+                        <td>
+                          {student.attendance_pct != null
+                            ? `${student.attendance_pct}%`
+                            : '-'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* -------------------------------------------------
+                  TASKS + ASSESSMENTS
+                 ------------------------------------------------- */}
+
+              <div
+                className="grid-2"
+                style={{ padding: 20 }}
+              >
+
+                {/* Tasks */}
+
+                <div className="card">
+                  <div className="card-h">
+                    <h3>Section tasks</h3>
+                  </div>
+
+                  <div className="card-pad">
+                    {assignmentList.map((task: any) => (
+                      <div
+                        className="snap"
+                        key={task.id}
+                      >
+                        <span>
+                          <b>{task.title}</b>
+                        </span>
+
+                        <span className="hint">
+                          {task.due_at
+                            ? new Date(
+                                task.due_at
+                              ).toLocaleString()
+                            : 'No due date'}
+                        </span>
+                      </div>
+                    ))}
+
+                    {assignmentList.length === 0 && (
+                      <Empty
+                        text="No tasks published for this section"
+                      />
+                    )}
+                  </div>
+                </div>
+
+                {/* Assessments */}
+
+                <div className="card">
+                  <div className="card-h">
+                    <h3>
+                      Quiz / test schedule
+                    </h3>
+                  </div>
+
+                  <div className="card-pad">
+                    {assessmentList.map(
+                      (assessment: any) => (
+                        <div
+                          className="snap"
+                          key={assessment.id}
+                        >
+                          <span>
+                            <b>
+                              {assessment.name}
+                            </b>
+                            {' - '}
+                            {assessment.assessment_type}
+                          </span>
+
+                          <span className="hint">
+                            {assessment.scheduled_at
+                              ? new Date(
+                                  assessment.scheduled_at
+                                ).toLocaleString()
+                              : 'Schedule not set'}
+                          </span>
+                        </div>
+                      )
+                    )}
+
+                    {assessmentList.length === 0 && (
+                      <Empty
+                        text="No assessments scheduled yet"
+                      />
+                    )}
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
       </div>
-    </section>
-    <article className="prof-card prof-actions"><header><h2>ϟ &nbsp; Quick Actions</h2></header><div>{quickActions.map(([icon,label,route]) => <button key={label} onClick={() => go(route)} type="button"><i>{icon}</i>{label}</button>)}</div></article>
-  </main>
+
+      {/* =========================================================
+          CREATE TASK MODAL
+         ========================================================= */}
+
+      {showTask && (
+        <Modal
+          title={`Create task for ${
+            sel?.course_code || 'section'
+          }`}
+          onClose={() => setShowTask(false)}
+          footer={
+            <>
+              <button
+                className="btn btn-out"
+                onClick={() => setShowTask(false)}
+                type="button"
+              >
+                Cancel
+              </button>
+
+              <button
+                className="btn btn-brass"
+                onClick={createTask}
+                type="button"
+              >
+                Publish task
+              </button>
+            </>
+          }
+        >
+          <div className="form-row">
+            <label>Title</label>
+
+            <input
+              className="inp"
+              value={taskForm.title}
+              onChange={(e) =>
+                setTaskForm({
+                  ...taskForm,
+                  title: e.target.value,
+                })
+              }
+            />
+          </div>
+
+          <div className="form-row">
+            <label>Description</label>
+
+            <textarea
+              className="inp"
+              value={taskForm.description}
+              onChange={(e) =>
+                setTaskForm({
+                  ...taskForm,
+                  description: e.target.value,
+                })
+              }
+              rows={4}
+            />
+          </div>
+
+          <div className="grid-2">
+            <div className="form-row">
+              <label>Due at</label>
+
+              <input
+                className="inp"
+                type="datetime-local"
+                value={taskForm.due_at}
+                onChange={(e) =>
+                  setTaskForm({
+                    ...taskForm,
+                    due_at: e.target.value,
+                  })
+                }
+              />
+            </div>
+
+            <div className="form-row">
+              <label>Reference URL</label>
+
+              <input
+                className="inp"
+                value={taskForm.reference_url}
+                onChange={(e) =>
+                  setTaskForm({
+                    ...taskForm,
+                    reference_url: e.target.value,
+                  })
+                }
+              />
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* =========================================================
+          ASSESSMENT MODAL
+         ========================================================= */}
+
+      {showAssessment && (
+        <Modal
+          title={`Schedule assessment for ${
+            sel?.course_code || 'section'
+          }`}
+          onClose={() => setShowAssessment(false)}
+          footer={
+            <>
+              <button
+                className="btn btn-out"
+                onClick={() => setShowAssessment(false)}
+                type="button"
+              >
+                Cancel
+              </button>
+
+              <button
+                className="btn btn-brass"
+                onClick={createAssessment}
+                type="button"
+              >
+                Save schedule
+              </button>
+            </>
+          }
+        >
+          <div className="grid-2">
+            <div className="form-row">
+              <label>Name</label>
+
+              <input
+                className="inp"
+                value={assessmentForm.name}
+                onChange={(e) =>
+                  setAssessmentForm({
+                    ...assessmentForm,
+                    name: e.target.value,
+                  })
+                }
+              />
+            </div>
+
+            <div className="form-row">
+              <label>Type</label>
+
+              <select
+                className="select"
+                value={assessmentForm.assessment_type}
+                onChange={(e) =>
+                  setAssessmentForm({
+                    ...assessmentForm,
+                    assessment_type: e.target.value,
+                  })
+                }
+              >
+                <option value="quiz">
+                  Quiz
+                </option>
+
+                <option value="test">
+                  Test
+                </option>
+
+                <option value="midterm">
+                  Midterm
+                </option>
+              </select>
+            </div>
+          </div>
+
+          <div className="grid-2">
+            <div className="form-row">
+              <label>Max marks</label>
+
+              <input
+                className="inp"
+                type="number"
+                value={assessmentForm.max_marks}
+                onChange={(e) =>
+                  setAssessmentForm({
+                    ...assessmentForm,
+                    max_marks: Number(
+                      e.target.value
+                    ),
+                  })
+                }
+              />
+            </div>
+
+            <div className="form-row">
+              <label>Scheduled at</label>
+
+              <input
+                className="inp"
+                type="datetime-local"
+                value={assessmentForm.scheduled_at}
+                onChange={(e) =>
+                  setAssessmentForm({
+                    ...assessmentForm,
+                    scheduled_at: e.target.value,
+                  })
+                }
+              />
+            </div>
+          </div>
+
+          <div className="grid-2">
+            <div className="form-row">
+              <label>End at</label>
+
+              <input
+                className="inp"
+                type="datetime-local"
+                value={assessmentForm.end_at}
+                onChange={(e) =>
+                  setAssessmentForm({
+                    ...assessmentForm,
+                    end_at: e.target.value,
+                  })
+                }
+              />
+            </div>
+
+            <div className="form-row">
+              <label>Instructions</label>
+
+              <input
+                className="inp"
+                value={assessmentForm.instructions}
+                onChange={(e) =>
+                  setAssessmentForm({
+                    ...assessmentForm,
+                    instructions: e.target.value,
+                  })
+                }
+              />
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* =========================================================
+          DECISION TOAST
+         ========================================================= */}
+
+      {decision && (
+        <DecisionToast
+          decision={decision}
+          onClose={() => setDecision(null)}
+        />
+      )}
+    </div>
+  )
 }

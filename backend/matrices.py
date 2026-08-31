@@ -67,6 +67,9 @@ def rbac_for(office_n: int, level: int, verb: str) -> str:
 # Each: key, label, chain[initiator, reviewer, approver, final], escalation,
 #       owning office_n, valid workflow states for progression, has_amount
 APPROVAL_MATRIX = [
+    {"key": "fee_structure", "label": "Fee structure approval", "office_n": 22,
+     "chain": ["Finance Manager", "Principal / Campus Head"],
+     "escalation": "Chairman", "amount": False},
     {"key": "student_admission", "label": "Student admission", "office_n": 15,
      "chain": ["Applicant", "Admissions Office", "Admissions Dir.", "Principal/Registrar"],
      "escalation": "VC", "amount": False},

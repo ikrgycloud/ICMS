@@ -4,10 +4,12 @@ import { Spinner, money } from '../modules/kit'
 
 export default function ParentHome({ user }: { user: any }) {
   const [home, setHome] = useState<any>(null)
+  const [paying, setPaying] = useState('')
   useEffect(() => { api.parentHome().then(setHome).catch(() => {}) }, [])
   if (!home) return <Spinner />
   const w = home.ward
   const initials = (w.name || 'W').split(' ').map((x: string) => x[0]).slice(0, 2).join('')
+  async function pay(invoice: any) { try { setPaying(invoice.id); const order = await api.createParentRazorpayOrder(invoice.id); if (!(window as any).Razorpay) await new Promise<void>((resolve, reject) => { const script=document.createElement('script'); script.src='https://checkout.razorpay.com/v1/checkout.js'; script.onload=()=>resolve(); script.onerror=()=>reject(new Error('Could not load Razorpay checkout')); document.body.appendChild(script) }); new (window as any).Razorpay({ key:order.key_id, amount:order.amount, currency:order.currency, name:'ICMS', description:order.description, order_id:order.order_id, prefill:order.student, handler:async (response:any)=>{ await api.verifyParentRazorpayPayment({invoice_id:invoice.id,...response}); setHome(await api.parentHome()) }}).open() } catch (error:any) { alert(error.message || 'Unable to start payment') } finally { setPaying('') } }
 
   return (
     <div className="fade-in">
@@ -43,10 +45,8 @@ export default function ParentHome({ user }: { user: any }) {
           <div className="card-pad">
             {home.fee ? (
               <>
-                <div className="snap"><span>Total</span><b>{money(home.fee.amount)}</b></div>
-                <div className="snap"><span>Paid</span><b style={{ color: 'var(--teal-dk)' }}>{money(home.fee.paid)}</b></div>
                 <div className="snap"><span>Balance</span><b style={{ color: home.fee.balance > 0 ? 'var(--red)' : 'var(--teal-dk)' }}>{money(home.fee.balance)}</b></div>
-                <div className="snap"><span>Status</span><span className={`pill s-${home.fee.status}`}>{home.fee.status}</span></div>
+                {(home.fee.invoices || []).map((invoice: any) => <div className="snap" key={invoice.id}><span>{invoice.term}<small>Base {money(invoice.base_amount)} + GST {money(invoice.gst_amount)} ({invoice.gst_rate}%) · Total {money(invoice.amount)}</small><small>{money(invoice.paid)} paid · {money(invoice.balance)} balance</small></span><div className="row-actions">{invoice.balance > 0 && <button className="btn btn-sm btn-brass" disabled={paying === invoice.id} onClick={() => pay(invoice)}>{paying === invoice.id ? 'Starting...' : 'Pay online'}</button>}{invoice.paid > 0 && <button className="btn btn-sm btn-out" onClick={() => api.downloadParentReceipt(invoice.id)}>PDF receipt</button>}</div></div>)}
               </>
             ) : <div className="empty">No fee record</div>}
           </div>

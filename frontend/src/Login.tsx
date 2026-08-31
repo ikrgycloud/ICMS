@@ -29,7 +29,10 @@ export default function Login({ onDone, onBack }: { onDone: (u: any) => void; on
   const [offices, setOffices] = useState<any[]>([])
   const [filter, setFilter] = useState(0)
 
-  useEffect(() => { api.offices().then(setOffices).catch(() => {}) }, [])
+  // The login screen is pre-authentication. Load the public catalog rather
+  // than the authenticated office directory (which correctly rejects the
+  // Front Office after sign-in).
+  useEffect(() => { api.catalog().then((catalog: any) => setOffices(catalog.offices || [])).catch(() => {}) }, [])
 
   async function submit() {
     if (!username || !password) { setErr('Enter a username and password'); return }
