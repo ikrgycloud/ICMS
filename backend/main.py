@@ -12,6 +12,7 @@ import os
 import sys
 import uuid
 import time
+from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Depends
@@ -38,7 +39,11 @@ from domain_api import router as domain_router
 from portal_api import router as portal_router
 from integrations_api import router as integrations_router
 from sms_api import router as sms_router
+from frontdesk_api import router as frontdesk_router, seed_frontdesk
 from domain_seed import seed_domain
+import frontdesk_models  # register Front Office tables before create_all
+
+load_dotenv()
 
 # Use the same named security scheme as modular routers. Swagger UI now has a
 # single Authorize action which applies the bearer token to protected APIs.
@@ -52,6 +57,7 @@ app.include_router(domain_router)
 app.include_router(portal_router)
 app.include_router(integrations_router)
 app.include_router(sms_router)
+app.include_router(frontdesk_router)
 
 
 @app.on_event("startup")
@@ -60,6 +66,11 @@ def _startup():
         try:
             print("seed:", seed())
             print("domain:", seed_domain())
+            frontdesk_session = SessionLocal()
+            try:
+                seed_frontdesk(frontdesk_session)
+            finally:
+                frontdesk_session.close()
             return
         except Exception as e:
             print("waiting for db...", e)
@@ -81,6 +92,20 @@ def auth(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_schem
         return decode_token(credentials.credentials)
     except Exception:
         raise HTTPException(401, "Invalid or expired token")
+
+
+def non_front_office(ctx=Depends(auth)) -> dict:
+    """Protect shared legacy screens removed only from Front Office (office 35)."""
+    if ctx["office_n"] == 35:
+        raise HTTPException(403, "This generic module is not available to Front Office")
+    return ctx
+
+
+FRONT_OFFICE_REMOVED_RESOURCES = {
+    "students", "calendar", "academic_calendar", "academic-calendar",
+    "workflows", "delegation", "delegations", "matrices", "directory",
+    "audit", "dashboard", "overview",
+}
 
 
 def uid() -> str:
@@ -571,7 +596,7 @@ def catalog():
 
 
 @app.get("/api/directory/offices")
-def offices():
+def offices(ctx=Depends(non_front_office)):
     return [{"n": o["n"], "name": o["name"], "level": o["level"],
              "level_name": LEVELS[str(o["level"])]["name"],
              "color": LEVELS[str(o["level"])]["color"],
@@ -582,7 +607,7 @@ def offices():
 
 
 @app.get("/api/directory/office/{n}")
-def office_detail(n: int, s=Depends(db)):
+def office_detail(n: int, ctx=Depends(non_front_office), s=Depends(db)):
     o = office(n)
     if not o:
         raise HTTPException(404, "Office not found")
@@ -604,7 +629,7 @@ def office_detail(n: int, s=Depends(db)):
 
 
 @app.get("/api/directory/roles")
-def all_roles(s=Depends(db)):
+def all_roles(ctx=Depends(non_front_office), s=Depends(db)):
     rows = s.query(Role).all()
     return [{"office_n": r.office_n, "name": r.name, "category": r.category}
             for r in rows]
@@ -626,7 +651,7 @@ def stats(s=Depends(db)):
 #  Matrices (Document §9, §10, §11)                                            #
 # --------------------------------------------------------------------------- #
 @app.get("/api/matrices/rbac")
-def rbac_matrix():
+def rbac_matrix(ctx=Depends(non_front_office)):
     verbs = ["view", "create", "edit", "delete", "approve", "reject", "verify",
              "publish", "export", "configure", "delegate", "audit"]
     rows = []
@@ -637,12 +662,12 @@ def rbac_matrix():
 
 
 @app.get("/api/matrices/approval")
-def approval_matrix():
+def approval_matrix(ctx=Depends(non_front_office)):
     return {"processes": APPROVAL_MATRIX}
 
 
 @app.get("/api/matrices/scope")
-def scope_matrix():
+def scope_matrix(ctx=Depends(non_front_office)):
     return {"levels": A.SCOPE_LEVELS,
             "offices": [{"n": o["n"], "office": o["name"], "scope": scope_for(o["n"])}
                         for o in OFFICES]}
@@ -652,7 +677,7 @@ def scope_matrix():
 #  Workflows & approvals (Document §7, §10) — the end-to-end engine            #
 # --------------------------------------------------------------------------- #
 @app.get("/api/workflows/processes")
-def workflow_processes(ctx=Depends(auth)):
+def workflow_processes(ctx=Depends(non_front_office)):
     """Processes this office can initiate or participate in."""
     return {"processes": APPROVAL_MATRIX}
 
@@ -865,7 +890,7 @@ class StartWF(BaseModel):
 
 
 @app.post("/api/workflows/start")
-def start_workflow(body: StartWF, ctx=Depends(auth), s=Depends(db)):
+def start_workflow(body: StartWF, ctx=Depends(non_front_office), s=Depends(db)):
     wf, proc = _start_workflow_record(s, ctx, body.process_key, body.title, body.amount)
     return _wf_payload(s, wf, proc)
     proc = next((p for p in APPROVAL_MATRIX if p["key"] == body.process_key), None)
@@ -927,7 +952,7 @@ class DecideWF(BaseModel):
 
 
 @app.post("/api/workflows/decide")
-def decide_workflow(body: DecideWF, ctx=Depends(auth), s=Depends(db)):
+def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)):
     wf = s.query(WorkflowInstance).get(body.workflow_id)
     if not wf:
         raise HTTPException(404, "Workflow not found")
@@ -1119,7 +1144,7 @@ def _visible_page_numbers(page: int, total_pages: int):
 
 
 @app.get("/api/workflows")
-def list_workflows(scope: str = "all", ctx=Depends(auth), s=Depends(db)):
+def list_workflows(scope: str = "all", ctx=Depends(non_front_office), s=Depends(db)):
     q = s.query(WorkflowInstance)
     pending_states = ["submitted", "under_review", "reviewed", "escalated"]
     if scope == "mine":
@@ -1154,7 +1179,7 @@ def list_workflows(scope: str = "all", ctx=Depends(auth), s=Depends(db)):
 
 
 @app.get("/api/workflows/{wid}")
-def get_workflow(wid: str, ctx=Depends(auth), s=Depends(db)):
+def get_workflow(wid: str, ctx=Depends(non_front_office), s=Depends(db)):
     wf = s.query(WorkflowInstance).get(wid)
     if not wf:
         raise HTTPException(404, "Not found")
@@ -1356,7 +1381,7 @@ class DelegateIn(BaseModel):
 
 
 @app.post("/api/delegations")
-def create_delegation(body: DelegateIn, ctx=Depends(auth), s=Depends(db)):
+def create_delegation(body: DelegateIn, ctx=Depends(non_front_office), s=Depends(db)):
     o = office(ctx["office_n"])
     can = rbac_for(ctx["office_n"], o["level"], "delegate")
     if can in (A.NOT_ALLOWED,):
@@ -1382,7 +1407,7 @@ def create_delegation(body: DelegateIn, ctx=Depends(auth), s=Depends(db)):
 
 
 @app.get("/api/delegations")
-def list_delegations(ctx=Depends(auth), s=Depends(db)):
+def list_delegations(ctx=Depends(non_front_office), s=Depends(db)):
     rows = (s.query(Delegation)
             .filter(or_(Delegation.from_user == ctx["sub"], Delegation.to_user == ctx["sub"]))
             .order_by(desc(Delegation.created_at)).all())
@@ -1390,7 +1415,7 @@ def list_delegations(ctx=Depends(auth), s=Depends(db)):
 
 
 @app.post("/api/delegations/{did}/revoke")
-def revoke_delegation(did: str, ctx=Depends(auth), s=Depends(db)):
+def revoke_delegation(did: str, ctx=Depends(non_front_office), s=Depends(db)):
     d = s.query(Delegation).get(did)
     if not d:
         raise HTTPException(404, "Not found")
@@ -1612,6 +1637,21 @@ def chairman_delegations(
     }
 
 
+@app.get("/api/frontdesk/delegations")
+def frontdesk_delegations(ctx=Depends(auth), s=Depends(db)):
+    """Read-only delegation register for the Front Desk workspace."""
+    if ctx["office_n"] != 35:
+        raise HTTPException(403, "Front Office access required")
+    rows = s.query(Delegation).order_by(desc(Delegation.created_at)).all()
+    delegations = []
+    for row in rows:
+        payload = _delegation_payload(s, row)
+        # Attachments may contain internal material and are not exposed in this view.
+        payload["attachment"] = None
+        delegations.append(payload)
+    return {"delegations": delegations, "read_only": True}
+
+
 @app.post("/api/delegations/chairman")
 def create_chairman_delegation(body: ChairmanDelegationIn, ctx=Depends(auth), s=Depends(db)):
     if ctx["office_n"] != 1:
@@ -1781,6 +1821,15 @@ class CheckIn(BaseModel):
 def authz_check(body: CheckIn, ctx=Depends(auth), s=Depends(db)):
     o = office(ctx["office_n"])
     rbac = rbac_for(ctx["office_n"], o["level"], body.action if body.action in VERBS else "view")
+    resource = body.resource.strip().lower().replace(" ", "_")
+    if ctx["office_n"] == 35 and resource in FRONT_OFFICE_REMOVED_RESOURCES:
+        return {
+            "rbac_authority": A.NOT_ALLOWED,
+            "outcome": A.DENY,
+            "reason": f"{body.resource} is not available to Front Office",
+            "authority": A.NOT_ALLOWED,
+            "escalate_to": None,
+        }
     dec = authorize(ctx=ctx, action=body.action, resource=body.resource,
                     rbac_authority=rbac, amount=body.amount,
                     active_delegation=active_delegations_for(s, ctx["sub"]),
@@ -1809,6 +1858,10 @@ def my_permissions(ctx=Depends(auth), s=Depends(db)):
 # --------------------------------------------------------------------------- #
 @app.get("/api/notifications")
 def get_notifications(ctx=Depends(auth), s=Depends(db)):
+    # Front Office notification types are introduced with its approved modules.
+    # Until then, do not leak unrelated institutional workflow notifications.
+    if ctx["office_n"] == 35:
+        return {"notifications": [], "unread": 0}
     rows = (s.query(Notification).filter(Notification.user_id == ctx["sub"])
             .order_by(desc(Notification.created_at)).limit(50).all())
     return {"notifications": [{"id": n.id, "severity": n.severity, "title": n.title,
@@ -1831,7 +1884,7 @@ def read_notification(nid: str, ctx=Depends(auth), s=Depends(db)):
 #  Audit (Document §2, §12) — with hash-chain verifier (Gap #7)               #
 # --------------------------------------------------------------------------- #
 @app.get("/api/audit")
-def get_audit(limit: int = 60, ctx=Depends(auth), s=Depends(db)):
+def get_audit(limit: int = 60, ctx=Depends(non_front_office), s=Depends(db)):
     rows = s.query(AuditLog).order_by(desc(AuditLog.id)).limit(limit).all()
     return {"entries": [{"id": r.id, "actor": r.actor_name or r.actor, "office_n": r.office_n,
                          "action": r.action, "entity": r.entity, "new_state": r.new_state,
@@ -1841,7 +1894,7 @@ def get_audit(limit: int = 60, ctx=Depends(auth), s=Depends(db)):
 
 
 @app.get("/api/audit/verify")
-def verify_audit(ctx=Depends(auth), s=Depends(db)):
+def verify_audit(ctx=Depends(non_front_office), s=Depends(db)):
     rows = s.query(AuditLog).order_by(AuditLog.id).all()
     prev = "0" * 64
     broken = None
@@ -1860,7 +1913,7 @@ def verify_audit(ctx=Depends(auth), s=Depends(db)):
 #  Dashboard aggregate                                                         #
 # --------------------------------------------------------------------------- #
 @app.get("/api/dashboard")
-def dashboard(ctx=Depends(auth), s=Depends(db)):
+def dashboard(ctx=Depends(non_front_office), s=Depends(db)):
     o = office(ctx["office_n"])
     mine = s.query(WorkflowInstance).filter(WorkflowInstance.initiator_id == ctx["sub"]).count()
     inbox = s.query(WorkflowInstance).filter(

@@ -40,6 +40,8 @@ import { StudentAttendanceView, StudentCalendarView, StudentCoursesView, Student
 import FacultyHome from './personas/FacultyHome'
 import FacultySchedule from './personas/FacultySchedule'
 import ParentHome from './personas/ParentHome'
+import FrontDeskWorkspace from './frontdesk/FrontDeskWorkspace'
+import { FiHome, FiUsers, FiCalendar, FiHelpCircle, FiPhone, FiBookOpen, FiCheckCircle } from 'react-icons/fi'
 
 const LEVEL_COLORS: Record<number, string> = {
   1: '#d92d3a',
@@ -378,6 +380,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
 }
 
 function ModuleView({ view, module, user, onChange, go }: any) {
+  if (user.office_n === 35) return <FrontDeskWorkspace view={view} />
   const caps = module?.actions || {}
   switch (view) {
     case 'overview':
@@ -474,6 +477,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
 }
 
 function displayMeta(user: any, module: any) {
+  if (user.office_n === 35) return {}
   if (user.office_n !== 1) return {}
   return CHAIRMAN_DISPLAY[module.key] || {}
 }
@@ -519,6 +523,14 @@ function ChevronDownIcon() {
 }
 
 function NavGlyph({ moduleKey }: { moduleKey: string }) {
+    if (moduleKey === 'frontdesk_dashboard') return <FiHome />
+    if (moduleKey === 'frontdesk_visitors') return <FiUsers />
+    if (moduleKey === 'frontdesk_verify') return <FiCheckCircle />
+    if (moduleKey === 'frontdesk_appointments') return <FiCalendar />
+    if (moduleKey === 'frontdesk_helpdesk') return <FiHelpCircle />
+    if (moduleKey === 'frontdesk_calls') return <FiPhone />
+    if (moduleKey === 'frontdesk_directory') return <FiBookOpen />
+    if (moduleKey === 'frontdesk_delegations') return <FiCheckCircle />
   switch (moduleKey) {
     case 'overview':
       return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 11.5 12 5l8 6.5V20a1 1 0 0 1-1 1h-4.5v-6h-5v6H5a1 1 0 0 1-1-1v-8.5Z" /></svg>

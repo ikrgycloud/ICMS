@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Capability map — the bridge between the 40 offices (Document Part B) and the
 functional modules the app renders. It answers two questions:
@@ -18,6 +18,14 @@ through authorize() in authority.py. This map only decides what is *offered*.
 
 # App module keys and their display metadata (icon is a glyph used by the UI).
 MODULES = {
+    "frontdesk_dashboard": {"label": "Dashboard", "icon": "◆", "group": "Front Desk"},
+    "frontdesk_visitors": {"label": "Visitor Management", "icon": "◉", "group": "Front Desk"},
+    "frontdesk_appointments": {"label": "Appointments", "icon": "◷", "group": "Front Desk"},
+    "frontdesk_helpdesk": {"label": "Helpdesk", "icon": "?", "group": "Front Desk"},
+    "frontdesk_calls": {"label": "Telephony / Calls", "icon": "☎", "group": "Front Desk"},
+    "frontdesk_directory": {"label": "Directory", "icon": "▦", "group": "Front Desk"},
+    "frontdesk_delegations": {"label": "Delegations", "icon": "⤳", "group": "Front Desk"},
+    "frontdesk_verify": {"label": "Verify / Scan", "icon": "⌗", "group": "Front Desk"},
     "curriculum":   {"label": "Curriculum", "icon": "Curr", "group": "Academics"},
     "overview":     {"label": "Overview",      "icon": "◆", "group": "Workspace"},
     "my_schedule":  {"label": "My Schedule",   "icon": "📅", "group": "Workspace"},
@@ -92,7 +100,7 @@ OFFICE_MODULES = {
     32: ["procurement", "approvals"],                                              # Purchase
     33: ["assets", "procurement"],                                                 # Store / Inventory
     34: ["assets"],                                                               # Security
-    35: ["students", "directory"],                                                 # Front Office
+    35: ["frontdesk_dashboard", "frontdesk_visitors", "frontdesk_verify", "frontdesk_appointments", "frontdesk_helpdesk", "frontdesk_calls", "frontdesk_directory", "frontdesk_delegations"],
     36: ["students", "academics", "attendance", "examinations", "scores", "finance",         # Student Portal
          "library", "hostel", "transport", "placements", "grievance"],
     37: ["students", "finance"],                                                   # Parent Portal
@@ -159,8 +167,8 @@ ACTION_OFFICE_ALLOW = {
     ("academic_calendar", "create"): {1, 2, 4, 5},
     ("academic_calendar", "edit"): {1, 2, 4, 5},
     ("academic_calendar", "delete"): {1, 2, 4, 5},
-    ("students", "add"): {15, 35},                    # Admissions / Front office own creation
-    ("students", "edit"): {10, 15, 35},               # Principal has oversight, not record editing
+    ("students", "add"): {15},                        # Admissions owns student creation
+    ("students", "edit"): {10, 15},                   # HOD and Admissions maintain records
     ("academics", "create_section"): {6, 10, 17},     # Dean Acad, HOD, Acad Coordinator
     ("academics", "create_course"): {6, 10, 17},      # Curriculum owners
     ("academics", "assign_faculty"): {6, 10, 17},
@@ -221,6 +229,10 @@ def action_allowed_for_office(module: str, action: str, office_n: int) -> bool:
 
 def modules_for_office(n: int) -> list:
     """Ordered, de-duplicated module list for an office."""
+    # Keep only the route shell needed for the future Front Office dashboard.
+    # Shared base modules remain unchanged for every other office.
+    if n == 35:
+        return list(OFFICE_MODULES[35])
     mods = list(OFFICE_MODULES.get(n, []))
     if n in {4, 5, 6, 10, 17}:
         mods.append("curriculum")

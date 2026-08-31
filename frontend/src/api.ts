@@ -24,6 +24,24 @@ async function req(path: string, opts: RequestInit = {}) {
 }
 
 export const api = {
+  frontdeskDashboard: () => req('/frontdesk/dashboard'),
+  frontdeskVisitors: (status = '', q = '') => req(`/frontdesk/visitors?status=${encodeURIComponent(status)}&q=${encodeURIComponent(q)}`),
+  createFrontdeskVisitor: (body: any) => req('/frontdesk/visitors', { method: 'POST', body: JSON.stringify(body) }),
+  updateFrontdeskVisitor: (id: string, body: any) => req(`/frontdesk/visitors/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  frontdeskVisitorStatus: (id: string, status: string) => req(`/frontdesk/visitors/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) }),
+  deleteFrontdeskVisitor: (id: string) => req(`/frontdesk/visitors/${id}`, { method: 'DELETE' }),
+  validateFrontdeskPass: (pass: string) => req(`/frontdesk/passes/${encodeURIComponent(pass)}/validate`),
+  scanFrontdeskPass: (pass: string) => req(`/frontdesk/passes/${encodeURIComponent(pass)}/scan`, { method: 'POST' }),
+  frontdeskAppointments: (status = '') => req(`/frontdesk/appointments?status=${encodeURIComponent(status)}`),
+  createFrontdeskAppointment: (body: any) => req('/frontdesk/appointments', { method: 'POST', body: JSON.stringify(body) }),
+  frontdeskTickets: (status = '') => req(`/frontdesk/tickets?status=${encodeURIComponent(status)}`),
+  createFrontdeskTicket: (body: any) => req('/frontdesk/tickets', { method: 'POST', body: JSON.stringify(body) }),
+  frontdeskCalls: () => req('/frontdesk/calls'),
+  createFrontdeskCall: (body: any) => req('/frontdesk/calls', { method: 'POST', body: JSON.stringify(body) }),
+  frontdeskDirectory: () => req('/frontdesk/directory'),
+  frontdeskEmployees: () => req('/frontdesk/employees'),
+  frontdeskDelegations: () => req('/frontdesk/delegations'),
+  frontdeskReports: () => req('/frontdesk/reports'),
   login: (username: string, password: string) =>
     req('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
   me: () => req('/me'),

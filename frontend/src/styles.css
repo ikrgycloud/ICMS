@@ -212,6 +212,39 @@ h1, h2, h3, h4 { font-weight: 600; line-height: 1.2; }
 .inp:focus, .select:focus { outline: none; border-color: var(--crimson-2); box-shadow: 0 0 0 3px rgba(138,31,43,.1); }
 .inp-sm { max-width: 90px; padding: 7px 9px; }
 
+/* Front Desk workspace */
+.frontdesk-visitor-form, .frontdesk-appointment-form, .frontdesk-ticket-form { border-top: 3px solid var(--crimson-2); }
+.frontdesk-visitor-form h3, .frontdesk-appointment-form h3, .frontdesk-ticket-form h3 { margin-bottom: 18px; }
+.frontdesk-visitor-form .form-row, .frontdesk-scan-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.frontdesk-visitor-form .inp, .frontdesk-visitor-form .select { flex: 1 1 170px; }
+.frontdesk-visitor-form .btn { min-height: 41px; }
+.frontdesk-scan-actions .inp { flex: 1 1 260px; }
+.frontdesk-scan-actions .btn, .frontdesk-scan-actions label.btn { min-height: 41px; display: inline-flex; align-items: center; gap: 7px; }
+.frontdesk-appointment-form label, .frontdesk-ticket-form label { display: grid; gap: 6px; font-size: 12px; font-weight: 600; color: var(--txt-soft); }
+.frontdesk-host-picker { position: relative; }
+.frontdesk-host-menu { position: absolute; z-index: 30; top: calc(100% + 5px); left: 0; right: 0; max-height: 250px; overflow-y: auto; background: var(--paper); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow-lg); padding: 5px; }
+.frontdesk-host-option { display: grid; width: 100%; gap: 3px; padding: 10px 11px; text-align: left; border-radius: 7px; color: var(--txt); }
+.frontdesk-host-option:hover { background: var(--mist); color: var(--crimson); }
+.frontdesk-host-option small { color: var(--txt-mute); font-weight: 400; }
+.frontdesk-ticket-form textarea { resize: vertical; min-height: 82px; }
+.frontdesk-delegation-filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.frontdesk-delegation-filters .inp { flex: 1 1 280px; }
+.frontdesk-delegation-filters .select { flex: 0 1 180px; }
+.frontdesk-dashboard-head { padding: 26px 28px; border-radius: var(--r-xl); color: #fff; background: linear-gradient(120deg, #5e0d22, #8f1d34); box-shadow: var(--shadow-lg); }
+.frontdesk-dashboard-head h1 { color: #fff; margin: 0; }
+.frontdesk-dashboard-head p { color: #f9dce3; margin: 7px 0 0; }
+.frontdesk-kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; margin-top: 18px; }
+.frontdesk-kpi-row .kpi { margin: 0; padding: 20px; border: 1px solid #e6bdc7; border-top: 3px solid #8f1d34; border-radius: 14px; background: linear-gradient(145deg, #fff, #fff4f6); box-shadow: var(--shadow-xs); }
+.frontdesk-dashboard-panels { margin-top: 22px; }
+.frontdesk-chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 22px; }
+.frontdesk-chart { border-top: 3px solid #8f1d34; }
+.frontdesk-chart h3 { color: #5e0d22; margin-bottom: 16px; }
+.frontdesk-chart-row { margin: 13px 0; }
+.frontdesk-chart-row > div:first-child { display: flex; justify-content: space-between; margin-bottom: 6px; color: #5e0d22; font-size: 12px; }
+.frontdesk-chart-track { height: 9px; overflow: hidden; border-radius: 999px; background: #f4dce2; }
+.frontdesk-chart-track span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #a62a45, #6f1028); }
+@media (max-width: 720px) { .frontdesk-chart-grid { grid-template-columns: 1fr; } }
+
 /* ============================ MODAL ============================ */
 .modal-bg { position: fixed; inset: 0; background: rgba(16,22,34,.5); backdrop-filter: blur(3px); display: grid; place-items: center; z-index: 80; animation: fade .2s; padding: 20px; }
 .modal { width: 100%; max-width: 520px; background: var(--paper); border-radius: var(--r-xl); box-shadow: var(--shadow-lg); overflow: hidden; animation: pop .24s ease; }

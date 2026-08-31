@@ -38,6 +38,11 @@ def gate(s, ctx, module: str, action: str, amount=None):
     verb = MODULE_ACTIONS.get(module, {}).get(action, "view")
     o = office(ctx["office_n"])
     rbac = rbac_for(ctx["office_n"], o["level"], verb)
+    # Front Office cleanup is enforced server-side. Hiding its sidebar alone
+    # must never leave shared domain APIs reachable with a copied URL/token.
+    if ctx["office_n"] == 35 and module not in modules_for_office(35):
+        from authority import Decision, DENY
+        return Decision(DENY, f"{module} is not available to Front Office", rbac), verb
     # Office-level reservation of sensitive actions (Document §9 invariants, §10).
     if action != "view" and not action_allowed_for_office(module, action, ctx["office_n"]):
         from authority import Decision, DENY
@@ -61,6 +66,8 @@ def gate(s, ctx, module: str, action: str, amount=None):
 def can(s, ctx, module: str, action: str) -> bool:
     verb = MODULE_ACTIONS.get(module, {}).get(action, "view")
     o = office(ctx["office_n"])
+    if ctx["office_n"] == 35 and module not in modules_for_office(35):
+        return False
     if action != "view" and not action_allowed_for_office(module, action, ctx["office_n"]):
         return False
     return rbac_for(ctx["office_n"], o["level"], verb) not in ("Not Allowed",)
@@ -153,6 +160,8 @@ def workspace(ctx=Depends(auth), s=Depends(db)):
 # --------------------------------------------------------------------------- #
 @router.get("/overview")
 def overview(ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] == 35:
+        raise HTTPException(403, "The generic institutional overview is not available to Front Office")
     def c(model):
         return s.query(model).count()
     stats = {
