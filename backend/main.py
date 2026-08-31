@@ -39,6 +39,7 @@ from portal_api import router as portal_router
 from integrations_api import router as integrations_router
 from sms_api import router as sms_router
 from domain_seed import seed_domain
+import domain_models as D
 
 # Use the same named security scheme as modular routers. Swagger UI now has a
 # single Authorize action which applies the bearer token to protected APIs.
@@ -58,12 +59,52 @@ app.include_router(sms_router)
 def _startup():
     for _ in range(30):
         try:
+            _ensure_payment_status_columns()
             print("seed:", seed())
             print("domain:", seed_domain())
+            _reconcile_fee_structure_approvals()
             return
         except Exception as e:
             print("waiting for db...", e)
             time.sleep(2)
+
+
+def _reconcile_fee_structure_approvals():
+    """Complete requests approved by the Principal under the former 3-step chain."""
+    s = SessionLocal()
+    try:
+        rows = (s.query(D.FeeStructure, WorkflowInstance)
+                .join(WorkflowInstance, D.FeeStructure.workflow_id == WorkflowInstance.id)
+                .filter(WorkflowInstance.process_key == "fee_structure",
+                        WorkflowInstance.state.in_(("under_review", "reviewed")),
+                        WorkflowInstance.current_stage >= 2)
+                .all())
+        for structure, workflow in rows:
+            workflow.state = "approved"
+            structure.status = "APPROVED"
+            workflow.updated_at = structure.updated_at = datetime.utcnow()
+            notify(s, workflow.initiator_id, "Fee structure approved",
+                   f"{workflow.title} is approved and ready to publish.", severity="info")
+        if rows:
+            s.commit()
+            print(f"reconciled {len(rows)} fee structure approval(s)")
+    finally:
+        s.close()
+
+def _ensure_payment_status_columns():
+    """Small forward-compatible migration for offline instrument clearance."""
+    from sqlalchemy import inspect, text
+    s = SessionLocal()
+    try:
+        if not inspect(s.bind).has_table("payments"):
+            return
+        s.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'success'"))
+        s.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS cleared_at TIMESTAMP"))
+        s.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS cleared_by VARCHAR DEFAULT ''"))
+        s.execute(text("UPDATE payments SET status = 'success' WHERE status IS NULL"))
+        s.commit()
+    finally:
+        s.close()
 
 
 def db():
@@ -464,7 +505,10 @@ class LoginIn(BaseModel):
 
 @app.post("/api/auth/login")
 def login(body: LoginIn, s=Depends(db)):
-    u = s.query(User).filter(User.username == body.username).first()
+    # IDs and email-style usernames should be convenient to type.  Preserve the
+    # stored username but compare case-insensitively at authentication time.
+    username = (body.username or "").strip().lower()
+    u = s.query(User).filter(func.lower(User.username) == username).first()
     if not u or u.password_hash != pwhash(body.password):
         raise HTTPException(401, "Invalid credentials")
     o = office(u.office_n)
@@ -903,6 +947,11 @@ def _notify_stage(s, wf, proc):
     owner = s.query(User).filter(User.office_n == proc["office_n"]).first()
     if owner:
         recipients.append(owner)
+    # Fee structures are prepared by Finance and begin at the Principal/Campus
+    # Head review stage.  Surface the request in the actual decision-makers'
+    # notification inboxes as well as in their workflow inbox.
+    if wf.process_key == "fee_structure" and stage == 1:
+        recipients.extend(s.query(User).filter(User.office_n.in_((3, 4))).all())
     recipients.extend(_delegation_targets_for_workflow(s, wf))
 
     seen = set()
@@ -956,7 +1005,11 @@ def decide_workflow(body: DecideWF, ctx=Depends(auth), s=Depends(db)):
         amount=wf.amount, approval_limit=limit,
         requester_id=wf.initiator_id,
         active_delegation=active_delegations_for(s, u.id),
-        target_scope_level=wf.scope_level,
+        # Fee setup is reviewed by the Principal for the structure's campus.
+        # Retaining the Finance Manager's university scope here would deny the
+        # campus-scoped Principal, including for records submitted before the
+        # workflow scope was corrected.
+        target_scope_level="campus" if wf.process_key == "fee_structure" else wf.scope_level,
         escalate_to=proc["escalation"] if proc else None,
     )
 
@@ -991,6 +1044,17 @@ def decide_workflow(body: DecideWF, ctx=Depends(auth), s=Depends(db)):
         wf.current_stage += 1
     else:  # DENY
         pass  # state unchanged; decision recorded
+
+    if wf.process_key == "fee_structure":
+        structure = s.query(D.FeeStructure).filter(D.FeeStructure.workflow_id == wf.id).first()
+        if structure:
+            if wf.state == "approved":
+                structure.status = "APPROVED"
+            elif wf.state == "rejected":
+                structure.status = "REJECTED"
+            elif wf.state in ("under_review", "reviewed", "escalated"):
+                structure.status = "UNDER_REVIEW"
+            structure.updated_at = datetime.utcnow()
 
     wf.updated_at = datetime.utcnow()
     s.commit()
@@ -1128,6 +1192,11 @@ def list_workflows(scope: str = "all", ctx=Depends(auth), s=Depends(db)):
         own_rows = (q.filter(WorkflowInstance.office_n == ctx["office_n"],
                              WorkflowInstance.state.in_(pending_states))
                      .order_by(desc(WorkflowInstance.updated_at)).all())
+        if ctx["office_n"] in (3, 4):
+            fee_rows = (q.filter(WorkflowInstance.process_key == "fee_structure",
+                                 WorkflowInstance.state.in_(pending_states))
+                        .order_by(desc(WorkflowInstance.updated_at)).all())
+            own_rows = list({row.id: row for row in [*own_rows, *fee_rows]}.values())
         delegated = active_delegations_for(s, ctx["sub"])
         if not delegated:
             rows = own_rows[:100]

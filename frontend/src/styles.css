@@ -202,6 +202,49 @@ h1, h2, h3, h4 { font-weight: 600; line-height: 1.2; }
 .btn-disabled { background: var(--bg-2); color: var(--txt-mute); cursor: not-allowed; border: 1px solid var(--line); }
 .btn-sm { padding: 6px 12px; font-size: 12px; }
 .row-actions { display: inline-flex; gap: 6px; justify-content: flex-end; }
+
+/* Finance Manager workspace */
+.finance-workspace { max-width: 1400px; margin: 0 auto; }
+.finance-summary { display:grid; grid-template-columns:1.55fr repeat(3,1fr); gap:1px; margin:0 0 22px; border:1px solid #dbe3ee; border-radius:16px; overflow:hidden; background:#dbe3ee; box-shadow:0 8px 22px rgba(21,48,81,.06); }
+.finance-summary-main { min-height:126px; padding:22px 26px; color:#fff; background:var(--crimson); display:flex; flex-direction:column; justify-content:center; }
+.finance-summary-main span,.finance-summary-main small { font-size:12px; opacity:.8; }.finance-summary-main strong { margin:4px 0; font-size:30px; letter-spacing:-.03em; }
+.finance-stat { min-height:126px; padding:22px 18px; background:#fff; display:flex; flex-direction:column; justify-content:center; gap:8px; }.finance-stat span { color:var(--txt-mute); font-size:12px; }.finance-stat b { font-size:20px; color:#173456; }.finance-stat.outstanding b { color:var(--red); }
+.finance-tabs { margin:0 0 16px; padding:5px; width:max-content; max-width:100%; border:1px solid var(--line); border-radius:12px; background:#fff; }.finance-tabs .tab { border-radius:8px; border-bottom:0; padding:9px 15px; }.finance-tabs .tab.on { color:#fff; background:linear-gradient(135deg, var(--crimson) 0%, var(--crimson-dk) 38%, #11161d 100%); box-shadow:inset 0 0 0 1px rgba(255,255,255,.06); }
+.finance-card { overflow:hidden; border:1px solid #dde5ef; box-shadow:0 8px 22px rgba(21,48,81,.045); }.finance-card-head { min-height:76px; padding:15px 18px; background:#fff; }.finance-card h3 { color:#173456; }
+.finance-search { display:flex; align-items:center; gap:9px; color:var(--txt-mute); font-size:12px; font-weight:600; }.finance-search .inp { width:260px; padding:9px 12px; }
+.finance-card .tbl thead th { padding:13px 18px; color:#52657b; background:#f4f7fb; }.finance-card .tbl tbody td { padding:14px 18px; }.finance-row-due { background:linear-gradient(90deg,rgba(192,57,47,.045),transparent); }.finance-row-paid { background:linear-gradient(90deg,rgba(13,148,136,.035),transparent); }.finance-card .btn[disabled] { opacity:.5; cursor:not-allowed; }
+@media (max-width:980px) { .finance-summary { grid-template-columns:repeat(2,1fr); }.finance-summary-main { grid-column:span 2; }.finance-card-head { align-items:flex-start; gap:12px; }.finance-search { width:100%; }.finance-search .inp { flex:1; width:auto; } }
+@media (max-width:600px) { .finance-summary { grid-template-columns:1fr; }.finance-summary-main { grid-column:auto; }.finance-tabs { display:flex; width:100%; overflow:auto; }.finance-tabs .tab { white-space:nowrap; }.finance-card .tbl { min-width:780px; } }
+
+/* Fee Management tabular workspace */
+.fee-management-card { overflow:hidden; border:1px solid #dce5ef; box-shadow:0 8px 22px rgba(21,48,81,.045); }.fee-management-head { padding:20px 22px; background:linear-gradient(90deg,#f8fbff,#fff); }.fee-management-head h3 { margin:2px 0 4px; color:#173456; }.fee-management-eyebrow { color:#2465a6; text-transform:uppercase; letter-spacing:.09em; font-size:10px; font-weight:700; }
+.fee-management-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:13px 22px; border-top:1px solid #e8eef5; border-bottom:1px solid #dce5ef; background:#fff; }.fee-management-toolbar b,.fee-management-toolbar span { display:block; }.fee-management-toolbar b { color:#183759; font-size:13px; }.fee-management-toolbar span { margin-top:3px; color:var(--txt-mute); font-size:11px; }.fee-view-switch { display:flex; padding:3px; border-radius:9px; background:#edf3f9; }.fee-view-switch button { padding:7px 11px; border-radius:7px; color:#597086; font-size:12px; font-weight:600; }.fee-view-switch button.on { color:#fff; background:#1a548c; box-shadow:0 1px 3px rgba(21,48,81,.2); }
+.fee-management-card > .tbl-scroll .tbl { min-width:920px; }.fee-management-card > .tbl-scroll .tbl thead th { padding:13px 20px; background:#f3f7fb; color:#52677d; }.fee-management-card > .tbl-scroll .tbl tbody td { padding:15px 20px; }.fee-management-card > .tbl-scroll .tbl tbody td:first-child b { color:#173d70; }.fee-management-card > .tbl-scroll .tbl small { display:block; max-width:360px; margin-top:4px; color:var(--txt-mute); font-size:11px; line-height:1.35; }.fee-management-card > .tbl-scroll .tbl tbody tr:hover { background:#f6faff; }.fee-management-card .row-actions { gap:7px; }.fee-management-card .pill { text-transform:capitalize; }.fee-management-card .mono { color:#516477; font-size:12px; }
+@media (max-width:720px) { .fee-management-head,.fee-management-toolbar { align-items:flex-start; flex-direction:column; padding:16px; }.fee-management-head .row-actions { justify-content:flex-start; flex-wrap:wrap; }.fee-view-switch { width:100%; }.fee-view-switch button { flex:1; }.fee-management-card > .tbl-scroll .tbl { min-width:860px; } }
+
+/* Finance Manager overview */
+.finance-overview { max-width:1320px; margin:0 auto; }.finance-overview-hero { display:flex; align-items:center; justify-content:space-between; gap:24px; min-height:160px; padding:28px 30px; border-radius:18px; color:#fff; background:var(--crimson); box-shadow:0 14px 32px rgba(138,31,43,.20); }.finance-overview-hero span,.finance-overview-hero small { display:block; font-size:12px; opacity:.84; }.finance-overview-hero strong { display:block; margin:5px 0; font-size:34px; letter-spacing:-.04em; }.finance-overview-rate { display:flex; flex-direction:column; align-items:flex-end; gap:3px; text-align:right; }.finance-overview-rate b { font-size:29px; }.finance-overview-rate button { margin-top:7px; padding:8px 11px; border:1px solid rgba(255,255,255,.45); border-radius:8px; color:#fff; font-weight:600; font-size:12px; }.finance-overview-kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin:16px 0 20px; }.finance-overview-kpis > div { padding:17px 18px; border:1px solid #dde5ef; border-radius:12px; background:#fff; }.finance-overview-kpis span,.finance-overview-kpis b { display:block; }.finance-overview-kpis span { color:var(--txt-mute); font-size:12px; }.finance-overview-kpis b { margin-top:6px; color:#183b68; font-size:20px; }.finance-overview-kpis .due b,.finance-due b { color:var(--red); }.finance-overview-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }.finance-overview-card { overflow:hidden; }.finance-activity-list { padding-top:4px; }.finance-activity { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:13px 0; border-bottom:1px solid var(--line-2); }.finance-activity:last-child { border-bottom:0; }.finance-activity b,.finance-activity small { display:block; }.finance-activity small { margin-top:4px; color:var(--txt-mute); font-size:11px; }.finance-activity > span { text-align:right; }.finance-activity > span > b { color:#183b68; font-size:13px; }
+@media (max-width:780px) { .finance-overview-hero { align-items:flex-start; flex-direction:column; }.finance-overview-rate { align-items:flex-start; text-align:left; }.finance-overview-kpis,.finance-overview-grid { grid-template-columns:1fr 1fr; } }
+@media (max-width:480px) { .finance-overview-hero { padding:22px; }.finance-overview-kpis,.finance-overview-grid { grid-template-columns:1fr; }.finance-overview-hero strong { font-size:29px; } }
+
+/* Student fee portal */
+.student-fees-page { max-width: 1280px; margin: 0 auto; }
+.student-fee-hero { display:flex; align-items:center; justify-content:space-between; padding:24px 28px; margin:0 0 20px; border-radius:18px; color:#fff; background:linear-gradient(120deg,#8a1f2b,#bd3a48); box-shadow:0 12px 30px rgba(138,31,43,.18); }
+.student-fee-hero.is-clear { background:linear-gradient(120deg,#087c6d,#12a387); }
+.student-fee-hero span,.student-fee-hero small { display:block; opacity:.84; font-size:12px; }
+.student-fee-hero strong { display:block; font-family:var(--ff-display); font-size:34px; margin:4px 0; }
+.student-fee-hero-mark { display:grid; place-items:center; width:58px; height:58px; border-radius:50%; background:rgba(255,255,255,.16); font-size:30px; font-weight:700; }
+.student-fees-grid { display:grid; grid-template-columns:minmax(0,1.75fr) minmax(280px,.75fr); gap:20px; align-items:start; }
+.student-invoices-card .card-h { align-items:center; }
+.student-fee-count { background:var(--mist); border:1px solid var(--line); border-radius:999px; padding:5px 10px; font-size:11px; color:var(--txt-soft); }
+.student-fee-filter { display:flex; align-items:center; gap:8px; }.student-fee-filter .select { width:auto; min-width:150px; padding:7px 26px 7px 9px; font-size:12px; }
+.student-invoices-card td:first-child small,.payment-history-list small { display:block; margin-top:4px; color:var(--txt-mute); font-size:11px; }
+.student-invoices-card .invoice-due { background:linear-gradient(90deg,rgba(192,57,47,.045),transparent); }
+.student-invoices-card .invoice-paid { background:linear-gradient(90deg,rgba(13,148,136,.045),transparent); }
+.invoice-balance { color:var(--red); }.invoice-paid .invoice-balance { color:var(--teal-dk); }
+.student-payment-history .snap { padding:13px 0; align-items:center; }.payment-method { text-transform:capitalize; color:var(--teal-dk); font-size:12px; font-weight:600; }
+@media (max-width: 860px) { .student-fees-grid { grid-template-columns:1fr; } }
+@media (max-width: 560px) { .student-fee-hero { padding:20px; }.student-fee-hero strong { font-size:28px; }.student-invoices-card .tbl { min-width:720px; } }
 .linkish { color: var(--crimson); font-size: 12.5px; font-weight: 600; }
 .linkish:hover { text-decoration: underline; }
 
@@ -216,6 +259,16 @@ h1, h2, h3, h4 { font-weight: 600; line-height: 1.2; }
 .modal-bg { position: fixed; inset: 0; background: rgba(16,22,34,.5); backdrop-filter: blur(3px); display: grid; place-items: center; z-index: 80; animation: fade .2s; padding: 20px; }
 .modal { width: 100%; max-width: 520px; background: var(--paper); border-radius: var(--r-xl); box-shadow: var(--shadow-lg); overflow: hidden; animation: pop .24s ease; }
 .modal.modal-wide { max-width: 760px; }
+.modal.affected-students-modal { width: min(1120px, 96vw); max-width: 1120px; max-height: 88vh; display: flex; flex-direction: column; }
+.affected-students-modal .modal-b { min-height: 0; overflow: auto; padding: 18px 20px 10px; }
+.affected-students-modal .hint { margin: 0 0 14px; font-weight: 600; }
+.affected-students-tools { display: flex; align-items: center; gap: 14px; margin: 0 0 14px; }
+.affected-students-tools .inp { max-width: 390px; }
+.affected-students-tools span { color: var(--txt-mute); font-size: 12px; white-space: nowrap; }
+.affected-students-modal .tbl { min-width: 940px; }
+.affected-students-modal .tbl tbody td { white-space: nowrap; }
+.affected-students-modal .tbl tbody td:nth-child(2) { white-space: normal; min-width: 190px; }
+.affected-students-modal .tbl small { display: block; margin-top: 3px; color: var(--txt-mute); }
 @keyframes pop { from { transform: scale(.96); opacity: 0; } to { transform: none; opacity: 1; } }
 .modal-h { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px; border-bottom: 1px solid var(--line-2); }
 .modal-h h3 { font-family: var(--ff-display); font-size: 19px; }
@@ -223,6 +276,34 @@ h1, h2, h3, h4 { font-weight: 600; line-height: 1.2; }
 .modal-x:hover { background: var(--mist); }
 .modal-b { padding: 24px; }
 .modal-f { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 24px; border-top: 1px solid var(--line-2); background: var(--mist); }
+
+/* Fee setup contains a full academic context plus a variable number of lines. */
+.modal.fee-structure-modal {
+  width: min(960px, 96vw);
+  max-width: 960px;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+}
+.fee-structure-modal .modal-h { flex: 0 0 auto; padding: 18px 24px; }
+.fee-structure-modal .modal-b { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 22px 24px; scrollbar-gutter: stable; }
+.fee-structure-modal .modal-f { flex: 0 0 auto; }
+.fee-structure-modal h4 { margin: 22px 0 14px; padding-top: 18px; border-top: 1px solid var(--line-2); }
+.fee-structure-modal .grid-2 { gap: 12px 18px; }
+.fee-structure-modal .form-row { margin-bottom: 8px; }
+.fee-auto-note { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 18px; padding: 12px 14px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--mist); color: var(--txt-soft); font-size: 12px; }
+.fee-auto-note b { color: var(--txt); font-size: 13px; }
+
+@media (max-width: 700px) {
+  .modal.affected-students-modal { width: 100%; max-height: 94vh; border-radius: 16px; }
+  .affected-students-modal .modal-h, .affected-students-modal .modal-b, .affected-students-modal .modal-f { padding-left: 16px; padding-right: 16px; }
+  .affected-students-tools { align-items: stretch; flex-direction: column; gap: 7px; }
+  .affected-students-tools .inp { max-width: none; }
+  .modal.fee-structure-modal { width: 100%; max-height: 96vh; border-radius: 16px; }
+  .fee-structure-modal .modal-h, .fee-structure-modal .modal-b, .fee-structure-modal .modal-f { padding-left: 16px; padding-right: 16px; }
+  .fee-structure-modal .modal-f { justify-content: stretch; }
+  .fee-structure-modal .modal-f .btn { flex: 1; }
+}
 
 /* ============================ PILLS / TAGS ============================ */
 .pill { display: inline-block; font-family: var(--ff-mono); font-size: 10.5px; font-weight: 600; padding: 3px 9px; border-radius: 999px; text-transform: capitalize; }
@@ -1323,13 +1404,14 @@ h1, h2, h3, h4 { font-weight: 600; line-height: 1.2; }
   padding: clamp(16px, 1.7vw, 22px);
   color: #fff;
   background:
-    radial-gradient(circle at top right, rgba(239, 71, 111, .16), transparent 35%),
-    linear-gradient(135deg, #771427 0%, #5b1020 100%);
+    radial-gradient(circle at 20% 0%, rgba(255,255,255,.12), transparent 28%),
+    radial-gradient(circle at 85% 20%, rgba(223, 57, 94, .18), transparent 32%),
+    linear-gradient(135deg, #8a1f2b 0%, #6d1822 36%, #171b20 100%);
   display: grid;
   gap: 16px;
   align-content: space-between;
   min-height: 258px;
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.06), 0 18px 30px rgba(18, 18, 22, .18);
 }
 
 .student-id-card-top { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }

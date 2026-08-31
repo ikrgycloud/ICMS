@@ -13,6 +13,9 @@ from sqlalchemy.orm import sessionmaker
 
 from models import (Base, Tenant, OrgScope, Person, User, Role, Permission,
                     RolePermission, ApprovalLimit, UserRole, Designation)
+# Register domain tables before additive schema creation.  This keeps command-line
+# bootstrap and test setup consistent with FastAPI startup.
+import domain_models  # noqa: F401
 from authority import pwhash, VERBS, scope_covers
 from matrices import (rbac_for, APPROVAL_LIMITS, scope_for, APPROVAL_MATRIX)
 
@@ -93,6 +96,34 @@ def ensure_additive_schema():
         ],
         "book_loans": [
             ("student_id", "VARCHAR"),
+        ],
+        "fee_invoices": [
+            ("fee_structure_id", "VARCHAR"),
+            ("invoice_number", "VARCHAR DEFAULT ''"),
+            ("academic_year_id", "VARCHAR DEFAULT ''"),
+            ("semester_id", "VARCHAR DEFAULT ''"),
+            ("fee_assignment_id", "VARCHAR DEFAULT ''"),
+            ("gross_amount", "FLOAT DEFAULT 0"),
+            ("scholarship_amount", "FLOAT DEFAULT 0"),
+            ("waiver_amount", "FLOAT DEFAULT 0"),
+            ("net_amount", "FLOAT DEFAULT 0"),
+        ],
+        "payments": [
+            ("challan_id", "VARCHAR"),
+            ("remarks", "VARCHAR DEFAULT ''"),
+        ],
+        "academic_rollovers": [
+            ("executed_by", "VARCHAR DEFAULT ''"), ("executed_at", "TIMESTAMP"),
+            ("remarks", "TEXT DEFAULT ''"),
+        ],
+        "academic_rollover_decisions": [
+            ("academic_status", "VARCHAR DEFAULT 'PENDING'"), ("finance_status", "VARCHAR DEFAULT 'CLEAR'"),
+            ("outstanding_amount", "FLOAT DEFAULT 0"), ("carry_forward_amount", "FLOAT DEFAULT 0"),
+            ("processed_at", "TIMESTAMP"),
+        ],
+        "complaints": [("student_id", "VARCHAR")],
+        "fee_structures": [
+            ("workflow_id", "VARCHAR"),
         ],
     }
 

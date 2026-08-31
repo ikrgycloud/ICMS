@@ -11,6 +11,7 @@ import Overview from './modules/Overview'
 import Calendar from './modules/Calendar'
 import MySchedule from './modules/MySchedule'
 import AcademicCalendar from './modules/AcademicCalendar'
+import AcademicRollover from './modules/AcademicRollover'
 import Students from './modules/Students'
 import Academics from './modules/Academics'
 import Curriculum from './modules/Curriculum'
@@ -141,7 +142,9 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     // HR module.  It has its own route so that the list/profile experience is
     // retained when opened from the dashboard KPI or the Principal sidebar.
     const principalVirtualModule = user?.office_n === 4 && ['faculty_staff', 'curriculum', 'courses_subjects'].includes(view)
-    if (!principalVirtualModule && !ws.modules.some((module: any) => module.key === view)) {
+    // Finance is a student self-service destination even though students do
+    // not receive the staff Finance workspace capability from the backend.
+    if (!principalVirtualModule && !(user?.persona === 'student' && view === 'finance') && !ws.modules.some((module: any) => module.key === view)) {
       setView(ws.modules[0].key)
     }
   }, [ws, view, user?.office_n])
@@ -179,9 +182,18 @@ export default function App({ onLogout }: { onLogout: () => void }) {
 
   const rawModules = ws?.modules || []
   const displayModules = useMemo(
-    () => rawModules
+    () => {
+      const modules = rawModules
       .filter((module: any) => !(user?.persona === 'student' && module.key === 'students'))
-      .map((module: any) => ({ ...module, ...displayMeta(user, module) })),
+      // Finance Manager works only with fee operations and fee-approval tasks.
+      // Governance matrices and generic administration screens are not part of this portal.
+      .filter((module: any) => user?.office_n !== 22 || ['overview', 'finance', 'rollover', 'approvals', 'audit'].includes(module.key))
+      .map((module: any) => ({ ...module, ...displayMeta(user, module) }))
+      if (user?.persona === 'student' && !modules.some((module: any) => module.key === 'finance')) {
+        modules.push({ key: 'finance', label: 'Fees & Payments', group: 'Student Services', enabled: true })
+      }
+      return modules
+    },
     [rawModules, user],
   )
 
@@ -393,6 +405,8 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <MySchedule user={user} go={go} />
     case 'academic_calendar':
       return <AcademicCalendar user={user} caps={caps} />
+    case 'rollover':
+      return <AcademicRollover user={user} />
     case 'integrations':
       return <Integrations caps={caps} />
     case 'analytics':
@@ -420,7 +434,8 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <Admissions caps={caps} />
     case 'finance':
       if (user.persona === 'student') return <StudentFeesView />
-      return <Finance caps={caps} />
+      if (user.persona === 'parent') return <ParentHome user={user} />
+      return <Finance caps={caps} user={user} onOpenApprovals={() => go('approvals')} />
     case 'library':
       if (user.persona === 'student') return <StudentLibraryView />
       return <Library caps={caps} />
