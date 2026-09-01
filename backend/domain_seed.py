@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta
 
 from database import (SessionLocal, TENANT, engine, DEMO_USERNAMES, CAMPUS_SCOPES,
                       slug, ensure_additive_schema, ensure_versioned_migrations)
+from authority import pwhash
 from matrices import APPROVAL_MATRIX
 from models import (Base, Person, Role, User, UserRole, Delegation, DelegationPolicy, DelegationProfile,
                     WorkflowInstance, WorkflowProfile, Approval, Notification,
@@ -3525,6 +3526,74 @@ def _seed_fee_setup_reference_data(s):
     s.commit()
 
 
+def _seed_student_portal_accounts(s):
+    """Create an individual portal login for every seeded student.
+
+    Roll numbers are the usernames and all demo accounts start with the same
+    documented seed password. The shared ``student`` account remains bound to
+    its showcase profile, so it is not replaced by a roll-number login.
+    """
+    student_role = s.get(Role, "role_36_0")
+    for student in s.query(D.Student).order_by(D.Student.roll_no).all():
+        username = (student.roll_no or "").strip().lower()
+        if not username:
+            continue
+
+        user = s.get(User, student.user_id) if student.user_id else None
+        # Keep the established shared showcase login exactly as-is.
+        if user and user.username == "student":
+            continue
+        if not user:
+            user = s.query(User).filter(User.username.ilike(username)).first()
+        person_id = f"person_student_{username}"
+        user_id = f"user_student_{username}"
+
+        if not user:
+            person = s.get(Person, person_id)
+            if not person:
+                person = Person(
+                    id=person_id,
+                    tenant_id=student.tenant_id or TENANT,
+                    name=student.name,
+                    email=student.email or f"{username}@icms.edu",
+                    contact="",
+                )
+                s.add(person)
+            user = User(
+                id=user_id,
+                tenant_id=student.tenant_id or TENANT,
+                person_id=person_id,
+                username=username,
+                password_hash=pwhash("demo123"),
+                status="active",
+                mfa_enabled=False,
+                office_n=36,
+                role="Student",
+                scope_level="individual",
+                scope_ref=student.id,
+            )
+            s.add(user)
+
+        # Older admissions demo data used a placeholder instead of a usable
+        # password hash. Upgrade only that seed placeholder on repeat runs.
+        if user.password_hash == "seed":
+            user.password_hash = pwhash("demo123")
+
+        student.user_id = user.id
+        user.scope_ref = student.id
+        if student_role:
+            link_id = f"ur_student_{student.id}"
+            if not s.get(UserRole, link_id):
+                s.add(UserRole(
+                    id=link_id,
+                    user_id=user.id,
+                    role_id=student_role.id,
+                    org_scope_id=student.id,
+                ))
+
+    s.commit()
+
+
 def seed_domain():
     ensure_versioned_migrations()
     ensure_additive_schema()
@@ -3545,6 +3614,7 @@ def seed_domain():
         _seed_admissions_phase3(s)
         _seed_admissions_phase4(s)
         _seed_admissions_phase5(s)
+        _seed_student_portal_accounts(s)
         return {
             "status": "domain-seeded",
             "schools": s.query(D.School).count(),
