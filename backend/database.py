@@ -13,6 +13,9 @@ from sqlalchemy.orm import sessionmaker
 
 from models import (Base, Tenant, OrgScope, Person, User, Role, Permission,
                     RolePermission, ApprovalLimit, UserRole, Designation)
+# Register domain tables before additive schema creation.  This keeps command-line
+# bootstrap and test setup consistent with FastAPI startup.
+import domain_models  # noqa: F401
 from authority import pwhash, VERBS, scope_covers
 from matrices import (rbac_for, APPROVAL_LIMITS, scope_for, APPROVAL_MATRIX)
 
@@ -94,19 +97,43 @@ def ensure_additive_schema():
         "book_loans": [
             ("student_id", "VARCHAR"),
         ],
-        "transport_routes": [
-            ("route_code", "VARCHAR DEFAULT ''"),
-            ("description", "VARCHAR DEFAULT ''"),
-            ("status", "VARCHAR DEFAULT 'ACTIVE'"),
+        "fee_invoices": [
+            ("fee_structure_id", "VARCHAR"),
+            ("invoice_number", "VARCHAR DEFAULT ''"),
+            ("academic_year_id", "VARCHAR DEFAULT ''"),
+            ("semester_id", "VARCHAR DEFAULT ''"),
+            ("fee_assignment_id", "VARCHAR DEFAULT ''"),
+            ("gross_amount", "FLOAT DEFAULT 0"),
+            ("scholarship_amount", "FLOAT DEFAULT 0"),
+            ("waiver_amount", "FLOAT DEFAULT 0"),
+            ("net_amount", "FLOAT DEFAULT 0"),
         ],
-        "transport_drivers": [
-            ("user_id", "VARCHAR"),
-            ("vehicle_id", "VARCHAR"),
+        "payments": [
+            ("challan_id", "VARCHAR"),
+            ("cleared_at", "TIMESTAMP"),
+            ("cleared_by", "VARCHAR DEFAULT ''"),
+            ("remarks", "VARCHAR DEFAULT ''"),
         ],
-        "transport_stops": [
-            ("address", "VARCHAR DEFAULT ''"),
-            ("latitude", "FLOAT"),
-            ("longitude", "FLOAT"),
+        "academic_rollovers": [
+            ("executed_by", "VARCHAR DEFAULT ''"), ("executed_at", "TIMESTAMP"),
+            ("remarks", "TEXT DEFAULT ''"),
+        ],
+        "academic_rollover_decisions": [
+            ("academic_status", "VARCHAR DEFAULT 'PENDING'"), ("finance_status", "VARCHAR DEFAULT 'CLEAR'"),
+            ("outstanding_amount", "FLOAT DEFAULT 0"), ("carry_forward_amount", "FLOAT DEFAULT 0"),
+            ("processed_at", "TIMESTAMP"),
+        ],
+        "complaints": [("student_id", "VARCHAR")],
+        "fee_structures": [
+            ("academic_year", "VARCHAR DEFAULT ''"), ("campus", "VARCHAR DEFAULT ''"),
+            ("quota_id", "VARCHAR"), ("cycle_program_id", "VARCHAR"),
+            ("code", "VARCHAR DEFAULT ''"), ("academic_year_id", "VARCHAR"),
+            ("semester_id", "VARCHAR"), ("campus_id", "VARCHAR"), ("batch_id", "VARCHAR"),
+            ("student_type_id", "VARCHAR"), ("version", "INTEGER DEFAULT 1"),
+            ("workflow_id", "VARCHAR"), ("description", "TEXT DEFAULT ''"),
+            ("notes", "TEXT DEFAULT ''"), ("created_by", "VARCHAR DEFAULT ''"),
+            ("updated_by", "VARCHAR DEFAULT ''"), ("created_at", "TIMESTAMP"),
+            ("updated_at", "TIMESTAMP"),
         ],
     }
 
@@ -120,6 +147,12 @@ def ensure_additive_schema():
                 if column_name in existing:
                     continue
                 conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"))
+
+
+def ensure_versioned_migrations():
+    """Apply Admissions schema revisions without resetting existing data."""
+    from migrations.runner import upgrade
+    upgrade(engine)
 
 
 def office(n: int) -> dict:
@@ -186,6 +219,7 @@ def seed():
     _ensure_course_columns()
     _ensure_staff_contact_columns()
     ensure_additive_schema()
+    ensure_versioned_migrations()
     s = SessionLocal()
     try:
         # Tenant + scope tree (Document §6, §11).

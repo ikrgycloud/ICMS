@@ -5,6 +5,7 @@ Domain seed for ICMS.
 The seed is intentionally idempotent so repeated app startups keep enriching an
 existing local database instead of short-circuiting after the first run.
 """
+import json
 import random
 from datetime import date, datetime, timedelta
 
@@ -12,7 +13,7 @@ from database import (SessionLocal, TENANT, engine, DEMO_USERNAMES, CAMPUS_SCOPE
                       slug, ensure_additive_schema, ensure_versioned_migrations)
 from authority import pwhash
 from matrices import APPROVAL_MATRIX
-from models import (Base, User, Delegation, DelegationPolicy, DelegationProfile,
+from models import (Base, Person, Role, User, UserRole, Delegation, DelegationPolicy, DelegationProfile,
                     WorkflowInstance, WorkflowProfile, Approval, Notification,
                     DelegationOption, DelegationContext)
 import domain_models as D
@@ -1788,15 +1789,6 @@ def _seed_core_domain(s):
         s.add(D.TransportRoute(id=f"route_{i}", tenant_id=TENANT, name=name, stops=stops,
                                vehicle_no=f"KA-01-{R.randint(1000, 9999)}", seats=40,
                                seats_taken=R.randint(15, 40)))
-
-        route = s.get(D.TransportRoute, f"route_{i}")
-        route.route_code = f"TRN-{i:02d}"; route.description = "Campus transport route"; route.status = "ACTIVE"
-        for seq, stop_name in enumerate([x.strip() for x in stops.split(",")], 1):
-            if not s.query(D.TransportStop).filter_by(route_id=route.id, sequence=seq).first():
-                s.add(D.TransportStop(id=f"stop_{i}_{seq}", tenant_id=TENANT, route_id=route.id, name=stop_name, sequence=seq, pickup_time="07:30 AM", drop_time="08:05 AM"))
-        vehicle_id = f"vehicle_{i}"
-        if not s.get(D.TransportVehicle, vehicle_id):
-            s.add(D.TransportVehicle(id=vehicle_id, tenant_id=TENANT, vehicle_number=route.vehicle_no, capacity=route.seats, status="AVAILABLE"))
 
     for i in range(1, 21):
         cat = R.choice(["Lab Equipment", "Furniture", "IT Hardware", "Vehicle", "AV Equipment"])
@@ -3603,13 +3595,12 @@ def _seed_student_portal_accounts(s):
 
 
 def seed_domain():
-    # Domain models use their own declarative metadata; create those tables
-    # before any Transport (or other domain) seed/query runs.
-    D.Base.metadata.create_all(engine)
+    ensure_versioned_migrations()
     ensure_additive_schema()
     s = SessionLocal()
     try:
         _seed_core_domain(s)
+        _seed_fee_setup_reference_data(s)
         _seed_reference_extensions(s)
         _seed_calendar_data(s)
         _seed_chairman_workflows(s)
