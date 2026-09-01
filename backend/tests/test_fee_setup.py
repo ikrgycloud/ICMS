@@ -77,6 +77,11 @@ class FeeSetupTests(unittest.TestCase):
         status, updated = self._request("PUT", f"/api/fee-structures/{structure['id']}", self.finance_token, payload)
         self.assertEqual(status, 200, updated)
         self.assertEqual(float(updated["structure"]["gross_total"]), 58000)
+        # Listing reloads structures from the ORM in a fresh request.  This
+        # guards mapped timestamp/date fields used by the response serializer.
+        status, listed = self._request("GET", "/api/fee-structures", self.finance_token)
+        self.assertEqual(status, 200, listed)
+        self.assertTrue(any(item["id"] == structure["id"] for item in listed["structures"]))
 
     def test_duplicate_line_and_unauthorized_role_are_rejected(self):
         payload = self._payload(); payload["code"] = "TEST-FEE-INVALID"

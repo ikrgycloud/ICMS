@@ -3610,10 +3610,14 @@ def seed_domain():
         _seed_principal_schedule_events(s)
         _seed_development_backlog_history(s)
         _seed_development_principal_coverage(s)
-        _seed_admissions_phase2(s)
-        _seed_admissions_phase3(s)
-        _seed_admissions_phase4(s)
-        _seed_admissions_phase5(s)
+        # The consolidated domain model no longer includes the legacy
+        # AdmissionCycle aggregate.  Keep compatibility with databases/code
+        # variants that still provide it without breaking every app startup.
+        if hasattr(D, "AdmissionCycle"):
+            _seed_admissions_phase2(s)
+            _seed_admissions_phase3(s)
+            _seed_admissions_phase4(s)
+            _seed_admissions_phase5(s)
         _seed_student_portal_accounts(s)
         return {
             "status": "domain-seeded",

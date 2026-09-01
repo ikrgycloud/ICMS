@@ -2861,7 +2861,8 @@ def _fee_structure_payload(s, row):
             "student_type": student_types.get(row.student_type_id, ""), "version": row.version,
             "status": row.status, "effective_from": row.effective_from, "effective_to": row.effective_to,
             "description": row.description or "", "notes": row.notes or "", "created_at": row.created_at,
-            "updated_at": row.updated_at, "gross_total": sum((line.amount for line in lines), Decimal("0")),
+            "updated_at": row.updated_at,
+            "gross_total": sum((Decimal(str(line.amount or 0)) for line in lines), Decimal("0")),
             "lines": line_payloads}
 
 

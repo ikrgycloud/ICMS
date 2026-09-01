@@ -13,7 +13,16 @@ async function req(path: string, opts: RequestInit = {}) {
     if (!path.includes('/auth/login')) window.location.reload()
   }
   const txt = await res.text()
-  const data = txt ? JSON.parse(txt) : {}
+  let data: any = {}
+  if (txt) {
+    try {
+      data = JSON.parse(txt)
+    } catch {
+      // Reverse proxies and unhandled server errors can return plain text or
+      // HTML. Preserve a useful message instead of leaking a JSON parse error.
+      data = { detail: txt.trim() || `Request failed (${res.status})` }
+    }
+  }
   if (!res.ok) {
     const detail = Array.isArray(data.detail)
       ? data.detail.map((item: any) => item.msg || item.message || JSON.stringify(item)).join(', ')

@@ -777,11 +777,14 @@ class FeeStructure(Base):
     student_type_id = Column(String, nullable=True, index=True)
     version = Column(Integer, default=1)
     workflow_id = Column(String, nullable=True, index=True)
+    effective_from = Column(Date, nullable=True)
+    effective_to = Column(Date, nullable=True)
     description = Column(Text, default="")
     notes = Column(Text, default="")
     created_by = Column(String, default="")
     updated_by = Column(String, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class AcademicYear(Base):
@@ -983,6 +986,8 @@ class FeeStructureLine(Base):
     due_date = Column(Date, nullable=True)
     is_mandatory = Column(Boolean, default=True)
     description = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     __table_args__ = (UniqueConstraint("fee_structure_id", "fee_head_id", "installment_no", name="uq_fee_structure_line_installment"),)
 
 

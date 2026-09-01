@@ -12,6 +12,7 @@ import os
 import sys
 import uuid
 import time
+import threading
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 
@@ -68,22 +69,43 @@ def _startup():
     for _ in range(30):
         try:
             _ensure_payment_status_columns()
-            print("seed:", seed())
-            print("domain:", seed_domain())
-            frontdesk_session = SessionLocal()
-            try:
-                seed_frontdesk(frontdesk_session)
-            finally:
-                frontdesk_session.close()
-            _reconcile_fee_structure_approvals()
+            # The identity seed is small and required by authentication, so it
+            # remains part of startup.  The domain seed can update thousands of
+            # development rows and previously kept Uvicorn in its startup state
+            # for several minutes.  During that time nginx had no usable
+            # upstream and returned 502 for every /api request.
+            print("seed:", seed(), flush=True)
+            threading.Thread(
+                target=_seed_domain_after_startup,
+                name="icms-domain-seed",
+                daemon=True,
+            ).start()
             return
         except Exception as e:
-            print("waiting for db...", e)
+            print("waiting for db...", e, flush=True)
             time.sleep(2)
+
+
+def _seed_domain_after_startup():
+    """Finish idempotent development-data setup without blocking API readiness."""
+    try:
+        print("domain:", seed_domain(), flush=True)
+        frontdesk_session = SessionLocal()
+        try:
+            seed_frontdesk(frontdesk_session)
+        finally:
+            frontdesk_session.close()
+        _reconcile_fee_structure_approvals()
+    except Exception as exc:
+        # Keep the API available when optional demo data cannot be refreshed;
+        # the concrete failure still remains visible in container logs.
+        print("domain seed failed:", exc, flush=True)
 
 
 def _reconcile_fee_structure_approvals():
     """Complete requests approved by the Principal under the former 3-step chain."""
+    if not hasattr(D, "FeeStructure"):
+        return
     s = SessionLocal()
     try:
         rows = (s.query(D.FeeStructure, WorkflowInstance)
