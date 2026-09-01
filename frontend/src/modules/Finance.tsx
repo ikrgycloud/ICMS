@@ -228,7 +228,18 @@ function FeeSetup({ canManage, onOpenApprovals }: { canManage: boolean; onOpenAp
   const [affected, setAffected] = useState<any>(null)
   const [affectedSearch, setAffectedSearch] = useState('')
   const load = () => { api.feeHeads(true).then(r => setHeads(r.heads)).catch(e => setError(e.message)); api.feeStructures().then(r => setStructures(r.structures)).catch(e => setError(e.message)); api.feeReferenceData().then(setRefs).catch(e => setError(e.message)) }
-  useEffect(load, [])
+  useEffect(() => {
+    load()
+    // Approval happens in the Principal workspace, often while Finance remains
+    // open in another tab. Refresh on focus and periodically so APPROVED rows
+    // expose Publish / Apply without requiring a manual page reload.
+    window.addEventListener('focus', load)
+    const refreshTimer = window.setInterval(load, 15000)
+    return () => {
+      window.removeEventListener('focus', load)
+      window.clearInterval(refreshTimer)
+    }
+  }, [])
   async function saveHead() { try { setSaving(true); if (head.id) await api.updateFeeHead(head.id, head); else await api.createFeeHead(head); setHead(null); load() } catch (e:any) { setError(e.message) } finally { setSaving(false) } }
   async function toggle(h:any) { if (!confirm(`${h.is_active ? 'Deactivate' : 'Activate'} ${h.name}?`)) return; try { await api.setFeeHeadStatus(h.id, !h.is_active); load() } catch (e:any) { setError(e.message) } }
   async function saveDraft() { try { setSaving(true); const payload = {...draft, effective_from: draft.effective_from || null, effective_to: draft.effective_to || null, lines: draft.lines.map((x:any) => ({...x, amount: Number(x.amount), due_date: x.due_date || null}))}; if (draft.id) await api.updateFeeStructure(draft.id, payload); else await api.createFeeStructure(payload); setDraft(null); load() } catch (e:any) { setError(e.message) } finally { setSaving(false) } }

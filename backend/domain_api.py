@@ -2866,6 +2866,30 @@ def _fee_structure_payload(s, row):
             "lines": line_payloads}
 
 
+def _sync_fee_structure_workflow_status(s, rows):
+    """Keep fee setup status aligned with its completed approval workflow.
+
+    This also repairs structures approved before workflow/status synchronization
+    was added. Published structures are never moved backwards.
+    """
+    workflow_ids = {row.workflow_id for row in rows if row.workflow_id}
+    if not workflow_ids:
+        return
+    workflows = {row.id: row for row in s.query(WorkflowInstance).filter(WorkflowInstance.id.in_(workflow_ids)).all()}
+    changed = False
+    for row in rows:
+        workflow = workflows.get(row.workflow_id)
+        if not workflow or row.status == "PUBLISHED":
+            continue
+        target = "APPROVED" if workflow.state == "approved" else ("REJECTED" if workflow.state == "rejected" else None)
+        if target and row.status != target:
+            row.status = target
+            row.updated_at = datetime.utcnow()
+            changed = True
+    if changed:
+        s.commit()
+
+
 class FeeHeadIn(BaseModel):
     code: str = Field(min_length=1, max_length=60)
     name: str = Field(min_length=1, max_length=160)
@@ -3005,13 +3029,16 @@ def list_fee_structures(academic_year_id: str = "", semester_id: str = "", campu
     _fee_setup_gate(s, ctx, "view"); query = s.query(D.FeeStructure)
     for field, value in ((D.FeeStructure.academic_year_id, academic_year_id), (D.FeeStructure.semester_id, semester_id), (D.FeeStructure.campus_id, campus_id), (D.FeeStructure.program_id, program_id), (D.FeeStructure.batch_id, batch_id), (D.FeeStructure.student_type_id, student_type_id), (D.FeeStructure.status, status)):
         if value: query = query.filter(field == value)
-    return {"structures": [_fee_structure_payload(s, x) for x in query.order_by(desc(D.FeeStructure.updated_at)).all()]}
+    rows = query.order_by(desc(D.FeeStructure.updated_at)).all()
+    _sync_fee_structure_workflow_status(s, rows)
+    return {"structures": [_fee_structure_payload(s, x) for x in rows]}
 
 
 @router.get("/fee-structures/{structure_id}")
 def get_fee_structure(structure_id: str, ctx=Depends(auth), s=Depends(db)):
     _fee_setup_gate(s, ctx, "view"); row = s.get(D.FeeStructure, structure_id)
     if not row: raise HTTPException(404, "Fee structure not found")
+    _sync_fee_structure_workflow_status(s, [row])
     return {"structure": _fee_structure_payload(s, row)}
 
 
