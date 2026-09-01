@@ -9,7 +9,7 @@ import random
 from datetime import date, datetime, timedelta
 
 from database import (SessionLocal, TENANT, engine, DEMO_USERNAMES, CAMPUS_SCOPES,
-                      slug, ensure_additive_schema, ensure_versioned_migrations)
+                      slug, ensure_additive_schema)
 from authority import pwhash
 from matrices import APPROVAL_MATRIX
 from models import (Base, User, Delegation, DelegationPolicy, DelegationProfile,
