@@ -12,7 +12,7 @@ from database import (SessionLocal, TENANT, engine, DEMO_USERNAMES, CAMPUS_SCOPE
                       slug, ensure_additive_schema)
 from authority import pwhash
 from matrices import APPROVAL_MATRIX
-from models import (Base, User, Delegation, DelegationPolicy, DelegationProfile,
+from models import (Base, User, Person, Role, UserRole, Delegation, DelegationPolicy, DelegationProfile,
                     WorkflowInstance, WorkflowProfile, Approval, Notification,
                     DelegationOption, DelegationContext)
 import domain_models as D
@@ -3619,10 +3619,13 @@ def seed_domain():
         _seed_principal_schedule_events(s)
         _seed_development_backlog_history(s)
         _seed_development_principal_coverage(s)
-        _seed_admissions_phase2(s)
-        _seed_admissions_phase3(s)
-        _seed_admissions_phase4(s)
-        _seed_admissions_phase5(s)
+        # These seed phases require the newer admissions model set. Keep the
+        # base seed usable with deployments that do not have those models yet.
+        if hasattr(D, "AdmissionCycle"):
+            _seed_admissions_phase2(s)
+            _seed_admissions_phase3(s)
+            _seed_admissions_phase4(s)
+            _seed_admissions_phase5(s)
         _seed_student_portal_accounts(s)
         return {
             "status": "domain-seeded",
