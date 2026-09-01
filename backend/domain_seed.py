@@ -13,7 +13,11 @@ from database import (SessionLocal, TENANT, engine, DEMO_USERNAMES, CAMPUS_SCOPE
                       slug, ensure_additive_schema, ensure_versioned_migrations)
 from authority import pwhash
 from matrices import APPROVAL_MATRIX
+<<<<<<< HEAD
 from models import (Base, Person, Role, User, UserRole, Delegation, DelegationPolicy, DelegationProfile,
+=======
+from models import (Base, User, Person, Role, UserRole, Delegation, DelegationPolicy, DelegationProfile,
+>>>>>>> 88805c9ad11fb906248416960ac726ee37d10402
                     WorkflowInstance, WorkflowProfile, Approval, Notification,
                     DelegationOption, DelegationContext)
 import domain_models as D
@@ -3610,9 +3614,14 @@ def seed_domain():
         _seed_principal_schedule_events(s)
         _seed_development_backlog_history(s)
         _seed_development_principal_coverage(s)
+<<<<<<< HEAD
         # The consolidated domain model no longer includes the legacy
         # AdmissionCycle aggregate.  Keep compatibility with databases/code
         # variants that still provide it without breaking every app startup.
+=======
+        # These seed phases require the newer admissions model set. Keep the
+        # base seed usable with deployments that do not have those models yet.
+>>>>>>> 88805c9ad11fb906248416960ac726ee37d10402
         if hasattr(D, "AdmissionCycle"):
             _seed_admissions_phase2(s)
             _seed_admissions_phase3(s)
