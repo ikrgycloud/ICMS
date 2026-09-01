@@ -25,7 +25,11 @@ async function req(path: string, opts: RequestInit = {}) {
   }
   if (!res.ok) {
     const detail = Array.isArray(data.detail)
-      ? data.detail.map((item: any) => item.msg || item.message || JSON.stringify(item)).join(', ')
+      ? data.detail.map((item: any) => {
+          const field = Array.isArray(item.loc) ? item.loc.filter((part: any) => part !== 'body').join(' → ') : ''
+          const message = item.msg || item.message || JSON.stringify(item)
+          return field ? `${field}: ${message}` : message
+        }).join(', ')
       : data.detail
     throw new Error(detail || `Request failed (${res.status})`)
   }
