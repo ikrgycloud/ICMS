@@ -104,11 +104,8 @@ def _seed_domain_after_startup():
 
 def _reconcile_fee_structure_approvals():
     """Complete requests approved by the Principal under the former 3-step chain."""
-<<<<<<< HEAD
-=======
     # FeeStructure belongs to the optional domain model set. Older databases
     # can start normally without the reconciliation step.
->>>>>>> 88805c9ad11fb906248416960ac726ee37d10402
     if not hasattr(D, "FeeStructure"):
         return
     s = SessionLocal()
