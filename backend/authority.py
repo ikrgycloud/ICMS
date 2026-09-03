@@ -33,9 +33,9 @@ NOT_ALLOWED = "Not Allowed"
 
 # Permission verbs (Document §9 — 21 verbs stored in the permission catalog).
 VERBS = [
-    "view", "create", "edit", "delete", "approve", "reject", "submit", "verify",
-    "review", "assign", "export", "print", "download", "upload", "configure",
-    "publish", "lock", "unlock", "override", "audit", "delegate",
+    "view", "create", "edit", "delete", "approve", "reject", "submit", "receive",
+    "verify", "review", "assign", "export", "print", "download", "upload",
+    "configure", "publish", "lock", "unlock", "override", "audit", "delegate",
 ]
 
 # Org-scope tree levels (Document §11), broad -> narrow.

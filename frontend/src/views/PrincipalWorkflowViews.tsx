@@ -1,0 +1,20 @@
+import { useEffect, useState } from 'react'
+import { api } from '../api'
+import { Spinner } from './ui'
+
+export function ApprovalHistory() {
+  const [data, setData] = useState<any>(null), [q, setQ] = useState(''), [action, setAction] = useState('')
+  const load = () => { setData(null); api.approvalHistory({ q, action }).then(setData).catch(() => setData({ error: true, events: [] })) }
+  useEffect(() => { load() }, [])
+  if (!data) return <Spinner />
+  return <div className="fade-in principal-operations"><div className="page-head"><h1>Approval History</h1><p>Recorded workflow decisions for this institution.</p></div><div className="operations-filter"><input className="inp" value={q} onChange={e => setQ(e.target.value)} placeholder="Search request, module or approver"/><select className="select" value={action} onChange={e => setAction(e.target.value)}><option value="">All actions</option>{['ALLOW','DENY','ESCALATE','RECOMMEND'].map(x => <option key={x}>{x}</option>)}</select><button className="btn btn-crimson" onClick={load}>Filter</button><button className="btn btn-out" onClick={() => { setQ(''); setAction(''); setTimeout(load, 0) }}>Clear</button></div>{data.error ? <p className="principal-empty">Unable to load approval history. Please try again.</p> : <section className="card"><div className="tbl-scroll"><table className="tbl"><thead><tr><th>Request</th><th>Module</th><th>Requested by</th><th>Action</th><th>Approver</th><th>Comments</th><th>Date</th></tr></thead><tbody>{data.events.map((x: any) => <tr key={x.id}><td><b>{x.request}</b></td><td>{x.module}</td><td>{x.requested_by}</td><td><span className="tag">{x.action}</span></td><td>{x.approver}</td><td>{x.reason || '—'}</td><td>{new Date(x.at).toLocaleString()}</td></tr>)}</tbody></table>{!data.events.length && <p className="principal-empty">No approval events match these filters.</p>}</div></section>}</div>
+}
+
+export function Escalations() {
+  const [data, setData] = useState<any>(null), [q, setQ] = useState(''), [state, setState] = useState('')
+  const load = () => { setData(null); api.escalations({ q, state }).then(setData).catch(() => setData({ error: true, incoming: [], outgoing: [] })) }
+  useEffect(() => { load() }, [])
+  if (!data) return <Spinner />
+  const Table = ({ title, rows }: any) => <section className="card" style={{ marginTop: 16 }}><div className="card-h"><h3>{title}</h3><span className="hint">{rows.length} records</span></div><div className="tbl-scroll"><table className="tbl"><thead><tr><th>Reference</th><th>Module</th><th>Request</th><th>From</th><th>Escalates to</th><th>Status</th><th>Created</th></tr></thead><tbody>{rows.map((x: any) => <tr key={x.id}><td className="mono">{x.reference}</td><td>{x.module}</td><td><b>{x.title}</b></td><td>{x.from}</td><td>{x.to || '—'}</td><td><span className="tag">{x.status}</span></td><td>{new Date(x.created_at).toLocaleDateString()}</td></tr>)}</tbody></table>{!rows.length && <p className="principal-empty">No escalation records match these filters.</p>}</div></section>
+  return <div className="fade-in principal-operations"><div className="page-head"><h1>Escalations</h1><p>Incoming and outgoing workflow and campus-risk escalations.</p></div><div className="operations-filter"><input className="inp" value={q} onChange={e => setQ(e.target.value)} placeholder="Search request, module or initiator"/><select className="select" value={state} onChange={e => setState(e.target.value)}><option value="">All statuses</option><option value="escalated">Escalated</option>{['DRAFT', 'SUBMITTED', 'RECEIVED', 'FOLLOW_UP', 'RESOLVED', 'CLOSED'].map(value => <option key={value} value={value}>{value.replace('_', ' ')}</option>)}</select><button className="btn btn-crimson" onClick={load}>Filter</button><button className="btn btn-out" onClick={() => { setQ(''); setState(''); setTimeout(load, 0) }}>Clear</button></div>{data.error ? <p className="principal-empty">Unable to load escalations. Please try again.</p> : <><Table title="Incoming Escalations" rows={data.incoming}/><Table title="Outgoing Escalations" rows={data.outgoing}/></>}</div>
+}

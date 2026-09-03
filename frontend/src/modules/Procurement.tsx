@@ -1,27 +1,34 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
-import { PageHead, Spinner, money } from './kit'
+import { Modal, PageHead, Spinner, money } from './kit'
 
-export default function Procurement({ caps }: { caps: any }) {
-  const [data, setData] = useState<any>(null)
-  useEffect(() => { api.assets().then(setData).catch(() => {}) }, [])
-  if (!data) return <Spinner />
-  return (
-    <div className="fade-in">
-      <PageHead title="Procurement" sub="Requisitions, purchase orders and the assets they create. Approvals route by amount to the CFO." />
-      <div className="card">
-        <div className="card-h"><h3>Recently procured assets</h3><span className="hint">purchase → PO → asset</span></div>
-        <div className="tbl-scroll">
-          <table className="tbl">
-            <thead><tr><th>Tag</th><th>Item</th><th>Category</th><th>Location</th><th>Value</th></tr></thead>
-            <tbody>
-              {data.assets.slice(0, 15).map((a: any) => (
-                <tr key={a.id}><td className="mono">{a.tag}</td><td><b>{a.name}</b></td><td><span className="tag">{a.category}</span></td><td>{a.location}</td><td>{money(a.value)}</td></tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  )
+const PAGE_SIZE = 10
+
+export default function Procurement() {
+  const [data, setData] = useState<any>(null), [tab, setTab] = useState('requests'), [q, setQ] = useState(''), [category, setCategory] = useState(''), [status, setStatus] = useState(''), [page, setPage] = useState(1), [selected, setSelected] = useState<any>(null), [error, setError] = useState('')
+  const load = () => { setError(''); api.procurement().then(setData).catch(() => setError('Unable to load procurement data.')) }
+  useEffect(load, [])
+  const requests = data?.requisitions || [], assets = data?.assets || []
+  const categories = useMemo(() => [...new Set(assets.map((x: any) => x.category).filter(Boolean))].sort(), [assets])
+  const statuses = useMemo(() => [...new Set(requests.map((x: any) => x.state).filter(Boolean))].sort(), [requests])
+  const filtered = useMemo(() => requests.filter((x: any) => (!q || `${x.id} ${x.title} ${x.initiator}`.toLowerCase().includes(q.toLowerCase())) && (!status || x.state === status)), [requests, q, status])
+  const filteredAssets = useMemo(() => assets.filter((x: any) => (!q || `${x.tag} ${x.item} ${x.location}`.toLowerCase().includes(q.toLowerCase())) && (!category || x.category === category) && (!status || x.status === status)), [assets, q, category, status])
+  const rows = tab === 'requests' ? filtered : filteredAssets
+  const pageCount = Math.max(1, Math.ceil(rows.length / PAGE_SIZE)), visible = rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+  const clear = () => { setQ(''); setCategory(''); setStatus(''); setPage(1) }
+  const totalValue = requests.reduce((sum: number, x: any) => sum + Number(x.amount || 0), 0)
+  if (!data && !error) return <Spinner />
+  if (error) return <div className="empty-state"><h3>Unable to load procurement data.</h3><p>The procurement register could not be retrieved.</p><button className="btn btn-crimson" onClick={load}>Retry</button></div>
+  return <div className="fade-in principal-operations procurement-page"><PageHead title="Procurement" sub="Manage requisitions, approvals, and procured assets." />
+    <div className="procurement-kpis"><Kpi label="Pending Requests" value={requests.filter((x: any) => ['submitted', 'under_review', 'reviewed'].includes(x.state)).length}/><Kpi label="Approved Requests" value={requests.filter((x: any) => x.state === 'approved').length}/><Kpi label="Rejected Requests" value={requests.filter((x: any) => x.state === 'rejected').length}/><Kpi label="Procurement Value" value={money(totalValue)}/></div>
+    <div className="procurement-tabs"><button className={tab === 'requests' ? 'active' : ''} onClick={() => { setTab('requests'); setPage(1) }}>Purchase Requests</button><button className={tab === 'assets' ? 'active' : ''} onClick={() => { setTab('assets'); setPage(1) }}>Procured Assets</button></div>
+    <div className="operations-filter procurement-filter"><input className="inp" value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => e.key === 'Enter' && setPage(1)} placeholder={tab === 'requests' ? 'Search request ID, item, requester…' : 'Search asset tag, item, location…'}/>{tab === 'assets' && <select className="select" value={category} onChange={e => { setCategory(e.target.value); setPage(1) }}><option value="">All Categories</option>{categories.map((x: string) => <option key={x}>{x}</option>)}</select>}<select className="select" value={status} onChange={e => { setStatus(e.target.value); setPage(1) }}><option value="">All Statuses</option>{(tab === 'requests' ? statuses : [...new Set(assets.map((x: any) => x.status))].sort()).map((x: any) => <option key={x}>{x}</option>)}</select><button className="btn btn-crimson" onClick={() => setPage(1)}>Filter</button><button className="btn btn-out" onClick={clear}>Clear</button></div>
+    {tab === 'requests' && <RequestTable rows={visible} activeFilters={!!(q || status)} onView={setSelected}/>} {tab === 'assets' && <AssetTable rows={visible} activeFilters={!!(q || category || status)}/>} 
+    {rows.length > 0 && <div className="table-pager"><span>Showing {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, rows.length)} of {rows.length} records</span><button className="btn btn-out" disabled={page <= 1} onClick={() => setPage(page - 1)}>Previous</button><span>Page {page} of {pageCount}</span><button className="btn btn-out" disabled={page >= pageCount} onClick={() => setPage(page + 1)}>Next</button></div>}
+    {selected && <WorkflowModal workflowId={selected.id} onClose={() => setSelected(null)}/>}</div>
 }
+function Kpi({ label, value }: any) { return <div><span>{label}</span><b>{value}</b></div> }
+function RequestTable({ rows, activeFilters, onView }: any) { return <section className="card"><div className="card-h"><h3>Purchase Requests</h3><span className="hint">Approval workflow records</span></div><div className="tbl-scroll">{rows.length ? <table className="tbl"><thead><tr><th>Request ID</th><th>Item / Description</th><th>Requested By</th><th>Amount</th><th>Status</th><th>Requested Date</th><th></th></tr></thead><tbody>{rows.map((r: any) => <tr key={r.id}><td className="mono">{r.id}</td><td><b>{r.title}</b></td><td>{r.initiator || 'Unavailable'}</td><td>{money(r.amount)}</td><td><span className={`pill s-${String(r.state).replace('-', '_')}`}>{r.state}</span></td><td>{r.updated_at ? new Date(r.updated_at).toLocaleDateString('en-IN') : 'Unavailable'}</td><td><button className="btn btn-out" onClick={() => onView(r)}>View</button></td></tr>)}</tbody></table> : <Empty title={activeFilters ? 'No matching procurement requests' : 'No procurement requests found'} text={activeFilters ? 'Try changing or clearing your filters.' : 'There are currently no procurement requests available for this campus.'}/>}</div></section> }
+function AssetTable({ rows, activeFilters }: any) { return <section className="card"><div className="card-h"><h3>Procured Assets</h3><span className="hint">Asset register · completed procurement</span></div><div className="tbl-scroll">{rows.length ? <table className="tbl"><thead><tr><th>Asset Tag</th><th>Asset / Item</th><th>Category</th><th>Location</th><th>Value</th><th>Service Status</th></tr></thead><tbody>{rows.map((a: any) => <tr key={a.id}><td className="mono">{a.tag}</td><td><b>{a.item}</b></td><td><span className="tag">{a.category}</span></td><td>{a.location}</td><td>{money(a.value)}</td><td><span className={`pill s-${String(a.status).replace('-', '_')}`}>{a.status}</span></td></tr>)}</tbody></table> : <Empty title={activeFilters ? 'No matching procured assets' : 'No procured assets found'} text={activeFilters ? 'Try changing or clearing your filters.' : 'No completed procurement assets are recorded.'}/>}</div></section> }
+function Empty({ title, text }: any) { return <div className="principal-empty"><b>{title}</b><p>{text}</p></div> }
+function WorkflowModal({ workflowId, onClose }: any) { const [data, setData] = useState<any>(null), [error, setError] = useState(''); useEffect(() => { api.workflow(workflowId).then(setData).catch(() => setError('Unable to load this workflow.')) }, [workflowId]); return <Modal title="Purchase Request" onClose={onClose}>{!data && !error ? <Spinner /> : error ? <p className="principal-empty">{error}</p> : <div className="calendar-detail"><h3>{data.title}</h3><div className="snap"><span>Workflow ID / Status</span><b>{data.id} · {data.state}</b></div><div className="snap"><span>Initiator / Amount</span><b>{data.initiator} · {money(data.amount)}</b></div><div className="snap"><span>Current stage</span><b>{data.current_stage} of {data.chain?.length || 0}</b></div></div>}</Modal> }

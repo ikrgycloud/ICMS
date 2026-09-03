@@ -2585,121 +2585,61 @@ export function StudentScoresView() {
 
 export function StudentFeesView() {
   const [data, setData] = useState<any>(null)
-  const [paying, setPaying] = useState('')
-  const [semester, setSemester] = useState('')
-  const [paymentInvoice, setPaymentInvoice] = useState<any>(null)
-  const [paymentAmount, setPaymentAmount] = useState('')
-  const [challanInvoice, setChallanInvoice] = useState<any>(null)
-  const [challanAmount, setChallanAmount] = useState('')
-  const [challans, setChallans] = useState<any[]>([])
-  const [offline, setOffline] = useState<any>(null)
-  const [offlineMethod, setOfflineMethod] = useState('bank_transfer')
-  const [offlineReference, setOfflineReference] = useState('')
 
   useEffect(() => {
     api.studentFees().then(setData).catch(() => setData({ invoices: [], payments: [], summary: { balance: 0 } }))
-    api.studentChallans().then((r:any) => setChallans(r.challans || [])).catch(() => setChallans([]))
   }, [])
 
   if (!data) return <Spinner />
-  const semesters = [...new Set(data.invoices.map((invoice: any) => invoice.semester || invoice.term))]
-  const visibleInvoices = data.invoices.filter((invoice: any) => !semester || (invoice.semester || invoice.term) === semester)
-  const visibleBalance = visibleInvoices.reduce((total: number, invoice: any) => total + invoice.balance, 0)
-
-  function openPayment(invoice: any) {
-    setPaymentInvoice(invoice)
-    setPaymentAmount(String(invoice.balance))
-  }
-
-  function openChallan(invoice: any) { setChallanInvoice(invoice); setChallanAmount(String(invoice.balance)) }
-  async function generateChallan(invoice: any, amount: number) {
-    try {
-      if (!Number.isFinite(amount) || amount <= 0 || amount > invoice.balance) throw new Error(`Enter an amount between ₹1 and ₹${Number(invoice.balance).toLocaleString('en-IN')}`)
-      const r:any = await api.createStudentChallan(invoice.id, amount); setChallans(await api.studentChallans().then((x:any) => x.challans || [])); setChallanInvoice(null); alert(`Challan ${r.challan.challan_number} for ${money(amount)} is ready to download.`)
-    }
-    catch (error:any) { alert(error.message || 'Unable to generate challan') }
-  }
-  async function submitProof() {
-    try { await api.submitOfflineProof({ challan_id: offline.id, method: offlineMethod, amount: offline.amount, reference_number: offlineReference, transaction_date: new Date().toISOString().slice(0, 10) }); alert('Payment reference submitted for Accounts Office verification.'); setOffline(null); setOfflineReference(''); setChallans(await api.studentChallans().then((x:any) => x.challans || [])) }
-    catch (error:any) { alert(error.message || 'Unable to submit payment proof') }
-  }
-
-  async function pay(invoice: any, amount: number) {
-    try {
-      if (!Number.isFinite(amount) || amount <= 0 || amount > invoice.balance) throw new Error(`Enter an amount between ₹1 and ₹${Number(invoice.balance).toLocaleString('en-IN')}`)
-      setPaying(invoice.id)
-      const order = await api.createRazorpayOrder(invoice.id, amount)
-      if (!(window as any).Razorpay) {
-        await new Promise<void>((resolve, reject) => { const script = document.createElement('script'); script.src = 'https://checkout.razorpay.com/v1/checkout.js'; script.onload = () => resolve(); script.onerror = () => reject(new Error('Could not load Razorpay checkout')); document.body.appendChild(script) })
-      }
-      new (window as any).Razorpay({ key: order.key_id, amount: order.amount, currency: order.currency, name: 'ICMS', description: order.description, order_id: order.order_id, prefill: order.student, theme: { color: '#8a1f2b' }, handler: async (response: any) => { await api.verifyRazorpayPayment({ invoice_id: invoice.id, ...response }); setData(await api.studentFees()) }}).open()
-      setPaymentInvoice(null)
-    } catch (error: any) { alert(error.message || 'Unable to start payment') } finally { setPaying('') }
-  }
 
   return (
-    <div className="fade-in student-fees-page">
-      <PageHead title="Fees & Payments" sub="Review your invoices, pay securely online, and download completed payment receipts." />
-      <section className={`student-fee-hero ${data.summary?.balance > 0 ? 'has-dues' : 'is-clear'}`}>
-        <div><span>{semester ? `${semester} outstanding balance` : 'Outstanding balance'}</span><strong>{money(semester ? visibleBalance : data.summary?.balance)}</strong><small>{(semester ? visibleBalance : data.summary?.balance) > 0 ? 'Pay an invoice below to update your account instantly.' : 'Your account is fully settled.'}</small></div>
-        <div className="student-fee-hero-mark">{data.summary?.balance > 0 ? '₹' : '✓'}</div>
-      </section>
-      <div className="student-fees-grid">
-        <div className="card student-invoices-card">
-          <div className="card-h"><div><h3>Fee invoices</h3><span className="hint">Secure payment through Razorpay</span></div><div className="student-fee-filter"><select className="select" value={semester} onChange={e => setSemester(e.target.value)}><option value="">All semesters</option>{semesters.map((item: any) => <option key={item} value={item}>{item}</option>)}</select><span className="student-fee-count">{visibleInvoices.length} invoice{visibleInvoices.length === 1 ? '' : 's'}</span></div></div>
+    <div className="fade-in">
+      <PageHead title="Fees" sub="Your invoices, balance, and recorded payments" />
+      <div className="grid-2">
+        <div className="card">
+          <div className="card-h"><h3>Fee invoices</h3><span className="hint">Balance {money(data.summary?.balance)}</span></div>
           <div className="tbl-scroll">
             <table className="tbl">
               <thead>
                 <tr>
                   <th>Term</th>
-                  <th>Fee billed</th>
+                  <th>Amount</th>
                   <th>Paid</th>
                   <th>Balance</th>
                   <th>Status</th>
-                  <th />
                 </tr>
               </thead>
               <tbody>
-                {visibleInvoices.map((invoice: any, index: number) => (
-                  <tr key={`${invoice.term}-${index}`} className={invoice.balance > 0 ? 'invoice-due' : 'invoice-paid'}>
-                    <td><b>{invoice.semester || invoice.term}</b><small>{invoice.due_date ? `Due ${new Date(`${invoice.due_date}T00:00:00`).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}` : invoice.term}</small></td>
-                    <td><b>{money(invoice.amount)}</b><small>Fee ledger amount</small></td>
+                {data.invoices.map((invoice: any, index: number) => (
+                  <tr key={`${invoice.term}-${index}`}>
+                    <td>{invoice.term}</td>
+                    <td>{money(invoice.amount)}</td>
                     <td>{money(invoice.paid)}</td>
-                    <td><b className="invoice-balance">{money(invoice.balance)}</b></td>
+                    <td><b style={{ color: invoice.balance > 0 ? 'var(--red)' : 'var(--teal-dk)' }}>{money(invoice.balance)}</b></td>
                     <td><span className={`pill s-${invoice.status}`}>{invoice.status}</span></td>
-                    <td>{invoice.balance > 0 ? <div className="row-actions"><button className="btn btn-sm btn-brass" disabled={paying === invoice.id} onClick={() => openPayment(invoice)}>{paying === invoice.id ? 'Starting...' : 'Pay online'}</button><button className="btn btn-sm btn-out" onClick={() => openChallan(invoice)}>Challan</button></div> : <button className="btn btn-sm btn-out" onClick={() => api.downloadStudentReceipt(invoice.id)}>Download PDF</button>}</td>
                   </tr>
                 ))}
-                {visibleInvoices.length === 0 && (
-                  <tr><td colSpan={6}><div className="empty">No fee invoices found</div></td></tr>
+                {data.invoices.length === 0 && (
+                  <tr><td colSpan={5}><div className="empty">No fee invoices found</div></td></tr>
                 )}
               </tbody>
             </table>
           </div>
         </div>
 
-        <aside className="card student-payment-history">
-          <div className="card-h"><div><h3>Payment history</h3><span className="hint">Confirmed payments</span></div></div>
-          <div className="card-pad payment-history-list">
+        <div className="card">
+          <div className="card-h"><h3>Payment history</h3></div>
+          <div className="card-pad">
             {data.payments.map((payment: any, index: number) => (
               <div className="snap" key={`${payment.reference}-${index}`}>
-                <span><b>{money(payment.amount)}</b><small className="mono">{payment.reference}</small></span>
-                <span className="payment-method">{payment.method}</span>
-                <button className="btn btn-sm btn-out" onClick={() => api.downloadStudentReceipt(payment.invoice_id, payment.id)}>Receipt PDF</button>
+                <span className="mono">{payment.reference}</span>
+                <span><b>{money(payment.amount)}</b> - {payment.method}</span>
               </div>
             ))}
             {data.payments.length === 0 && <Empty text="No payments yet" />}
           </div>
-        </aside>
+        </div>
       </div>
-      <section className="card" style={{ marginTop: 18 }}><div className="card-h"><div><h3>Challans & offline payments</h3><span className="hint">A challan is a payment instruction, not a receipt.</span></div></div><div className="tbl-scroll"><table className="tbl"><thead><tr><th>Challan</th><th>Amount</th><th>Due date</th><th>Status</th><th /></tr></thead><tbody>{challans.length ? challans.map((challan:any) => <tr key={challan.id}><td className="mono">{challan.challan_number}</td><td>{money(challan.amount)}</td><td>{challan.due_date || '—'}</td><td><span className={`pill s-${String(challan.status).toLowerCase()}`}>{challan.status}</span></td><td><div className="row-actions"><button className="btn btn-sm btn-out" onClick={() => api.downloadStudentChallan(challan.id)}>Download</button>{['GENERATED','PENDING'].includes(challan.status) && <button className="btn btn-sm btn-brass" onClick={() => setOffline(challan)}>Submit reference</button>}</div></td></tr>) : <tr><td colSpan={5}><Empty text="No challans generated." /></td></tr>}</tbody></table></div></section>
-      {paymentInvoice && <Modal title="Pay fee online" onClose={() => setPaymentInvoice(null)} footer={<><button className="btn btn-out" disabled={!!paying} onClick={() => setPaymentInvoice(null)}>Cancel</button><button className="btn btn-brass" disabled={!!paying} onClick={() => pay(paymentInvoice, Number(paymentAmount))}>{paying ? 'Starting Razorpay...' : 'Continue to Razorpay'}</button></>}>
-        <p className="hint">Outstanding fee: <b>{money(paymentInvoice.balance)}</b>. You can pay the full amount or any smaller partial amount.</p>
-        <label>Fee amount to pay (before GST)<input className="inp" type="number" min="1" max={paymentInvoice.balance} step="0.01" value={paymentAmount} onChange={e => setPaymentAmount(e.target.value)} /></label>
-        <p className="hint">18% GST is added by Razorpay. The fee ledger will be reduced by the amount entered above after successful payment.</p>
-      </Modal>}
-      {offline && <Modal title="Submit offline payment reference" onClose={() => setOffline(null)} footer={<><button className="btn btn-out" onClick={() => setOffline(null)}>Cancel</button><button className="btn btn-brass" onClick={submitProof}>Submit for verification</button></>}><p className="hint">{offline.challan_number} · {money(offline.amount)}. Your balance will not change until Accounts Office verifies this payment.</p><label>Payment mode<select className="select" value={offlineMethod} onChange={e => setOfflineMethod(e.target.value)}><option value="bank_transfer">Bank transfer</option><option value="neft">NEFT</option><option value="rtgs">RTGS</option><option value="imps">IMPS</option><option value="cheque">Cheque</option><option value="dd">DD</option></select></label><label>Bank / transaction reference<input className="inp" value={offlineReference} onChange={e => setOfflineReference(e.target.value)} /></label></Modal>}
-      {challanInvoice && <Modal title="Generate payment challan" onClose={() => setChallanInvoice(null)} footer={<><button className="btn btn-out" onClick={() => setChallanInvoice(null)}>Cancel</button><button className="btn btn-brass" onClick={() => generateChallan(challanInvoice, Number(challanAmount))}>Generate challan</button></>}><p className="hint">Outstanding fee: <b>{money(challanInvoice.balance)}</b>. You can generate a challan for the full balance or a smaller partial amount.</p><label>Challan amount<input className="inp" type="number" min="1" max={challanInvoice.balance} step="0.01" value={challanAmount} onChange={e => setChallanAmount(e.target.value)} /></label></Modal>}
     </div>
   )
 }

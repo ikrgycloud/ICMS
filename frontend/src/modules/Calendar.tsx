@@ -74,7 +74,7 @@ function blankForm() {
   }
 }
 
-export default function Calendar({ user, caps }: { user: any; caps: any }) {
+export default function Calendar({ user, caps, readOnly = false }: { user: any; caps: any; readOnly?: boolean }) {
   const [month, setMonth] = useState(monthStartIso())
   const [selectedDate, setSelectedDate] = useState(dateInputValue(new Date()))
   const [data, setData] = useState<any>(null)
@@ -122,9 +122,9 @@ export default function Calendar({ user, caps }: { user: any; caps: any }) {
     return map
   }, [data])
 
-  const canCreate = Boolean(data?.permissions?.create && caps?.create)
-  const canEdit = Boolean(data?.permissions?.edit && caps?.edit)
-  const canDelete = Boolean(data?.permissions?.delete && caps?.delete)
+  const canCreate = !readOnly && Boolean(data?.permissions?.create && caps?.create)
+  const canEdit = !readOnly && Boolean(data?.permissions?.edit && caps?.edit)
+  const canDelete = !readOnly && Boolean(data?.permissions?.delete && caps?.delete)
   const selected = parseLocalDate(selectedDate)
   const yearOptions = useMemo(() => buildYearOptions(selected.getFullYear()), [selectedDate])
 

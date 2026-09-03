@@ -52,7 +52,7 @@ def rbac_for(office_n: int, level: int, verb: str) -> str:
     if verb in row:
         return row[verb]
     # Sensible defaults for verbs not in the 12-column representative matrix.
-    if verb in ("submit", "review", "assign", "upload", "print", "download"):
+    if verb in ("submit", "receive", "review", "assign", "upload", "print", "download"):
         return LIMITED if level <= 7 else VIEW
     if verb in ("lock", "unlock", "override"):
         return LIMITED if office_n in (16, 27, 28) else NOT_ALLOWED
@@ -67,9 +67,12 @@ def rbac_for(office_n: int, level: int, verb: str) -> str:
 # Each: key, label, chain[initiator, reviewer, approver, final], escalation,
 #       owning office_n, valid workflow states for progression, has_amount
 APPROVAL_MATRIX = [
-    {"key": "fee_structure", "label": "Fee structure approval", "office_n": 22,
-     "chain": ["Finance Manager", "Principal / Campus Head"],
-     "escalation": "Chairman", "amount": False},
+    {"key": "branch_operational_plan", "label": "Branch Operational Plan", "office_n": 3,
+     "chain": ["Campus Head", "Vice Chairman"],
+     "escalation": "Vice Chairman", "amount": False},
+    {"key": "compliance_requirement", "label": "Compliance requirement", "office_n": 4,
+     "chain": ["Responsible Department", "IQAC", "Principal", "Vice Chairman"],
+     "escalation": "Vice Chairman", "amount": False},
     {"key": "student_admission", "label": "Student admission", "office_n": 15,
      "chain": ["Applicant", "Admissions Office", "Admissions Dir.", "Principal/Registrar"],
      "escalation": "VC", "amount": False},
@@ -127,6 +130,9 @@ APPROVAL_MATRIX = [
     {"key": "infrastructure_capex", "label": "Infrastructure / capex", "office_n": 29,
      "chain": ["Any office", "Maintenance/Facilities", "Principal", "VC/Chairman"],
      "escalation": "Chairman", "amount": True},
+    {"key": "infrastructure_capex_v2", "label": "Infrastructure / capex", "office_n": 29,
+     "chain": ["Any office", "Maintenance/Facilities", "Principal", "Campus Head", "VC/Chairman"],
+     "escalation": "Chairman", "amount": True},
     {"key": "recruitment", "label": "Recruitment / promotion", "office_n": 24,
      "chain": ["HR", "HR Director", "Principal", "VC"],
      "escalation": "Chairman", "amount": False},
@@ -139,8 +145,8 @@ APPROVAL_MATRIX = [
 ]
 
 # Workflow states every request moves through (Document §7, office workflow images).
-WF_STATES = ["draft", "submitted", "under_review", "reviewed", "approved",
-             "executed", "rejected", "escalated"]
+WF_STATES = ["draft", "submitted", "under_review", "reviewed", "returned", "approved",
+             "active", "executed", "rejected", "escalated"]
 
 # Which state must an entity be in for each action to be valid (Document §7 step 11).
 WF_VALID = {
@@ -150,20 +156,29 @@ WF_VALID = {
     "reject": ["submitted", "under_review", "reviewed", "escalated"],
     "execute": ["approved"],
     "escalate": ["submitted", "under_review", "reviewed"],
+    "return": ["submitted", "under_review", "reviewed"],
 }
 
 # Approval limits by process & scope level (Document §10 — configurable, never hardcoded).
 # scope_level -> {process_key -> threshold}. Above threshold auto-escalates.
 APPROVAL_LIMITS = {
     "campus":     {"fee_waiver": 100000, "refund": 100000, "purchase_request": 500000,
-                   "payroll_approval": 2000000, "infrastructure_capex": 1000000},
+                   "payroll_approval": 2000000, "infrastructure_capex": 1000000,
+                   "infrastructure_capex_v2": 1000000},
     "university": {"fee_waiver": 500000, "refund": 500000, "purchase_request": 5000000,
-                   "payroll_approval": 20000000, "infrastructure_capex": 10000000},
+                   "payroll_approval": 20000000, "infrastructure_capex": 10000000,
+                   "infrastructure_capex_v2": 10000000},
     "faculty":    {"fee_waiver": 50000, "refund": 50000, "purchase_request": 200000,
-                   "infrastructure_capex": 300000},
+                   "infrastructure_capex": 300000, "infrastructure_capex_v2": 300000},
     "department": {"fee_waiver": 20000, "refund": 20000, "purchase_request": 75000},
     "global":     {"fee_waiver": 10000000, "refund": 10000000, "purchase_request": 100000000,
-                   "payroll_approval": 100000000, "infrastructure_capex": 100000000},
+                   "payroll_approval": 100000000, "infrastructure_capex": 100000000,
+                   "infrastructure_capex_v2": 100000000},
+}
+
+RISK_ESCALATION_TARGETS = {
+    "HIGH": (2, "Vice Chairman"),
+    "CRITICAL": (1, "Chairman"),
 }
 
 

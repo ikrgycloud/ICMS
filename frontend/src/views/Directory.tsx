@@ -2,115 +2,28 @@ import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { Spinner, LEVEL_COLORS } from './ui'
 
-const LEVEL_NAMES: Record<number, string> = {
-  1: 'Governance & apex', 2: 'Executive leadership', 3: 'Campus leadership',
-  4: 'Institution heads', 5: 'Deputy / associate', 6: 'Academic units',
-  7: 'Administrative units', 8: 'Support & operations',
-}
+const LEVEL_NAMES: Record<number, string> = { 1: 'Governance & Apex', 2: 'Executive Leadership', 3: 'Campus Leadership', 4: 'Institution Heads', 5: 'Deputy / Associate', 6: 'Academic Units', 7: 'Administrative Units', 8: 'Support & Operations' }
 
-export default function Directory() {
-  const [offices, setOffices] = useState<any[]>([])
-  const [q, setQ] = useState('')
-  const [sel, setSel] = useState<any>(null)
-
+export default function Directory({ user }: { user?: any }) {
+  const [offices, setOffices] = useState<any[]>([]), [q, setQ] = useState(''), [sel, setSel] = useState<any>(null)
   useEffect(() => { api.offices().then(setOffices).catch(() => {}) }, [])
   if (!offices.length) return <Spinner />
-
-  const filtered = offices.filter(o =>
-    o.name.toLowerCase().includes(q.toLowerCase()) ||
-    (o.purpose || '').toLowerCase().includes(q.toLowerCase()))
+  const principal = user?.office_n === 4
+  const filtered = offices.filter(office => office.name.toLowerCase().includes(q.toLowerCase()) || (office.purpose || '').toLowerCase().includes(q.toLowerCase()))
   const byLevel: Record<number, any[]> = {}
-  filtered.forEach(o => { (byLevel[o.level] = byLevel[o.level] || []).push(o) })
-
-  return (
-    <div className="fade-in">
-      <div className="page-head">
-        <h1>Office directory</h1>
-        <p>All 40 offices across 8 authority levels, {offices.reduce((a, o) => a + o.roles, 0)} internal roles. Each office reports upward per the org chart.</p>
-      </div>
-
-      <input className="inp" style={{ maxWidth: 420, marginBottom: 22 }} placeholder="Search offices…" value={q} onChange={e => setQ(e.target.value)} />
-
-      {Object.keys(byLevel).map(Number).sort((a, b) => a - b).map(lvl => (
-        <div key={lvl} style={{ marginBottom: 28 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
-            <span className="lvl-badge" style={{ background: LEVEL_COLORS[lvl] }}>L{lvl}</span>
-            <h2 style={{ fontSize: 17, fontFamily: 'var(--ff-display)' }}>{LEVEL_NAMES[lvl]}</h2>
-            <span className="hint">{byLevel[lvl].length} offices</span>
-          </div>
-          <div className="office-grid">
-            {byLevel[lvl].map(o => (
-              <div className="office-card" key={o.n} onClick={() => setSel(o)}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                  <div className="oc-n" style={{ background: LEVEL_COLORS[lvl] }}>{o.n}</div>
-                  <span className="oc-roles">{o.roles} roles</span>
-                </div>
-                <div className="oc-name">{o.name}</div>
-                <div className="oc-purpose">{o.purpose}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      ))}
-
-      {sel && <OfficeModal n={sel.n} onClose={() => setSel(null)} />}
-    </div>
-  )
+  filtered.forEach(office => { (byLevel[office.level] = byLevel[office.level] || []).push(office) })
+  return <div className={`fade-in directory-page ${principal ? 'principal-directory' : ''}`}>
+    <div className="page-head"><h1>Office Directory</h1><p>All 40 offices across 8 authority levels, {offices.reduce((total, office) => total + office.roles, 0)} internal roles. Each office reports upward per the org chart.</p></div>
+    <div className="directory-search"><span aria-hidden="true">⌕</span><input className="inp" placeholder="Search offices..." value={q} onChange={e => setQ(e.target.value)} /></div>
+    <div className="directory-levels">{Object.keys(byLevel).map(Number).sort((a, b) => a - b).map(level => { const rows = byLevel[level]; const roles = rows.reduce((total, row) => total + row.roles, 0); return <section className="directory-level" key={level}><header className="directory-level-head"><span className="directory-level-badge" style={{ background: principal ? '#8f1736' : LEVEL_COLORS[level] }}>L{level}</span><div><h2>{LEVEL_NAMES[level]}</h2><p>{rows.length} {rows.length === 1 ? 'Office' : 'Offices'} · {roles} {roles === 1 ? 'Role' : 'Roles'}</p></div></header><div className="directory-office-grid">{rows.map(office => <button className="directory-office-card" type="button" key={office.n} onClick={() => setSel(office)}><div className="directory-office-top"><span className="directory-office-number" style={{ color: principal ? '#8f1736' : LEVEL_COLORS[level] }}>Office {office.n}</span><span className="directory-role-count">{office.roles} {office.roles === 1 ? 'role' : 'roles'}</span></div><strong>{office.name}</strong><p>{office.purpose}</p><span className="directory-office-level">{LEVEL_NAMES[level]}</span></button>)}</div></section>})}</div>
+    {!filtered.length && <div className="principal-empty">No offices match your search.</div>}
+    {sel && <OfficeModal n={sel.n} principal={principal} onClose={() => setSel(null)} />}
+  </div>
 }
 
-function OfficeModal({ n, onClose }: { n: number; onClose: () => void }) {
-  const [o, setO] = useState<any>(null)
-  useEffect(() => { api.office(n).then(setO).catch(() => {}) }, [n])
-
-  return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal" style={{ maxWidth: 640 }} onClick={e => e.stopPropagation()}>
-        {!o ? <div style={{ padding: 50 }}><Spinner /></div> : (
-          <>
-            <div className="modal-h">
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <span className="lvl-badge" style={{ background: LEVEL_COLORS[o.level] }}>L{o.level}</span>
-                  <h3>{o.name}</h3>
-                </div>
-                <div style={{ fontSize: 13, color: 'var(--txt-soft)', marginTop: 6 }}>{o.purpose}</div>
-              </div>
-              <button className="close-x" onClick={onClose}>×</button>
-            </div>
-            <div className="modal-b">
-              <Section title={`Internal roles · ${o.internal_roles.length}`}>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                  {o.internal_roles.map((r: string, i: number) => (
-                    <span className="tag" key={r} style={i === 0 ? { background: '#fdf3dc', color: '#96701b', fontWeight: 600 } : {}}>{r}</span>
-                  ))}
-                </div>
-              </Section>
-              <Section title="Functionalities">
-                <ul className="bullet-list">{o.functionalities.map((f: string) => <li key={f}>{f}</li>)}</ul>
-              </Section>
-              <Section title="Workflows">
-                <ul className="bullet-list">{o.workflows.map((w: string) => <li key={w}>{w}</li>)}</ul>
-              </Section>
-              <div style={{ display: 'flex', gap: 30, flexWrap: 'wrap' }}>
-                <Section title="Modules">
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>{o.modules.map((m: string) => <span className="tag" key={m}>{m}</span>)}</div>
-                </Section>
-                <Section title="Scope"><span className="mono" style={{ fontSize: 13 }}>{o.scope}</span></Section>
-                <Section title="Reports to"><span style={{ fontSize: 13.5 }}>{o.reports_to}</span></Section>
-              </div>
-            </div>
-          </>
-        )}
-      </div>
-    </div>
-  )
+function OfficeModal({ n, principal, onClose }: { n: number; principal: boolean; onClose: () => void }) {
+  const [office, setOffice] = useState<any>(null)
+  useEffect(() => { api.office(n).then(setOffice).catch(() => {}) }, [n])
+  return <div className="modal-bg" onClick={onClose}><div className={`modal ${principal ? 'principal-directory-modal' : ''}`} style={{ maxWidth: 640 }} onClick={e => e.stopPropagation()}>{!office ? <div style={{ padding: 50 }}><Spinner /></div> : <><div className="modal-h"><div><div className="directory-modal-title"><span className="lvl-badge" style={{ background: principal ? '#8f1736' : LEVEL_COLORS[office.level] }}>L{office.level}</span><h3>{office.name}</h3></div><p className="directory-modal-purpose">{office.purpose}</p></div><button className={principal ? 'modal-x' : 'close-x'} onClick={onClose} aria-label="Close office details">×</button></div><div className="modal-b directory-modal-body"><Section title={`Internal roles · ${office.internal_roles.length}`}><div className="directory-role-chips">{office.internal_roles.map((role: string) => <span className="tag" key={role}>{role}</span>)}</div></Section><Section title="Functionalities"><ul className="bullet-list">{office.functionalities.map((item: string) => <li key={item}>{item}</li>)}</ul></Section><Section title="Workflows"><ul className="bullet-list">{office.workflows.map((item: string) => <li key={item}>{item}</li>)}</ul></Section><Section title="Modules"><div className="directory-module-chips">{office.modules.map((item: string) => <span className="tag" key={item}>{item}</span>)}</div></Section><div className="directory-modal-meta"><Section title="Scope"><span className="mono">{office.scope}</span></Section><Section title="Reports to"><span>{office.reports_to}</span></Section></div></div></>}</div></div>
 }
-
-function Section({ title, children }: any) {
-  return (
-    <div style={{ marginBottom: 20 }}>
-      <div style={{ fontFamily: 'var(--ff-mono)', fontSize: 11, color: 'var(--txt-mute)', textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 10 }}>{title}</div>
-      {children}
-    </div>
-  )
-}
+function Section({ title, children }: any) { return <section className="directory-modal-section"><h4>{title}</h4>{children}</section> }

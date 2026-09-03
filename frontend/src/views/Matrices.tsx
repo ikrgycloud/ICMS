@@ -4,6 +4,7 @@ import { Spinner, AuthChip } from './ui'
 
 export default function Matrices() {
   const [tab, setTab] = useState<'rbac' | 'approval' | 'scope'>('rbac')
+  const [q, setQ] = useState('')
   return (
     <div className="fade-in">
       <div className="page-head">
@@ -15,17 +16,19 @@ export default function Matrices() {
           <button key={id} className={`btn ${tab === id ? 'btn-solid' : 'btn-out'}`} onClick={() => setTab(id)}>{l}</button>
         ))}
       </div>
-      {tab === 'rbac' && <RBAC />}
-      {tab === 'approval' && <Approval />}
-      {tab === 'scope' && <Scope />}
+      <input className="inp" style={{ maxWidth: 440, marginBottom: 18 }} value={q} onChange={e => setQ(e.target.value)} placeholder={tab === 'rbac' ? 'Search office or permission/action…' : tab === 'approval' ? 'Search process, approval chain or escalation…' : 'Search office or scope…'} />
+      {tab === 'rbac' && <RBAC q={q} />}
+      {tab === 'approval' && <Approval q={q} />}
+      {tab === 'scope' && <Scope q={q} />}
     </div>
   )
 }
 
-function RBAC() {
+function RBAC({ q }: { q: string }) {
   const [d, setD] = useState<any>(null)
   useEffect(() => { api.matrix('rbac').then(setD).catch(() => {}) }, [])
   if (!d) return <Spinner />
+  const needle = q.toLowerCase(); const rows = d.rows.filter((r: any) => !needle || r.office.toLowerCase().includes(needle) || d.verbs.some((v: string) => v.toLowerCase().includes(needle) && r.grants[v] !== 'Not Allowed'))
   return (
     <div className="card">
       <div className="tbl-scroll">
@@ -34,7 +37,7 @@ function RBAC() {
             <tr><th className="sticky-c">Office</th>{d.verbs.map((v: string) => <th key={v} className="rot">{v}</th>)}</tr>
           </thead>
           <tbody>
-            {d.rows.map((r: any) => (
+            {rows.map((r: any) => (
               <tr key={r.office}>
                 <td className="sticky-c" style={{ fontWeight: 600 }}>{r.office}</td>
                 {d.verbs.map((v: string) => <td key={v} style={{ textAlign: 'center' }}><AuthChip v={r.grants[v] || 'Not Allowed'} /></td>)}
@@ -47,17 +50,18 @@ function RBAC() {
   )
 }
 
-function Approval() {
+function Approval({ q }: { q: string }) {
   const [d, setD] = useState<any>(null)
   useEffect(() => { api.matrix('approval').then(setD).catch(() => {}) }, [])
   if (!d) return <Spinner />
+  const needle = q.toLowerCase(); const rows = d.processes.filter((p: any) => !needle || [p.label, p.key, p.escalation, ...p.chain].join(' ').toLowerCase().includes(needle))
   return (
     <div className="card">
       <div className="tbl-scroll">
         <table className="tbl">
           <thead><tr><th>Process</th><th>Approval chain</th><th>Escalation</th><th>Monetary</th></tr></thead>
           <tbody>
-            {d.processes.map((p: any) => (
+            {rows.map((p: any) => (
               <tr key={p.key}>
                 <td style={{ fontWeight: 600 }}>{p.label}</td>
                 <td>
@@ -81,7 +85,7 @@ function Approval() {
   )
 }
 
-function Scope() {
+function Scope({ q }: { q: string }) {
   const [d, setD] = useState<any>(null)
   useEffect(() => { api.matrix('scope').then(setD).catch(() => {}) }, [])
   if (!d) return <Spinner />
@@ -90,13 +94,14 @@ function Scope() {
     faculty: '#c9a24a', department: '#e0b74a', program: '#3aa06a',
     section: '#5a9bd4', individual: '#a29a89',
   }
+  const needle = q.toLowerCase(); const rows = d.rows.filter((r: any) => !needle || `${r.office} ${r.scope} ${r.reach}`.toLowerCase().includes(needle))
   return (
     <div className="card">
       <div className="tbl-scroll">
         <table className="tbl">
           <thead><tr><th>Office</th><th>Scope level</th><th>Reach</th></tr></thead>
           <tbody>
-            {d.rows.map((r: any) => (
+            {rows.map((r: any) => (
               <tr key={r.office}>
                 <td style={{ fontWeight: 600 }}>{r.office}</td>
                 <td><span className="pill" style={{ background: (SCOPE_COLORS[r.scope] || '#999') + '22', color: SCOPE_COLORS[r.scope] || '#555' }}>{r.scope}</span></td>

@@ -212,6 +212,7 @@ class WorkflowInstance(Base):
     initiator_name = Column(String)
     current_stage = Column(Integer, default=0)   # index into approval chain
     scope_level = Column(String)
+    campus_scope_id = Column(String, ForeignKey("org_scopes.id"), index=True, nullable=True)
     escalated = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
@@ -265,6 +266,9 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
     id = Column(Integer, primary_key=True, autoincrement=True)
     tenant_id = Column(String, index=True)
+    # Nullable preserves historical ledger entries whose campus cannot be
+    # established authoritatively. New scoped operations populate this value.
+    campus_scope_id = Column(String, ForeignKey("org_scopes.id"), index=True, nullable=True)
     actor = Column(String)
     actor_name = Column(String)
     office_n = Column(Integer)

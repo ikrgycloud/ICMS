@@ -1,12 +1,13 @@
 import { api } from '../api'
-import { PageHead, Kpis, Spinner, money, useLoad, Empty } from './kit'
+import { PageHead, Kpis, Spinner, money, useLoad } from './kit'
 import ChairmanOverview from './ChairmanOverview'
 import PrincipalDashboard from './PrincipalDashboard'
+import { CampusHeadDashboard } from './CampusHeadPlaceholder'
 
 export default function Overview({ user, go }: { user: any; go: (v: string) => void }) {
   if (user.office_n === 1) return <ChairmanOverview go={go} />
+  if (user.office_n === 3) return <CampusHeadDashboard user={user} go={go} />
   if (user.office_n === 4) return <PrincipalDashboard user={user} go={go} />
-  if (user.office_n === 22) return <FinanceManagerOverview user={user} go={go} />
   const [data, loading] = useLoad<any>(() => api.overview())
   if (loading || !data) return <Spinner />
   const s = data.stats
@@ -75,31 +76,4 @@ export default function Overview({ user, go }: { user: any; go: (v: string) => v
       </div>
     </div>
   )
-}
-
-function FinanceManagerOverview({ user, go }: { user: any; go: (v: string) => void }) {
-  const [data, loading] = useLoad<any>(() => api.invoices())
-  if (loading || !data) return <Spinner />
-  const summary = data.summary || {}
-  const due = (data.invoices || []).filter((invoice: any) => invoice.balance > 0)
-  const latestPayments = (data.payments || []).slice(0, 6)
-  const collectionRate = Math.round(100 * (summary.total_collected || 0) / (summary.total_billed || 1))
-
-  return <div className="fade-in finance-overview">
-    <PageHead title="Finance overview" sub={`Welcome, ${user.name?.split(' ')[0] || 'Finance Manager'}. Monitor fee collection and payment activity.`} />
-    <section className="finance-overview-hero">
-      <div><span>Collections recorded</span><strong>{money(summary.total_collected)}</strong><small>From confirmed ICMS payment records</small></div>
-      <div className="finance-overview-rate"><span>Collection rate</span><b>{collectionRate}%</b><button onClick={() => go('finance')}>Open finance workspace →</button></div>
-    </section>
-    <div className="finance-overview-kpis">
-      <div><span>Total billed</span><b>{money(summary.total_billed)}</b></div>
-      <div className="due"><span>Outstanding</span><b>{money(summary.outstanding)}</b></div>
-      <div><span>Open invoices</span><b>{due.length}</b></div>
-      <div><span>Payments recorded</span><b>{(data.payments || []).length}</b></div>
-    </div>
-    <div className="finance-overview-grid">
-      <section className="card finance-overview-card"><div className="card-h"><div><h3>Recent payments</h3><span className="hint">Latest database entries</span></div><button className="btn btn-sm btn-out" onClick={() => go('finance')}>View all</button></div><div className="card-pad finance-activity-list">{latestPayments.length ? latestPayments.map((payment:any) => <div className="finance-activity" key={payment.id}><div><b>{payment.name || 'Student payment'}</b><small>{payment.roll_no} · {payment.reference || 'No reference'}</small></div><span><b>{money(payment.amount)}</b><small>{payment.method}</small></span></div>) : <Empty text="No payment records yet." />}</div></section>
-      <section className="card finance-overview-card"><div className="card-h"><div><h3>Collection follow-up</h3><span className="hint">Invoices with a balance</span></div><button className="btn btn-sm btn-out" onClick={() => go('finance')}>View invoices</button></div><div className="card-pad finance-activity-list">{due.slice(0, 6).map((invoice:any) => <div className="finance-activity" key={invoice.id}><div><b>{invoice.name}</b><small>{invoice.roll_no} · {invoice.term}</small></div><span className="finance-due"><b>{money(invoice.balance)}</b><small>outstanding</small></span></div>)}{!due.length && <Empty text="All invoices are settled." />}</div></section>
-    </div>
-  </div>
 }

@@ -3,72 +3,11 @@ import { api } from '../api'
 import { Spinner, Empty } from './ui'
 
 export default function AuditView() {
-  const [rows, setRows] = useState<any[]>([])
-  const [loading, setLoading] = useState(true)
-  const [verify, setVerify] = useState<any>(null)
-  const [verifying, setVerifying] = useState(false)
-
-  function load() { api.audit().then(r => { setRows(r.entries); setLoading(false) }).catch(() => setLoading(false)) }
+  const [rows, setRows] = useState<any[]>([]), [loading, setLoading] = useState(true), [verify, setVerify] = useState<any>(null), [verifying, setVerifying] = useState(false), [error, setError] = useState(''), [unavailable, setUnavailable] = useState('')
+  function load() { setError(''); setLoading(true); api.audit().then(response => { setRows(response.entries); setUnavailable(response.data_status === 'unavailable' ? response.reason || 'Campus-scoped audit data is unavailable.' : '') }).catch(() => setError('Unable to load audit entries.')).finally(() => setLoading(false)) }
   useEffect(load, [])
-
-  async function runVerify() {
-    setVerifying(true)
-    const r = await api.verifyAudit()
-    setVerify(r); setVerifying(false)
-  }
-
-  const outColor = (o: string) => o === 'ALLOW' ? 'var(--teal)' : o === 'DENY' ? 'var(--rose)' : o === 'ESCALATE' ? 'var(--amber)' : '#6f7fd4'
-
-  return (
-    <div className="fade-in">
-      <div className="page-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
-        <div>
-          <h1>Audit log</h1>
-          <p>Every authority decision is appended to a hash-chained ledger. Each entry seals the previous entry's hash, so any tampering breaks the chain.</p>
-        </div>
-        <button className="btn btn-brass" onClick={runVerify} disabled={verifying}>{verifying ? 'Verifying…' : '⛓ Verify chain integrity'}</button>
-      </div>
-
-      {verify && (
-        <div style={{ borderRadius: 12, padding: '14px 18px', marginBottom: 18, background: verify.intact ? '#e8f6f1' : '#fbe9e4', border: `1.5px solid ${verify.intact ? 'var(--teal)' : 'var(--rose)'}` }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 20 }}>{verify.intact ? '✓' : '✕'}</span>
-            <div>
-              <div style={{ fontWeight: 600, color: verify.intact ? 'var(--teal-dk)' : 'var(--rose)' }}>
-                {verify.intact ? 'Chain intact' : 'Chain broken'}
-              </div>
-              <div style={{ fontSize: 13, color: 'var(--txt-soft)' }}>
-                {verify.count} entries verified{verify.intact ? ' — no tampering detected.' : ` — break at entry ${verify.broken_at}.`}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {loading ? <Spinner /> : (
-        <div className="card">
-          <div className="tbl-scroll">
-            {rows.length === 0 ? <Empty icon="⛓" text="No audit entries yet. Decisions will be recorded here as workflows run." /> : (
-              <table className="tbl">
-                <thead><tr><th>#</th><th>When</th><th>Actor</th><th>Action</th><th>Outcome</th><th>Reason</th><th>Hash</th></tr></thead>
-                <tbody>
-                  {rows.map((e, i) => (
-                    <tr key={e.id}>
-                      <td className="mono" style={{ color: 'var(--txt-mute)' }}>{rows.length - i}</td>
-                      <td className="mono" style={{ fontSize: 11.5 }}>{new Date(e.at).toLocaleString()}</td>
-                      <td>{e.actor}</td>
-                      <td><span className="mono" style={{ fontSize: 12 }}>{e.action}</span></td>
-                      <td><span className="mono" style={{ fontWeight: 700, fontSize: 12, color: outColor(e.outcome) }}>{e.outcome}</span></td>
-                      <td style={{ color: 'var(--txt-soft)', fontSize: 12.5, maxWidth: 260 }}>{e.reason}</td>
-                      <td className="mono" style={{ fontSize: 10.5, color: 'var(--txt-mute)' }} title={e.hash}>{e.hash?.slice(0, 10)}…</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  )
+  async function runVerify() { setVerifying(true); setError(''); try { const result = await api.verifyAudit(); setVerify(result); if (result.data_status === 'unavailable') setUnavailable(result.reason || 'Campus-scoped audit data is unavailable.') } catch { setError('Unable to verify chain integrity.') } finally { setVerifying(false) } }
+  const tone = (outcome: string) => outcome === 'ALLOW' ? 'var(--teal)' : outcome === 'DENY' ? 'var(--rose)' : outcome === 'ESCALATE' ? 'var(--amber)' : '#8f1736'
+  if (unavailable) return <div className="fade-in principal-operations audit-page"><div className="audit-head"><div><h1>Audit log</h1><p>Every authority decision is recorded in the hash-chained ledger for review and verification.</p></div></div><div className="audit-error">{unavailable}</div></div>
+  return <div className="fade-in principal-operations audit-page"><div className="audit-head"><div><h1>Audit log</h1><p>Every authority decision is recorded in the hash-chained ledger for review and verification.</p></div><button className="btn btn-crimson" onClick={runVerify} disabled={verifying}>{verifying ? 'Verifying…' : 'Verify chain integrity'}</button></div>{verify && <div className={`audit-verify ${verify.intact ? 'valid' : 'invalid'}`}><i>{verify.intact ? '✓' : '!'}</i><div><b>{verify.intact ? 'Chain verified' : 'Chain broken'}</b><p>{verify.intact ? `All ${verify.count} entries verified — chain integrity confirmed.` : `${verify.count} entries verified — break at entry ${verify.broken_at}.`}</p></div></div>}{error && <div className="audit-error">{error}<button className="btn btn-out" onClick={error.includes('verify') ? runVerify : load}>Retry</button></div>}{loading ? <Spinner /> : <section className="card audit-card"><div className="audit-card-head"><div><span>Immutable ledger</span><h3>Audit entries</h3></div><b>{rows.length} entries</b></div><div className="tbl-scroll">{rows.length === 0 ? <Empty icon="◇" text="No audit entries yet. Decisions will be recorded here as workflows run." /> : <table className="tbl audit-table"><thead><tr><th>#</th><th>When</th><th>Actor</th><th>Action</th><th>Campus</th><th>Outcome</th><th>Reason</th><th>Hash</th></tr></thead><tbody>{rows.map((entry, index) => <tr key={entry.id}><td className="mono">{rows.length - index}</td><td className="mono">{new Date(entry.at).toLocaleString()}</td><td>{entry.actor}</td><td><span className="mono">{entry.action}</span></td><td className="mono">{entry.campus_scope_id || '—'}</td><td><span className="audit-outcome" style={{ color: tone(entry.outcome) }}>{entry.outcome}</span></td><td className="audit-reason">{entry.reason}</td><td className="mono audit-hash" title={entry.hash}>{entry.hash?.slice(0, 10)}…</td></tr>)}</tbody></table>}</div></section>}</div>
 }

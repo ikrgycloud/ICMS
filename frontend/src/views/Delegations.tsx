@@ -147,7 +147,7 @@ function DelegationViewModal({ row, user, onClose }: { row: any; user: any; onCl
 function DelegateModal({ onClose, onDone }: any) {
   const [offices, setOffices] = useState<any[]>([])
   const [to, setTo] = useState('')
-  const [authority, setAuthority] = useState('*')
+  const [authority, setAuthority] = useState('review')
   const [days, setDays] = useState('7')
   const [limit, setLimit] = useState('')
   const [reason, setReason] = useState('')
@@ -195,7 +195,6 @@ function DelegateModal({ onClose, onDone }: any) {
           <div className="form-row">
             <label>Authority</label>
             <select className="select" value={authority} onChange={e => setAuthority(e.target.value)}>
-              <option value="*">All actions</option>
               <option value="approve">Approve only</option>
               <option value="review">Review only</option>
             </select>
@@ -207,7 +206,7 @@ function DelegateModal({ onClose, onDone }: any) {
             </div>
             <div className="form-row" style={{ flex: 1 }}>
               <label>Amount limit (optional)</label>
-              <input className="inp mono" value={limit} onChange={e => setLimit(e.target.value)} placeholder="none" />
+              <input className="inp mono" value={limit} onChange={e => setLimit(e.target.value)} placeholder={authority === 'approve' ? 'Required for approval' : 'none'} />
             </div>
           </div>
           <div className="form-row">
