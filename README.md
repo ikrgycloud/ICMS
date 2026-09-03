@@ -184,7 +184,3 @@ login remains available for the showcase student profile.
 
 FastAPI · SQLAlchemy 2 · PostgreSQL 16 (SQLite fallback) · React 18 · Vite 5 · TypeScript ·
 Nginx (production frontend) · Docker Compose.
-
-
-
-icmp
