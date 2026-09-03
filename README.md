@@ -145,6 +145,10 @@ Every demo account uses password **`demo123`**. The login screen lets you filter
 by authority level (L1–L8) and fills the credentials in for you. One head account per office;
 a few good starting points:
 
+Every seeded student also receives an individual portal account. Use the student's roll number
+as the username (case-insensitive) and `demo123` as the initial password. The shared `student`
+login remains available for the showcase student profile.
+
 | Username | Office | What you can do |
 |----------|--------|-----------------|
 | `principal` | Principal (L3) | Governance, academics, finance, approvals |

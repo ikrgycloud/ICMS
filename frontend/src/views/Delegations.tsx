@@ -25,8 +25,8 @@ export default function Delegations({ user }: { user: any }) {
   }
 
   return (
-    <div className="fade-in delegation-workspace">
-      <header className="campus-workspace-header">
+    <div className="fade-in">
+      <div className="page-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
         <div>
           <h1>Delegation</h1>
           <p>Authority you grant is time-bound, scoped, revocable and audited. Delegations assigned to your login also appear here for review.</p>
@@ -42,7 +42,7 @@ export default function Delegations({ user }: { user: any }) {
                 <thead><tr><th>From</th><th>To</th><th>Delegated Access</th><th>Limit</th><th>Window</th><th>Status</th><th></th></tr></thead>
                 <tbody>
                   {rows.map(d => (
-                    <tr key={d.id} onClick={() => setSelected(d)} className="delegation-row">
+                    <tr key={d.id}>
                       <td>{d.from_name || d.from}</td>
                       <td style={{ fontWeight: 600 }}>{d.to_name || d.to}</td>
                       <td><span className="tag" style={{ background: '#f3ecfa', color: '#7a4bb0' }}>{humanizeAccess(d.authority_label || d.authority)}</span></td>

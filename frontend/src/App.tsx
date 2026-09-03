@@ -52,7 +52,6 @@ import {
 import RiskIssues from './modules/RiskIssues'
 import CampusEscalations from './modules/CampusEscalations'
 import CampusReports from './modules/CampusReports'
-import CampusOverview from './modules/CampusOverview'
 
 const LEVEL_COLORS: Record<number, string> = {
   1: '#d92d3a',
@@ -105,8 +104,10 @@ const CAMPUS_HEAD_NAV = [
   ['CAMPUS MANAGEMENT', 'Departments & Programs', 'departments_programs'],
   ['CAMPUS MANAGEMENT', 'Leadership Team', 'leadership_team'],
   ['CAMPUS MANAGEMENT', 'Campus Calendar', 'calendar'],
-  ['PERFORMANCE', 'Campus Overview', 'campus_overview'],
+  ['PERFORMANCE', 'Academic Snapshot', 'academic_snapshot'],
+  ['PERFORMANCE', 'Student Snapshot', 'student_snapshot'],
   ['PERFORMANCE', 'Finance', 'finance'],
+  ['PERFORMANCE', 'Workforce', 'workforce'],
   ['PERFORMANCE', 'Infrastructure', 'infrastructure'],
   ['PERFORMANCE', 'Placements', 'placements'],
   ['PERFORMANCE', 'Risk & Issues', 'risk_issues'],
@@ -552,8 +553,6 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <DepartmentsPrograms />
     case 'leadership_team':
       return <LeadershipTeam />
-    case 'campus_overview':
-      return <CampusOverview />
     case 'academic_snapshot':
       return <AcademicSnapshot />
     case 'student_snapshot':

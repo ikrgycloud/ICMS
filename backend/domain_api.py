@@ -37,6 +37,9 @@ MONETARY = {("finance", "waive"): ("fee_waiver", "Vice-Chancellor"),
 # --------------------------------------------------------------------------- #
 def gate(s, ctx, module: str, action: str, amount=None):
     """Return the Decision for (module, action); raise 403 if not ALLOW/ESCALATE."""
+    if ctx.get("office_n") == 35 and module in {"students", "calendar", "academic_calendar"}:
+        from authority import Decision, DENY
+        return Decision(DENY, "This module is not available to Front Office"), "view"
     verb = MODULE_ACTIONS.get(module, {}).get(action, "view")
     o = office(ctx["office_n"])
     rbac = rbac_for(ctx["office_n"], o["level"], verb)
@@ -156,6 +159,8 @@ def workspace(ctx=Depends(auth), s=Depends(db)):
 # --------------------------------------------------------------------------- #
 @router.get("/overview")
 def overview(ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") == 35:
+        raise HTTPException(403, "This generic module is not available to Front Office")
     # The generic overview predates the Campus Head portal. Campus Head must
     # never receive tenant-wide aggregates as a campus dashboard.
     if ctx.get("office_n") == 3:

@@ -107,7 +107,7 @@ export default function RiskIssues() {
       <div className="campus-head-metric"><label>Escalated</label><strong>{summary.escalated || 0}</strong></div>
       <div className="campus-head-metric"><label>Resolved</label><strong>{summary.resolved || 0}</strong></div>
     </div>
-    <div className="workspace-filter-bar"><span className="filter-label">Filter register</span><div className="risk-filters">
+    <div className="campus-head-panel"><div className="risk-filters">
       <select className="select" value={filters.status} onChange={e => setFilters({ ...filters, status: e.target.value })}><option value="">All statuses</option><option value="OPEN">Open</option><option value="IN_PROGRESS">In progress</option><option value="RESOLVED">Resolved</option><option value="CLOSED">Closed</option></select>
       <select className="select" value={filters.severity} onChange={e => setFilters({ ...filters, severity: e.target.value })}><option value="">All severities</option>{severities.map(value => <option key={value}>{value}</option>)}</select>
       <select className="select" value={filters.category} onChange={e => setFilters({ ...filters, category: e.target.value })}><option value="">All categories</option>{categories.map(value => <option key={value}>{value}</option>)}</select>

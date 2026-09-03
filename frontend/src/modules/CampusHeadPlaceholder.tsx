@@ -229,7 +229,7 @@ export function LeadershipTeam() {
   )
 }
 
-export function AcademicSnapshot({ embedded = false }: { embedded?: boolean }) {
+export function AcademicSnapshot() {
   const [overview, setOverview] = useState<any>(null)
   const [calendar, setCalendar] = useState<any>(null)
 
@@ -245,29 +245,26 @@ export function AcademicSnapshot({ embedded = false }: { embedded?: boolean }) {
 
   const stats = overview?.stats || {}
   return (
-    <div className={embedded ? 'campus-overview-content' : 'fade-in campus-head-page'}>
-      {!embedded && <div className="page-head">
+    <div className="fade-in campus-head-page">
+      <div className="page-head">
         <h1>Academic Snapshot</h1>
         <p>Campus academic summary based on existing available records.</p>
-      </div>}
-      <div className="campus-overview-register">
-        <div className="campus-register-heading"><span>Academic performance</span><small>Current available records</small></div>
-        <div className="campus-register-grid">
-          {[
-            ['Students', n(stats.students, 'Not available yet')],
-            ['Faculty', n(stats.faculty, 'Not available yet')],
-            ['Courses', n(stats.courses, 'Not available yet')],
-            ['Sections', n(stats.sections, 'Not available yet')],
-            ['Academic term', n(calendar?.selected_term, 'Not available yet')],
-            ['Placement offers', n(stats.placement_offers, 'Not available yet')],
-          ].map(([label, value]) => <div className="campus-register-row" key={label}><span>{label}</span><strong>{value}</strong></div>)}
+      </div>
+      <div className="campus-head-panel">
+        <div className="campus-head-metrics">
+          <div className="campus-head-metric"><label>Students</label><strong>{n(stats.students, 'Not available yet')}</strong></div>
+          <div className="campus-head-metric"><label>Faculty</label><strong>{n(stats.faculty, 'Not available yet')}</strong></div>
+          <div className="campus-head-metric"><label>Courses</label><strong>{n(stats.courses, 'Not available yet')}</strong></div>
+          <div className="campus-head-metric"><label>Sections</label><strong>{n(stats.sections, 'Not available yet')}</strong></div>
+          <div className="campus-head-metric"><label>Academic term</label><strong>{n(calendar?.selected_term, 'Not available yet')}</strong></div>
+          <div className="campus-head-metric"><label>Placement offers</label><strong>{n(stats.placement_offers, 'Not available yet')}</strong></div>
         </div>
       </div>
     </div>
   )
 }
 
-export function StudentSnapshot({ embedded = false }: { embedded?: boolean }) {
+export function StudentSnapshot() {
   const [students, setStudents] = useState<any>({ summary: {}, departments: [], students: [] })
   useEffect(() => {
     api.students('', '', 1, 25, {}).then(setStudents).catch(() => setStudents({ summary: {}, departments: [], students: [] }))
@@ -275,28 +272,24 @@ export function StudentSnapshot({ embedded = false }: { embedded?: boolean }) {
 
   const summary = students.summary || {}
   return (
-    <div className={embedded ? 'campus-overview-content' : 'fade-in campus-head-page'}>
-      {!embedded && <div className="page-head">
+    <div className="fade-in campus-head-page">
+      <div className="page-head">
         <h1>Student Snapshot</h1>
         <p>Student population and status summary using existing records.</p>
-      </div>}
-      <div className="campus-overview-register">
-        <div className="campus-register-heading"><span>Student performance</span><small>Population and current standing</small></div>
-        <div className="campus-register-grid">
-          {[
-            ['All students', n(summary.all_students, 'Not available yet')],
-            ['At risk', n(summary.at_risk, 'Not available yet')],
-            ['Departments', (students.departments || []).length || 'Not available yet'],
-            ['Open grievances', n(summary.open_grievances, 'Not available yet')],
-          ].map(([label, value]) => <div className="campus-register-row" key={label}><span>{label}</span><strong>{value}</strong></div>)}
+      </div>
+      <div className="campus-head-panel">
+        <div className="campus-head-metrics">
+          <div className="campus-head-metric"><label>All students</label><strong>{n(summary.all_students, 'Not available yet')}</strong></div>
+          <div className="campus-head-metric"><label>At risk</label><strong>{n(summary.at_risk, 'Not available yet')}</strong></div>
+          <div className="campus-head-metric"><label>Departments</label><strong>{(students.departments || []).length || 'Not available yet'}</strong></div>
+          <div className="campus-head-metric"><label>Open grievances</label><strong>{n(summary.open_grievances, 'Not available yet')}</strong></div>
         </div>
-        {!!students.departments?.length && <div className="campus-register-table-wrap"><table className="campus-register-table"><thead><tr><th>Department</th><th>Students</th></tr></thead><tbody>{students.departments.map((department: any) => <tr key={department.id || department.name}><td>{department.name || department.code}</td><td>{department.count}</td></tr>)}</tbody></table></div>}
       </div>
     </div>
   )
 }
 
-export function WorkforceOverview({ embedded = false }: { embedded?: boolean }) {
+export function WorkforceOverview() {
   const [faculty, setFaculty] = useState<any>({ summary: {}, staff: [] })
   useEffect(() => {
     api.facultyStaff('', '', '', 1, {}).then(setFaculty).catch(() => setFaculty({ summary: {}, staff: [] }))
@@ -304,22 +297,18 @@ export function WorkforceOverview({ embedded = false }: { embedded?: boolean }) 
 
   const summary = faculty.summary || {}
   return (
-    <div className={embedded ? 'campus-overview-content' : 'fade-in campus-head-page'}>
-      {!embedded && <div className="page-head">
+    <div className="fade-in campus-head-page">
+      <div className="page-head">
         <h1>Workforce</h1>
         <p>Read-only workforce summary for the campus.</p>
-      </div>}
-      <div className="campus-overview-register">
-        <div className="campus-register-heading"><span>Workforce directory</span><small>Read-only campus workforce summary</small></div>
-        <div className="campus-register-grid">
-          {[
-            ['Total staff', n(summary.total, 'Not available yet')],
-            ['Faculty', n(summary.faculty, 'Not available yet')],
-            ['Administrative', n(summary.administrative, 'Not available yet')],
-            ['Support', n(summary.support, 'Not available yet')],
-          ].map(([label, value]) => <div className="campus-register-row" key={label}><span>{label}</span><strong>{value}</strong></div>)}
+      </div>
+      <div className="campus-head-panel">
+        <div className="campus-head-metrics">
+          <div className="campus-head-metric"><label>Total staff</label><strong>{n(summary.total, 'Not available yet')}</strong></div>
+          <div className="campus-head-metric"><label>Faculty</label><strong>{n(summary.faculty, 'Not available yet')}</strong></div>
+          <div className="campus-head-metric"><label>Administrative</label><strong>{n(summary.administrative, 'Not available yet')}</strong></div>
+          <div className="campus-head-metric"><label>Support</label><strong>{n(summary.support, 'Not available yet')}</strong></div>
         </div>
-        {!!faculty.staff?.length && <div className="campus-register-table-wrap"><table className="campus-register-table"><thead><tr><th>Employee</th><th>Department</th><th>Designation</th><th>Status</th></tr></thead><tbody>{faculty.staff.map((member: any) => <tr key={member.id || member.name}><td>{member.name || 'Not available yet'}</td><td>{member.department || 'Not available yet'}</td><td>{member.designation || member.role || 'Not available yet'}</td><td>{member.status || 'Not available yet'}</td></tr>)}</tbody></table></div>}
       </div>
     </div>
   )

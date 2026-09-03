@@ -11,10 +11,11 @@ from datetime import date, datetime, timedelta
 from database import (SessionLocal, TENANT, engine, DEMO_USERNAMES, CAMPUS_SCOPES,
                       slug, ensure_additive_schema)
 from matrices import APPROVAL_MATRIX
-from models import (Base, User, OrgScope, Delegation, DelegationPolicy, DelegationProfile,
+from models import (Base, User, Person, Role, UserRole, OrgScope, Delegation, DelegationPolicy, DelegationProfile,
                     WorkflowInstance, WorkflowProfile, Approval, Notification,
                     DelegationOption, DelegationContext)
 from core import write_audit
+from authority import pwhash
 import domain_models as D
 
 R = random.Random(42)
@@ -3339,6 +3340,36 @@ def _seed_principal_compliance_requirements(s):
                     title=title, description="Operational compliance requirement routed through the ICMS approval workflow.",
                     category=category, responsible_department=department, priority=priority,
                     due_date=due_date, evidence_reference=evidence, workflow_id=workflow_id))
+    s.commit()
+
+
+def _seed_student_portal_accounts(s):
+    """Create individual roll-number logins without replacing the shared demo account."""
+    student_role = s.get(Role, "role_36_0")
+    for student in s.query(D.Student).order_by(D.Student.roll_no).all():
+        username = (student.roll_no or "").strip().lower()
+        if not username:
+            continue
+        user = s.get(User, student.user_id) if student.user_id else None
+        if user and user.username == "student":
+            continue
+        if not user:
+            user = s.query(User).filter(User.username.ilike(username)).first()
+        person_id, user_id = f"person_student_{username}", f"user_student_{username}"
+        if not user:
+            if not s.get(Person, person_id):
+                s.add(Person(id=person_id, tenant_id=student.tenant_id or TENANT, name=student.name,
+                             email=student.email or f"{username}@icms.edu", contact=""))
+            user = User(id=user_id, tenant_id=student.tenant_id or TENANT, person_id=person_id,
+                        username=username, password_hash=pwhash("demo123"), status="active", mfa_enabled=False,
+                        office_n=36, role="Student", scope_level="individual", scope_ref=student.id)
+            s.add(user)
+        if user.password_hash == "seed":
+            user.password_hash = pwhash("demo123")
+        student.user_id, user.scope_ref = user.id, student.id
+        if student_role and not s.get(UserRole, f"ur_student_{student.id}"):
+            s.add(UserRole(id=f"ur_student_{student.id}", user_id=user.id, role_id=student_role.id,
+                           org_scope_id=student.id))
     s.commit()
 
 

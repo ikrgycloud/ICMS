@@ -85,6 +85,13 @@ def auth(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_schem
         raise HTTPException(401, "Invalid or expired token")
 
 
+def non_front_office(ctx=Depends(auth)) -> dict:
+    """Protect shared modules from the Front Office-only account."""
+    if ctx["office_n"] == 35:
+        raise HTTPException(403, "This generic module is not available to Front Office")
+    return ctx
+
+
 def uid() -> str:
     return uuid.uuid4().hex[:12]
 
@@ -2243,9 +2250,15 @@ class CheckIn(BaseModel):
     resource: str = "*"
     amount: float | None = None
 
+FRONT_OFFICE_REMOVED_RESOURCES = {"students", "calendar", "academic_calendar", "academic-calendar", "workflows", "delegation", "audit", "matrices", "directory"}
+
 
 @app.post("/api/authz/check")
 def authz_check(body: CheckIn, ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] == 35 and body.resource in FRONT_OFFICE_REMOVED_RESOURCES:
+        return {"rbac_authority": NOT_ALLOWED, "outcome": DENY,
+                "reason": "This resource is not available to Front Office", "authority": NOT_ALLOWED,
+                "escalate_to": None}
     o = office(ctx["office_n"])
     rbac = rbac_for(ctx["office_n"], o["level"], body.action if body.action in VERBS else "view")
     dec = authorize(ctx=ctx, action=body.action, resource=body.resource,

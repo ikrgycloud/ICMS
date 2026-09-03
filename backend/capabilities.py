@@ -95,7 +95,7 @@ OFFICE_MODULES = {
     32: ["procurement", "approvals"],                                              # Purchase
     33: ["assets", "procurement"],                                                 # Store / Inventory
     34: ["assets"],                                                               # Security
-    35: ["students", "directory"],                                                 # Front Office
+    35: ["frontdesk_dashboard", "frontdesk_visitors", "frontdesk_appointments", "frontdesk_helpdesk", "frontdesk_calls", "frontdesk_directory", "frontdesk_delegations"],
     36: ["students", "academics", "attendance", "examinations", "scores", "finance",         # Student Portal
          "library", "hostel", "transport", "placements", "grievance"],
     37: ["students", "finance"],                                                   # Parent Portal
@@ -169,8 +169,8 @@ ACTION_OFFICE_ALLOW = {
     ("academic_calendar", "create"): {1, 2, 4, 5},
     ("academic_calendar", "edit"): {1, 2, 4, 5},
     ("academic_calendar", "delete"): {1, 2, 4, 5},
-    ("students", "add"): {15, 35},                    # Admissions / Front office own creation
-    ("students", "edit"): {10, 15, 35},               # Principal has oversight, not record editing
+    ("students", "add"): {15},                         # Admissions owns creation
+    ("students", "edit"): {10, 15},                    # Principal has oversight, not record editing
     ("academics", "create_section"): {6, 10, 17},     # Dean Acad, HOD, Acad Coordinator
     ("academics", "create_course"): {6, 10, 17},      # Curriculum owners
     ("academics", "assign_faculty"): {6, 10, 17},
@@ -232,6 +232,8 @@ def action_allowed_for_office(module: str, action: str, office_n: int) -> bool:
 
 def modules_for_office(n: int) -> list:
     """Ordered, de-duplicated module list for an office."""
+    if n == 35:
+        return list(OFFICE_MODULES[35])
     mods = list(OFFICE_MODULES.get(n, []))
     if n in {4, 5, 6, 10, 17}:
         mods.append("curriculum")

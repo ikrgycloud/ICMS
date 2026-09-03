@@ -89,7 +89,7 @@ export function Modal({ title, children, onClose, footer, className = '' }:
   { title: string; children: ReactNode; onClose: () => void; footer?: ReactNode; className?: string }) {
   return (
     <div className="modal-bg" onClick={onClose}>
-      <div className={`modal ${className}`.trim()} onClick={e => e.stopPropagation()}>
+      <div className={`modal ${className} ${title.startsWith('Affected Students') ? 'affected-students-modal' : ''}`.trim()} onClick={e => e.stopPropagation()}>
         <div className="modal-h"><h3>{title}</h3><button className="modal-x" onClick={onClose}>✕</button></div>
         <div className="modal-b">{children}</div>
         {footer && <div className="modal-f">{footer}</div>}

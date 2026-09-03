@@ -58,7 +58,7 @@ export default function Landing({ onSignIn }: { onSignIn: () => void }) {
             <a href="#audiences">Portals</a>
             <a href="#offices">Offices</a>
             <a href="#platform">Platform</a>
-            <a href="#" onClick={e => { e.preventDefault(); onSignIn() }}>Sign in</a>
+            <a href="#" onClick={e => { e.preventDefault(); onSignIn(); }}>Sign in</a>
           </div>
         </div>
       </div>
