@@ -3414,14 +3414,265 @@ def allocate_hostel(alloc_id: str, ctx=Depends(auth), s=Depends(db)):
     return {"status": "allocated", "decision": dec.as_dict()}
 
 
+class TransportRouteIn(BaseModel):
+    name: str
+    vehicle_no: str = ""
+    seats: int = Field(40, ge=1, le=200)
+
+class TransportStopIn(BaseModel):
+    route_id: str
+    name: str
+    sequence: int = Field(1, ge=1)
+    address: str = ""
+    pickup_time: str = ""
+    drop_time: str = ""
+    latitude: float | None = None
+    longitude: float | None = None
+
+class TransportVehicleIn(BaseModel):
+    number: str = ""
+    vehicle_number: str = ""
+    kind: str = "Bus"
+    capacity: int = Field(40, ge=1, le=200)
+    status: str = "available"
+
+class TransportDriverIn(BaseModel):
+    name: str
+    employee_id: str = ""
+    phone: str = ""
+    license_no: str = ""
+    license_number: str = ""
+    license_expiry: date | None = None
+
+class TransportRequestIn(BaseModel):
+    route_id: str
+    stop_id: str = ""
+    pickup_stop_id: str = ""
+
+class TransportAllocationIn(BaseModel):
+    student_id: str
+    route_id: str
+    stop_id: str = ""
+    pickup_stop_id: str = ""
+    vehicle_id: str
+    driver_id: str | None = None
+
+def _transport_bundle(s):
+    routes = s.query(D.TransportRoute).all()
+    vehicles = s.query(D.TransportVehicle).all()
+    drivers = s.query(D.TransportDriver).all()
+    reqs = s.query(D.TransportRequest).order_by(desc(D.TransportRequest.created_at)).all()
+    allocs = s.query(D.TransportAllocation).filter(D.TransportAllocation.status == "active").all()
+    students = s.query(D.Student).filter(D.Student.status == "active").all()
+    student_map = {x.id: x for x in students}
+    route_map = {x.id: x for x in routes}
+    vehicle_map = {x.id: x for x in vehicles}
+    driver_map = {x.id: x for x in drivers}
+    def stop_id(body): return body.stop_id or body.pickup_stop_id
+    def allocation_driver(a):
+        vehicle = vehicle_map.get(a.vehicle_id)
+        driver_id = a.driver_id or (vehicle.driver_id if vehicle else None)
+        return driver_id, driver_map.get(driver_id)
+    def allocation_payload(a):
+        student = student_map.get(a.student_id)
+        vehicle = vehicle_map.get(a.vehicle_id)
+        driver_id, driver = allocation_driver(a)
+        stop = s.get(D.TransportStop, a.stop_id)
+        route = route_map.get(a.route_id)
+        return {"id": a.id, "student_id": a.student_id, "student_name": student.name if student else a.student_id,
+                "roll_no": student.roll_no if student else "", "route_id": a.route_id,
+                "route": route.name if route else a.route_id, "stop_id": a.stop_id,
+                "pickup_stop_id": a.stop_id, "pickup": stop.name if stop else "",
+                "vehicle_id": a.vehicle_id, "vehicle": vehicle.number if vehicle else a.vehicle_id,
+                "driver_id": driver_id, "driver": driver.name if driver else "", "status": a.status}
+    return {
+        "routes": [{"id": r.id, "name": r.name, "route_code": r.id[:6].upper(), "status": "ACTIVE", "vehicle_no": r.vehicle_no, "seats": r.seats,
+                    "taken": sum(a.vehicle_id == r.vehicle_no for a in allocs),
+                    "stops": [{"id": x.id, "name": x.name, "sequence": x.sequence, "address": x.address,
+                               "pickup_time": x.pickup_time, "drop_time": x.drop_time,
+                               "latitude": x.latitude, "longitude": x.longitude}
+                              for x in s.query(D.TransportStop).filter(D.TransportStop.route_id == r.id).order_by(D.TransportStop.sequence).all()]}
+                   for r in routes],
+        "vehicles": [{"id": v.id, "number": v.number, "vehicle_number": v.number, "kind": v.kind, "vehicle_type": v.kind, "capacity": v.capacity,
+                      "status": v.status, "occupied": sum(a.vehicle_id == v.id for a in allocs),
+                      "driver_id": v.driver_id} for v in vehicles],
+        "drivers": [{"id": d.id, "name": d.name, "employee_id": d.employee_id, "phone": d.phone,
+                     "license_no": d.license_no, "license_expiry": d.license_expiry.isoformat() if d.license_expiry else "",
+                     "status": d.status} for d in drivers],
+        "requests": [{"id": q.id, "student_id": q.student_id, "student_name": (s.get(D.Student, q.student_id).name if s.get(D.Student, q.student_id) else q.student_id), "student": (s.get(D.Student, q.student_id).name if s.get(D.Student, q.student_id) else q.student_id),
+                      "route_id": q.route_id, "stop_id": q.stop_id, "pickup_stop_id": q.stop_id, "status": q.status.upper()} for q in reqs],
+        "allocations": [allocation_payload(a) for a in allocs],
+        "students": [{"id": x.id, "roll_no": x.roll_no, "name": x.name} for x in students],
+    }
+
 @router.get("/transport")
 def transport(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "transport", "view")[0])
-    rows = s.query(D.TransportRoute).all()
-    return {"routes": [{"id": r.id, "name": r.name, "stops": r.stops,
-                        "vehicle": r.vehicle_no, "seats": r.seats,
-                        "taken": r.seats_taken, "free": r.seats - r.seats_taken}
-                       for r in rows]}
+    return _transport_bundle(s)
+
+@router.post("/transport/routes")
+def create_transport_route(body: TransportRouteIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
+    row = D.TransportRoute(id=uid(), tenant_id=TENANT, name=body.name, vehicle_no=body.vehicle_no, seats=body.seats)
+    s.add(row); s.commit(); return {"id": row.id, "decision": dec.as_dict()}
+
+@router.post("/transport/stops")
+def create_transport_stop(body: TransportStopIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
+    if not s.get(D.TransportRoute, body.route_id): raise HTTPException(404, "Route not found")
+    row = D.TransportStop(id=uid(), tenant_id=TENANT, **body.model_dump())
+    s.add(row); s.commit(); return {"id": row.id, "decision": dec.as_dict()}
+
+@router.post("/transport/vehicles")
+def create_transport_vehicle(body: TransportVehicleIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    number = body.number or body.vehicle_number
+    if not number: raise HTTPException(422, "Vehicle number is required")
+    if s.query(D.TransportVehicle).filter(D.TransportVehicle.number == number).first(): raise HTTPException(409, "Vehicle number already exists")
+    row = D.TransportVehicle(id=uid(), tenant_id=TENANT, number=number, kind=body.kind, capacity=body.capacity, status=(body.status or "available").lower()); s.add(row); s.commit(); return {"id": row.id, "decision": dec.as_dict()}
+
+@router.post("/transport/drivers")
+def create_transport_driver(body: TransportDriverIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    row = D.TransportDriver(id=uid(), tenant_id=TENANT, name=body.name, employee_id=body.employee_id, phone=body.phone, license_no=body.license_no or body.license_number, license_expiry=body.license_expiry); s.add(row); s.commit(); return {"id": row.id, "decision": dec.as_dict()}
+
+@router.post("/transport/requests")
+def create_transport_request(body: TransportRequestIn, ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "transport", "view")[0])
+    student = s.query(D.Student).filter(or_(D.Student.user_id == ctx["sub"], D.Student.id == ctx.get("scope_ref"))).first()
+    if not student: raise HTTPException(403, "Student account required")
+    if s.query(D.TransportRequest).filter(D.TransportRequest.student_id == student.id, D.TransportRequest.status == "pending").first(): raise HTTPException(409, "Request already pending")
+    stop_id = body.stop_id or body.pickup_stop_id
+    if not stop_id: raise HTTPException(422, "Pickup stop is required")
+    row = D.TransportRequest(id=uid(), tenant_id=TENANT, student_id=student.id, route_id=body.route_id, stop_id=stop_id); s.add(row); s.commit(); return {"id": row.id, "status": row.status}
+
+@router.post("/transport/allocations")
+def create_transport_allocation(body: TransportAllocationIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    v = s.get(D.TransportVehicle, body.vehicle_id) or s.query(D.TransportVehicle).filter(D.TransportVehicle.number == body.vehicle_id).first()
+    # The UI historically used both ACTIVE and AVAILABLE (and older records
+    # may use ASSIGNED). Only maintenance/inactive vehicles must be blocked;
+    # assignment itself is a valid way to move an operational vehicle forward.
+    if not v or (v.status or "").strip().lower() in ("maintenance", "inactive", "retired"): raise HTTPException(400, "Vehicle is not available")
+    if s.query(D.TransportAllocation).filter(D.TransportAllocation.student_id == body.student_id, D.TransportAllocation.status == "active").first(): raise HTTPException(409, "Student already allocated")
+    occupied = s.query(D.TransportAllocation).filter(D.TransportAllocation.vehicle_id == v.id, D.TransportAllocation.status == "active").count()
+    if occupied >= v.capacity: raise HTTPException(400, "Vehicle has no available seats")
+    stop_id = body.stop_id or body.pickup_stop_id
+    row = D.TransportAllocation(id=uid(), tenant_id=TENANT, student_id=body.student_id, route_id=body.route_id, stop_id=stop_id, vehicle_id=body.vehicle_id, driver_id=body.driver_id); s.add(row); s.commit(); return {"id": row.id, "decision": dec.as_dict()}
+
+@router.post("/transport/requests/{request_id}/approve")
+def approve_transport_request(request_id: str, body: TransportAllocationIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    q = s.get(D.TransportRequest, request_id)
+    if not q or q.status != "pending": raise HTTPException(404, "Pending request not found")
+    q.status = "approved"
+    v = s.get(D.TransportVehicle, body.vehicle_id) or s.query(D.TransportVehicle).filter(D.TransportVehicle.number == body.vehicle_id).first()
+    if not v: raise HTTPException(404, "Vehicle not found")
+    s.add(D.TransportAllocation(id=uid(), tenant_id=TENANT, student_id=q.student_id, route_id=body.route_id, stop_id=body.stop_id or body.pickup_stop_id, vehicle_id=body.vehicle_id, driver_id=body.driver_id))
+    s.commit(); return {"status": q.status, "decision": dec.as_dict()}
+
+@router.post("/transport/requests/{request_id}/reject")
+def reject_transport_request(request_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    q=s.get(D.TransportRequest, request_id)
+    if not q: raise HTTPException(404, "Request not found")
+    q.status="rejected"; s.commit(); return {"status": q.status, "decision": dec.as_dict()}
+
+@router.put("/transport/allocations/{allocation_id}")
+def update_transport_allocation(allocation_id: str, body: TransportAllocationIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    a=s.get(D.TransportAllocation, allocation_id)
+    if not a: raise HTTPException(404, "Allocation not found")
+    for k in ("student_id","route_id","vehicle_id","driver_id"): setattr(a,k,getattr(body,k))
+    a.stop_id=body.stop_id or body.pickup_stop_id; s.commit(); return {"id":a.id,"decision":dec.as_dict()}
+
+@router.delete("/transport/allocations/{allocation_id}")
+def delete_transport_allocation(allocation_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    a=s.get(D.TransportAllocation, allocation_id)
+    if not a: raise HTTPException(404, "Allocation not found")
+    a.status="inactive"; s.commit(); return {"status":"inactive","decision":dec.as_dict()}
+
+@router.delete("/transport/routes/{route_id}")
+def delete_transport_route(route_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
+    r=s.get(D.TransportRoute, route_id)
+    if not r: raise HTTPException(404, "Route not found")
+    s.delete(r); s.commit(); return {"status":"deleted","decision":dec.as_dict()}
+
+@router.put("/transport/stops/{stop_id}")
+def update_transport_stop(stop_id: str, body: TransportStopIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
+    x=s.get(D.TransportStop, stop_id)
+    if not x: raise HTTPException(404, "Stop not found")
+    for k,v in body.model_dump().items(): setattr(x,k,v)
+    s.commit(); return {"id":x.id,"decision":dec.as_dict()}
+
+@router.delete("/transport/stops/{stop_id}")
+def delete_transport_stop(stop_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
+    x=s.get(D.TransportStop, stop_id)
+    if not x: raise HTTPException(404, "Stop not found")
+    s.delete(x); s.commit(); return {"status":"deleted","decision":dec.as_dict()}
+
+@router.put("/transport/vehicles/{vehicle_id}")
+def update_transport_vehicle(vehicle_id: str, body: TransportVehicleIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    v=s.get(D.TransportVehicle, vehicle_id)
+    if not v: raise HTTPException(404, "Vehicle not found")
+    v.number=body.number or body.vehicle_number or v.number; v.kind=body.kind; v.capacity=body.capacity; v.status=(body.status or "available").lower()
+    s.commit(); return {"id":v.id,"decision":dec.as_dict()}
+
+class TransportTripIn(BaseModel):
+    vehicle_id: str
+    driver_id: str
+    trip_type: str
+
+class TransportLocationIn(BaseModel):
+    vehicle_id: str
+    trip_id: str
+    latitude: float
+    longitude: float
+
+@router.post("/transport/trips/start")
+def start_transport_trip(body: TransportTripIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    if body.trip_type not in ("PICKUP","DROP"): raise HTTPException(400,"Invalid trip type")
+    if s.query(D.TransportTrip).filter(D.TransportTrip.vehicle_id==body.vehicle_id,D.TransportTrip.status=="running").first(): raise HTTPException(409,"Trip already running")
+    t=D.TransportTrip(id=uid(),tenant_id=TENANT,vehicle_id=body.vehicle_id,driver_id=body.driver_id,trip_type=body.trip_type); s.add(t); s.commit(); return {"id":t.id,"status":t.status,"trip_type":t.trip_type}
+
+@router.post("/transport/trips/{trip_id}/end")
+def end_transport_trip(trip_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    t=s.get(D.TransportTrip,trip_id)
+    if not t: raise HTTPException(404,"Trip not found")
+    t.status="ended"; t.ended_at=datetime.utcnow(); s.commit(); return {"status":t.status,"decision":dec.as_dict()}
+
+@router.post("/transport/locations")
+def send_transport_location(body: TransportLocationIn, ctx=Depends(auth), s=Depends(db)):
+    t=s.get(D.TransportTrip,body.trip_id)
+    if not t or t.status!="running" or t.vehicle_id!=body.vehicle_id: raise HTTPException(400,"No running trip")
+    t.latitude=body.latitude; t.longitude=body.longitude; t.updated_at=datetime.utcnow(); s.commit(); return {"status":"recorded"}
+
+@router.get("/transport/live-location/{vehicle_id}")
+def live_transport_location(vehicle_id: str, ctx=Depends(auth), s=Depends(db)):
+    t=s.query(D.TransportTrip).filter(D.TransportTrip.vehicle_id==vehicle_id).order_by(desc(D.TransportTrip.started_at)).first()
+    if not t: return {"status":"NOT_STARTED","location":None}
+    return {"status":t.status.upper(),"location":{"latitude":t.latitude,"longitude":t.longitude,"recorded_at":t.updated_at.isoformat() if t.updated_at else ""} if t.latitude is not None else None}
+
+@router.get("/transport/my-allocation")
+def my_transport_allocation(ctx=Depends(auth), s=Depends(db)):
+    student=s.query(D.Student).filter(or_(D.Student.user_id==ctx["sub"],D.Student.id==ctx.get("scope_ref"))).first()
+    a=s.query(D.TransportAllocation).filter(D.TransportAllocation.student_id==student.id,D.TransportAllocation.status=="active").first() if student else None
+    return {"allocation": {"id":a.id,"student_id":a.student_id,"route_id":a.route_id,"pickup_stop_id":a.stop_id,"vehicle_id":a.vehicle_id,"status":a.status} if a else None}
+
+@router.get("/transport/driver-dashboard")
+def transport_driver_dashboard(ctx=Depends(auth), s=Depends(db)):
+    d=s.query(D.TransportDriver).filter(D.TransportDriver.user_id==ctx["sub"]).first()
+    if not d: raise HTTPException(403,"Driver account required")
+    v=s.query(D.TransportVehicle).filter(D.TransportVehicle.driver_id==d.id).first()
+    allocs=s.query(D.TransportAllocation).filter(D.TransportAllocation.vehicle_id==v.id,D.TransportAllocation.status=="active").all() if v else []
+    return {"driver": {"id":d.id,"name":d.name},"driver_id":d.id,"vehicle": {"id":v.id,"number":v.number,"capacity":v.capacity} if v else None,"students":[{"student_id":a.student_id} for a in allocs],"trip":None}
 
 
 # --------------------------------------------------------------------------- #

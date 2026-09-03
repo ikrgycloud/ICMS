@@ -1356,6 +1356,83 @@ class TransportRoute(Base):
     seats_taken = Column(Integer, default=0)
 
 
+class TransportStop(Base):
+    __tablename__ = "transport_stops"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    route_id = Column(String, ForeignKey("transport_routes.id"), index=True)
+    name = Column(String)
+    sequence = Column(Integer, default=1)
+    address = Column(String, default="")
+    pickup_time = Column(String, default="")
+    drop_time = Column(String, default="")
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+
+
+class TransportVehicle(Base):
+    __tablename__ = "transport_vehicles"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    number = Column(String, unique=True, index=True)
+    kind = Column(String, default="Bus")
+    capacity = Column(Integer, default=40)
+    status = Column(String, default="available")
+    driver_id = Column(String, nullable=True)
+
+
+class TransportDriver(Base):
+    __tablename__ = "transport_drivers"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    name = Column(String)
+    employee_id = Column(String, default="")
+    phone = Column(String, default="")
+    license_no = Column(String, default="")
+    license_expiry = Column(Date, nullable=True)
+    status = Column(String, default="active")
+    user_id = Column(String, nullable=True)
+
+
+class TransportRequest(Base):
+    __tablename__ = "transport_requests"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    student_id = Column(String, index=True)
+    route_id = Column(String)
+    stop_id = Column(String)
+    status = Column(String, default="pending")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TransportAllocation(Base):
+    __tablename__ = "transport_allocations"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    student_id = Column(String, index=True)
+    route_id = Column(String)
+    stop_id = Column(String)
+    vehicle_id = Column(String)
+    driver_id = Column(String, nullable=True)
+    status = Column(String, default="active")
+    assigned_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TransportTrip(Base):
+    __tablename__ = "transport_trips"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    vehicle_id = Column(String)
+    driver_id = Column(String)
+    trip_type = Column(String)
+    status = Column(String, default="running")
+    started_at = Column(DateTime, default=datetime.utcnow)
+    ended_at = Column(DateTime, nullable=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class Asset(Base):
     __tablename__ = "assets"
     id = Column(String, primary_key=True)

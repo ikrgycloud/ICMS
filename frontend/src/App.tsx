@@ -162,7 +162,7 @@ const ADMISSION_MANAGER_TAB: Record<string, string> = {
 export default function App({ onLogout }: { onLogout: () => void }) {
   const [user, setUser] = useState<any>(getUser())
   const [ws, setWs] = useState<any>(null)
-  const [view, setView] = useState('overview')
+  const [view, setView] = useState(() => getUser()?.office_n === 31 ? 'transport' : 'overview')
   const [sideOpen, setSideOpen] = useState(false)
   const [notifs, setNotifs] = useState<any>({ notifications: [], unread: 0 })
   const [showNotif, setShowNotif] = useState(false)
@@ -209,7 +209,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
       const next = await api.switchRole(role)
       saveSession(next.token, next.user)
       setUser(next.user)
-      setView('overview')
+      setView(next.user?.office_n === 31 ? 'transport' : 'overview')
       loadWs()
     } catch (error) {
       // Keep the current session if the switch fails.
@@ -254,6 +254,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const color = LEVEL_COLORS[user.level] || '#c9a24a'
   const chairmanShell = user.office_n === 1
   const principalShell = user.office_n === 4
+  const transportOfficeShell = user.office_n === 31
   const facultyShell = user.persona === 'faculty'
   const directorAdmissionsShell = user.office_n === 15 && user.active_role === 'Director of Admissions'
   // The seeded office role is named “Admissions Manager”; accept the singular
@@ -261,8 +262,11 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const admissionManagerShell = ['Admission Manager', 'Admissions Manager'].includes(user.active_role)
   const admissionsOperationsShell = directorAdmissionsShell || admissionManagerShell
   const admissionOfficeSingleRole = user.office_n === 15
+  const sidebarModules = transportOfficeShell
+    ? displayModules.filter((module: any) => !['Academics', 'Reference', 'Authority', 'Workspace'].includes(module.group))
+    : displayModules
   const groups: Record<string, any[]> = {}
-  displayModules.forEach((module: any) => {
+  sidebarModules.forEach((module: any) => {
     ;(groups[module.group] = groups[module.group] || []).push(module)
   })
   const order = chairmanShell ? CHAIRMAN_GROUP_ORDER : GROUP_ORDER
@@ -297,7 +301,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const activeAdmissionsGroupKeys = directorAdmissionsShell ? directorGroupKeys : managerGroupKeys
   const current = (admissionsOperationsShell
     ? Object.values(activeAdmissionsGroups).flat().find((module: any) => module.key === view)
-    : undefined) || displayModules.find((module: any) => module.key === view) || displayModules[0]
+    : undefined) || sidebarModules.find((module: any) => module.key === view) || sidebarModules[0]
 
   return (
     <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''} ${facultyShell ? 'faculty-shell' : ''} ${directorAdmissionsShell ? 'director-admissions-shell' : ''} ${admissionManagerShell ? 'admission-manager-shell' : ''}`}>
