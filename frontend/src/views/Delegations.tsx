@@ -31,11 +31,7 @@ export default function Delegations({ user }: { user: any }) {
           <h1>Delegation</h1>
           <p>Authority you grant is time-bound, scoped, revocable and audited. Delegations assigned to your login also appear here for review.</p>
         </div>
-<<<<<<< HEAD
         <button className="btn btn-brass" type="button" onClick={() => setShow(true)}>+ Delegate authority</button>
-=======
-        <button className="btn btn-brass" onClick={() => setShow(true)}>+ Delegate authority</button>
->>>>>>> 01314baf72e09bbbf09dbb2a9ab47d9628503e7d
       </header>
 
       {loading ? <Spinner /> : (
@@ -186,11 +182,7 @@ function DelegateModal({ onClose, onDone }: any) {
   return (
     <div className="modal-bg" onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
-<<<<<<< HEAD
         <div className="modal-h"><div><span className="eyebrow">Authority management</span><h3>Delegate authority</h3><p>Grant time-bound access within the permissions enforced by the server.</p></div><button className="close-x" type="button" onClick={onClose}>x</button></div>
-=======
-        <div className="modal-h"><h3>Delegate authority</h3><button className="close-x" onClick={onClose}>x</button></div>
->>>>>>> 01314baf72e09bbbf09dbb2a9ab47d9628503e7d
         <div className="modal-b">
           {err && <div className="err-box">{err}</div>}
           <div className="form-row">

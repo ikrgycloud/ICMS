@@ -95,18 +95,12 @@ export default function RiskIssues() {
   }
 
   return <div className="fade-in campus-head-page campus-workspace risk-workspace">
-<<<<<<< HEAD
     <header className="campus-workspace-header">
       <div><span className="eyebrow">Campus / Branch Head</span><h1>Risk &amp; Issues</h1><p>Campus-scoped risks, corrective actions, and escalation status.</p></div>
       <button className="btn btn-crimson" type="button" onClick={() => { setForm(emptyRisk); setEditing(false); setCreating(true) }}>Create Risk / Issue</button>
     </header>
     {error && <div className="err-box">{error}</div>}{message && <div className="success-box">{message}</div>}
     <div className="campus-head-metrics risk-summary-metrics risk-summary-strip">
-=======
-    <header className="campus-workspace-header"><div><span className="eyebrow">Campus / Branch Head</span><h1>Risk &amp; Issues</h1><p>Campus-scoped risks, corrective actions, and escalation status.</p></div><button className="btn btn-crimson" onClick={() => { setForm(emptyRisk); setEditing(false); setCreating(true) }}>Create Risk / Issue</button></header>
-    {error && <div className="err-box">{error}</div>}{message && <div className="success-box">{message}</div>}
-    <div className="campus-head-metrics risk-summary-metrics">
->>>>>>> 01314baf72e09bbbf09dbb2a9ab47d9628503e7d
       <div className="campus-head-metric"><label>Open Risks</label><strong>{summary.open || 0}</strong></div>
       <div className="campus-head-metric"><label>High / Critical</label><strong>{summary.high_critical || 0}</strong></div>
       <div className="campus-head-metric"><label>Overdue Actions</label><strong>{summary.overdue_actions || 0}</strong></div>

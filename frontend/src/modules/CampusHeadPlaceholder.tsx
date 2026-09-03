@@ -5,10 +5,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
-<<<<<<< HEAD
 import Workflows from '../views/Workflows'
-=======
->>>>>>> 01314baf72e09bbbf09dbb2a9ab47d9628503e7d
 import { StatePill, money } from '../views/ui'
 
 export function CampusProfile() {
@@ -398,23 +395,8 @@ export function CampusHeadApprovals() {
   </div>
 }
 
-<<<<<<< HEAD
 export function MyRequests({ user, onChange }: { user: any; onChange: () => void }) {
   return <Workflows user={user} onChange={onChange} initialTab="mine" title="My Requests" />
-=======
-export function MyRequests() {
-  return (
-    <div className="fade-in campus-head-page">
-      <div className="page-head">
-        <h1>My Requests</h1>
-        <p>Campus Head request tracking is read-only in this phase.</p>
-      </div>
-      <div className="campus-head-panel">
-        <EmptyState text="No request data available yet" />
-      </div>
-    </div>
-  )
->>>>>>> 01314baf72e09bbbf09dbb2a9ab47d9628503e7d
 }
 
 export function PolicyRepository() {

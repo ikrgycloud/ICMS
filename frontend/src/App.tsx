@@ -565,11 +565,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'risk_issues':
       return <RiskIssues />
     case 'my_requests':
-<<<<<<< HEAD
       return <MyRequests user={user} onChange={onChange} />
-=======
-      return <MyRequests />
->>>>>>> 01314baf72e09bbbf09dbb2a9ab47d9628503e7d
     case 'policy_repository':
       return <PolicyRepository />
     default:
