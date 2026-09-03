@@ -32,7 +32,7 @@ export default function Delegations({ user }: { user: any }) {
           <p>Authority you grant is time-bound, scoped, revocable and audited. Delegations assigned to your login also appear here for review.</p>
         </div>
         <button className="btn btn-brass" type="button" onClick={() => setShow(true)}>+ Delegate authority</button>
-      </header>
+      </div>
 
       {loading ? <Spinner /> : (
         <div className="card">
