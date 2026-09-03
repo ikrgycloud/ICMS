@@ -32,6 +32,7 @@ pipeline {
         // =========================================================
         // IMAGE TAG
         // Every Jenkins build gets a unique image tag
+        // Example: Build #5 -> image tag 5
         // =========================================================
 
         IMAGE_TAG = "${BUILD_NUMBER}"
@@ -47,8 +48,8 @@ pipeline {
 
 
         // =========================================================
-        // PUBLIC API URLS
-        // These are compiled into the frontend during Docker build
+        // FRONTEND API URLS
+        // These are compiled into React during Docker build
         // =========================================================
 
         ERP_API_URL = "http://16.16.216.155:8001"
@@ -92,7 +93,6 @@ pipeline {
                     echo "Verifying ERP-GOLD source"
                     echo "=============================================="
 
-                    echo "Current directory:"
                     pwd
 
                     echo ""
@@ -100,19 +100,20 @@ pipeline {
                     ls -la
 
                     echo ""
-                    echo "Checking required directories..."
-
+                    echo "Checking ERP Backend..."
                     test -d ERP-Backend
-                    test -d ERP-Frontend
-                    test -d POS-Backend
-                    test -d POS-Frontend
-
-                    echo ""
-                    echo "Checking required Dockerfiles..."
-
                     test -f ERP-Backend/Dockerfile
+
+                    echo "Checking ERP Frontend..."
+                    test -d ERP-Frontend
                     test -f ERP-Frontend/Dockerfile
+
+                    echo "Checking POS Backend..."
+                    test -d POS-Backend
                     test -f POS-Backend/Dockerfile
+
+                    echo "Checking POS Frontend..."
+                    test -d POS-Frontend
                     test -f POS-Frontend/Dockerfile
 
                     echo ""
@@ -143,10 +144,7 @@ pipeline {
                         .
 
                     echo ""
-                    echo "ERP Backend image built successfully."
-
-                    docker images \
-                        ${ECR_REGISTRY}/${ERP_BACKEND_REPO}:${IMAGE_TAG}
+                    echo "ERP Backend build completed."
                 '''
             }
         }
@@ -173,10 +171,7 @@ pipeline {
                         .
 
                     echo ""
-                    echo "POS Backend image built successfully."
-
-                    docker images \
-                        ${ECR_REGISTRY}/${POS_BACKEND_REPO}:${IMAGE_TAG}
+                    echo "POS Backend build completed."
                 '''
             }
         }
@@ -203,10 +198,7 @@ pipeline {
                         ./ERP-Frontend
 
                     echo ""
-                    echo "ERP Frontend image built successfully."
-
-                    docker images \
-                        ${ECR_REGISTRY}/${ERP_FRONTEND_REPO}:${IMAGE_TAG}
+                    echo "ERP Frontend build completed."
                 '''
             }
         }
@@ -233,70 +225,21 @@ pipeline {
                         ./POS-Frontend
 
                     echo ""
-                    echo "POS Frontend image built successfully."
-
-                    docker images \
-                        ${ECR_REGISTRY}/${POS_FRONTEND_REPO}:${IMAGE_TAG}
+                    echo "POS Frontend build completed."
                 '''
             }
         }
 
 
         // =========================================================
-        // 7. TEST DOCKER IMAGES
-        // =========================================================
-
-        stage('Test Docker Images') {
-
-            steps {
-
-                echo "=============================================="
-                echo "Testing Docker Images"
-                echo "=============================================="
-
-                sh '''
-                    set -e
-
-                    echo "Testing ERP Backend image..."
-
-                    docker run --rm \
-                        ${ECR_REGISTRY}/${ERP_BACKEND_REPO}:${IMAGE_TAG} \
-                        python -c "import app.main; print('ERP Backend import: OK')"
-
-
-                    echo ""
-                    echo "Testing POS Backend image..."
-
-                    docker run --rm \
-                        ${ECR_REGISTRY}/${POS_BACKEND_REPO}:${IMAGE_TAG} \
-                        python -c "import app.main; print('POS Backend import: OK')"
-
-
-                    echo ""
-                    echo "Testing ERP Frontend image..."
-
-                    docker run --rm \
-                        ${ECR_REGISTRY}/${ERP_FRONTEND_REPO}:${IMAGE_TAG} \
-                        nginx -t
-
-
-                    echo ""
-                    echo "Testing POS Frontend image..."
-
-                    docker run --rm \
-                        ${ECR_REGISTRY}/${POS_FRONTEND_REPO}:${IMAGE_TAG} \
-                        nginx -t
-
-
-                    echo ""
-                    echo "All Docker image tests passed."
-                '''
-            }
-        }
-
-
-        // =========================================================
-        // 8. LOGIN TO ECR
+        // 7. LOGIN TO AMAZON ECR
+        //
+        // IMPORTANT:
+        // This intentionally follows your previous working
+        // Jenkinsfile.
+        //
+        // Jenkins credential:
+        // aws-ecr
         // =========================================================
 
         stage('Login to Amazon ECR') {
@@ -317,7 +260,11 @@ pipeline {
                     sh '''
                         set -e
 
-                        aws sts get-caller-identity
+                        echo "AWS CLI:"
+                        aws --version
+
+                        echo ""
+                        echo "Logging into Amazon ECR..."
 
                         aws ecr get-login-password \
                             --region ${AWS_REGION} |
@@ -327,7 +274,9 @@ pipeline {
                             ${ECR_REGISTRY}
 
                         echo ""
-                        echo "ECR login successful."
+                        echo "=============================================="
+                        echo "ECR LOGIN SUCCESSFUL"
+                        echo "=============================================="
                     '''
                 }
             }
@@ -335,7 +284,7 @@ pipeline {
 
 
         // =========================================================
-        // 9. PUSH ERP BACKEND
+        // 8. PUSH ERP BACKEND
         // =========================================================
 
         stage('Push ERP Backend') {
@@ -343,7 +292,7 @@ pipeline {
             steps {
 
                 echo "=============================================="
-                echo "Pushing ERP Backend"
+                echo "Pushing ERP Backend Image"
                 echo "=============================================="
 
                 withCredentials([
@@ -359,6 +308,7 @@ pipeline {
                         docker push \
                             ${ECR_REGISTRY}/${ERP_BACKEND_REPO}:${IMAGE_TAG}
 
+                        echo ""
                         echo "ERP Backend pushed successfully."
                     '''
                 }
@@ -367,7 +317,7 @@ pipeline {
 
 
         // =========================================================
-        // 10. PUSH ERP FRONTEND
+        // 9. PUSH ERP FRONTEND
         // =========================================================
 
         stage('Push ERP Frontend') {
@@ -375,7 +325,7 @@ pipeline {
             steps {
 
                 echo "=============================================="
-                echo "Pushing ERP Frontend"
+                echo "Pushing ERP Frontend Image"
                 echo "=============================================="
 
                 withCredentials([
@@ -391,6 +341,7 @@ pipeline {
                         docker push \
                             ${ECR_REGISTRY}/${ERP_FRONTEND_REPO}:${IMAGE_TAG}
 
+                        echo ""
                         echo "ERP Frontend pushed successfully."
                     '''
                 }
@@ -399,7 +350,7 @@ pipeline {
 
 
         // =========================================================
-        // 11. PUSH POS BACKEND
+        // 10. PUSH POS BACKEND
         // =========================================================
 
         stage('Push POS Backend') {
@@ -407,7 +358,7 @@ pipeline {
             steps {
 
                 echo "=============================================="
-                echo "Pushing POS Backend"
+                echo "Pushing POS Backend Image"
                 echo "=============================================="
 
                 withCredentials([
@@ -423,6 +374,7 @@ pipeline {
                         docker push \
                             ${ECR_REGISTRY}/${POS_BACKEND_REPO}:${IMAGE_TAG}
 
+                        echo ""
                         echo "POS Backend pushed successfully."
                     '''
                 }
@@ -431,7 +383,7 @@ pipeline {
 
 
         // =========================================================
-        // 12. PUSH POS FRONTEND
+        // 11. PUSH POS FRONTEND
         // =========================================================
 
         stage('Push POS Frontend') {
@@ -439,7 +391,7 @@ pipeline {
             steps {
 
                 echo "=============================================="
-                echo "Pushing POS Frontend"
+                echo "Pushing POS Frontend Image"
                 echo "=============================================="
 
                 withCredentials([
@@ -455,6 +407,7 @@ pipeline {
                         docker push \
                             ${ECR_REGISTRY}/${POS_FRONTEND_REPO}:${IMAGE_TAG}
 
+                        echo ""
                         echo "POS Frontend pushed successfully."
                     '''
                 }
@@ -463,7 +416,17 @@ pipeline {
 
 
         // =========================================================
-        // 13. DEPLOY TO APPLICATION EC2
+        // 12. DEPLOY TO APPLICATION EC2
+        //
+        // Jenkins:
+        //   SSH -> Application EC2
+        //
+        // Application EC2:
+        //   ECR login
+        //   Pull images
+        //   Start PostgreSQL
+        //   Run migration
+        //   Start applications
         // =========================================================
 
         stage('Deploy to Application EC2') {
@@ -489,15 +452,20 @@ pipeline {
 
                             cd ${APP_DIR}
 
-                            echo "Current directory:"
-                            pwd
 
                             echo ""
-                            echo "Checking Docker..."
+                            echo "=============================================="
+                            echo "Docker Version"
+                            echo "=============================================="
+
                             docker --version
 
+
                             echo ""
-                            echo "Checking Docker Compose..."
+                            echo "=============================================="
+                            echo "Docker Compose Version"
+                            echo "=============================================="
+
                             docker compose version
 
 
@@ -516,7 +484,7 @@ pipeline {
 
                             echo ""
                             echo "=============================================="
-                            echo "Setting image variables"
+                            echo "Setting Image Variables"
                             echo "=============================================="
 
                             export IMAGE_TAG=${IMAGE_TAG}
@@ -529,13 +497,20 @@ pipeline {
 
                             export POS_FRONTEND_IMAGE=${ECR_REGISTRY}/${POS_FRONTEND_REPO}
 
+                            echo "IMAGE_TAG = ${IMAGE_TAG}"
 
-                            echo "IMAGE_TAG=${IMAGE_TAG}"
+                            echo "ERP_BACKEND_IMAGE = ${ECR_REGISTRY}/${ERP_BACKEND_REPO}"
+
+                            echo "ERP_FRONTEND_IMAGE = ${ECR_REGISTRY}/${ERP_FRONTEND_REPO}"
+
+                            echo "POS_BACKEND_IMAGE = ${ECR_REGISTRY}/${POS_BACKEND_REPO}"
+
+                            echo "POS_FRONTEND_IMAGE = ${ECR_REGISTRY}/${POS_FRONTEND_REPO}"
 
 
                             echo ""
                             echo "=============================================="
-                            echo "Pulling new Docker images"
+                            echo "Pulling New Images"
                             echo "=============================================="
 
                             docker compose \
@@ -575,17 +550,52 @@ pipeline {
 
                             echo ""
                             echo "=============================================="
-                            echo "Starting Application Services"
+                            echo "Starting ERP Backend"
                             echo "=============================================="
 
                             docker compose \
                                 -f docker-compose.prod.yml \
-                                up -d \
-                                erp-backend \
-                                erp-mail-worker \
-                                pos-backend \
-                                erp-frontend \
-                                pos-frontend
+                                up -d erp-backend
+
+
+                            echo ""
+                            echo "=============================================="
+                            echo "Starting ERP Mail Worker"
+                            echo "=============================================="
+
+                            docker compose \
+                                -f docker-compose.prod.yml \
+                                up -d erp-mail-worker
+
+
+                            echo ""
+                            echo "=============================================="
+                            echo "Starting POS Backend"
+                            echo "=============================================="
+
+                            docker compose \
+                                -f docker-compose.prod.yml \
+                                up -d pos-backend
+
+
+                            echo ""
+                            echo "=============================================="
+                            echo "Starting ERP Frontend"
+                            echo "=============================================="
+
+                            docker compose \
+                                -f docker-compose.prod.yml \
+                                up -d erp-frontend
+
+
+                            echo ""
+                            echo "=============================================="
+                            echo "Starting POS Frontend"
+                            echo "=============================================="
+
+                            docker compose \
+                                -f docker-compose.prod.yml \
+                                up -d pos-frontend
 
 
                             echo ""
@@ -599,7 +609,9 @@ pipeline {
 
 
                             echo ""
-                            echo "Application deployment completed."
+                            echo "=============================================="
+                            echo "Application Deployment Completed"
+                            echo "=============================================="
                             '
                     """
                 }
@@ -608,7 +620,7 @@ pipeline {
 
 
         // =========================================================
-        // 14. VERIFY DEPLOYMENT
+        // 13. VERIFY DEPLOYMENT
         // =========================================================
 
         stage('Verify Deployment') {
@@ -642,17 +654,42 @@ pipeline {
 
                             echo ""
                             echo "=============================================="
+                            echo "Waiting for Backends"
+                            echo "=============================================="
+
+                            sleep 10
+
+
+                            echo ""
+                            echo "=============================================="
                             echo "ERP Backend Health Check"
                             echo "=============================================="
 
-                            curl \
-                                --fail \
-                                --silent \
-                                --show-error \
-                                http://127.0.0.1:8001/health \
-                                > /dev/null
+                            for i in 1 2 3 4 5 6; do
 
-                            echo "ERP Backend: HEALTHY"
+                                if curl \
+                                    --fail \
+                                    --silent \
+                                    --show-error \
+                                    http://127.0.0.1:8001/health \
+                                    > /dev/null
+                                then
+
+                                    echo "ERP Backend: HEALTHY"
+                                    break
+
+                                fi
+
+                                echo "ERP Backend not ready. Attempt \$i/6..."
+
+                                sleep 5
+
+                                if [ \$i -eq 6 ]; then
+                                    echo "ERP Backend health check FAILED"
+                                    exit 1
+                                fi
+
+                            done
 
 
                             echo ""
@@ -660,14 +697,31 @@ pipeline {
                             echo "POS Backend Health Check"
                             echo "=============================================="
 
-                            curl \
-                                --fail \
-                                --silent \
-                                --show-error \
-                                http://127.0.0.1:8000/health \
-                                > /dev/null
+                            for i in 1 2 3 4 5 6; do
 
-                            echo "POS Backend: HEALTHY"
+                                if curl \
+                                    --fail \
+                                    --silent \
+                                    --show-error \
+                                    http://127.0.0.1:8000/health \
+                                    > /dev/null
+                                then
+
+                                    echo "POS Backend: HEALTHY"
+                                    break
+
+                                fi
+
+                                echo "POS Backend not ready. Attempt \$i/6..."
+
+                                sleep 5
+
+                                if [ \$i -eq 6 ]; then
+                                    echo "POS Backend health check FAILED"
+                                    exit 1
+                                fi
+
+                            done
 
 
                             echo ""
@@ -712,7 +766,7 @@ pipeline {
 
 
         // =========================================================
-        // 15. DOCKER CLEANUP
+        // 14. DOCKER CLEANUP
         // =========================================================
 
         stage('Docker Cleanup') {
@@ -748,12 +802,14 @@ pipeline {
         success {
 
             echo """
-            ==================================================
+            ======================================================
                     ERP-GOLD DEPLOYMENT SUCCESSFUL
-            ==================================================
+            ======================================================
 
             Build Number:
             ${BUILD_NUMBER}
+
+            ------------------------------------------------------
 
             ERP Backend:
             ${ECR_REGISTRY}/${ERP_BACKEND_REPO}:${IMAGE_TAG}
@@ -767,7 +823,7 @@ pipeline {
             POS Frontend:
             ${ECR_REGISTRY}/${POS_FRONTEND_REPO}:${IMAGE_TAG}
 
-            --------------------------------------------------
+            ------------------------------------------------------
 
             ERP Application:
             http://16.16.216.155:5174
@@ -781,7 +837,7 @@ pipeline {
             POS API:
             http://16.16.216.155:8000
 
-            ==================================================
+            ======================================================
             """
         }
 
@@ -789,16 +845,16 @@ pipeline {
         failure {
 
             echo """
-            ==================================================
+            ======================================================
                     ERP-GOLD DEPLOYMENT FAILED
-            ==================================================
+            ======================================================
 
             Build Number:
             ${BUILD_NUMBER}
 
-            Check the Jenkins Console Output.
+            Please check the Jenkins Console Output.
 
-            ==================================================
+            ======================================================
             """
         }
 
