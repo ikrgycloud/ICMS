@@ -13,7 +13,9 @@ from sqlalchemy.orm import sessionmaker
 
 from models import (Base, Tenant, OrgScope, Person, User, Role, Permission,
                     RolePermission, ApprovalLimit, UserRole, Designation)
-import domain_models  # Ensure all declarative models are registered before metadata.create_all().
+# Register domain tables before additive schema creation.  This keeps command-line
+# bootstrap and test setup consistent with FastAPI startup.
+import domain_models  # noqa: F401
 from authority import pwhash, VERBS, scope_covers
 from matrices import (rbac_for, APPROVAL_LIMITS, scope_for, APPROVAL_MATRIX)
 
@@ -95,23 +97,43 @@ def ensure_additive_schema():
         "book_loans": [
             ("student_id", "VARCHAR"),
         ],
-        "hostel_rooms": [
-            ("campus", "VARCHAR DEFAULT ''"),
+        "fee_invoices": [
+            ("fee_structure_id", "VARCHAR"),
+            ("invoice_number", "VARCHAR DEFAULT ''"),
+            ("academic_year_id", "VARCHAR DEFAULT ''"),
+            ("semester_id", "VARCHAR DEFAULT ''"),
+            ("fee_assignment_id", "VARCHAR DEFAULT ''"),
+            ("gross_amount", "FLOAT DEFAULT 0"),
+            ("scholarship_amount", "FLOAT DEFAULT 0"),
+            ("waiver_amount", "FLOAT DEFAULT 0"),
+            ("net_amount", "FLOAT DEFAULT 0"),
         ],
-        "hostel_allocations": [
-            ("campus", "VARCHAR DEFAULT ''"),
+        "payments": [
+            ("challan_id", "VARCHAR"),
+            ("cleared_at", "TIMESTAMP"),
+            ("cleared_by", "VARCHAR DEFAULT ''"),
+            ("remarks", "VARCHAR DEFAULT ''"),
         ],
-        "workflow_instances": [
-            ("campus_scope_id", "VARCHAR"),
+        "academic_rollovers": [
+            ("executed_by", "VARCHAR DEFAULT ''"), ("executed_at", "TIMESTAMP"),
+            ("remarks", "TEXT DEFAULT ''"),
         ],
-        "assets": [
-            ("campus_scope_id", "VARCHAR"),
+        "academic_rollover_decisions": [
+            ("academic_status", "VARCHAR DEFAULT 'PENDING'"), ("finance_status", "VARCHAR DEFAULT 'CLEAR'"),
+            ("outstanding_amount", "FLOAT DEFAULT 0"), ("carry_forward_amount", "FLOAT DEFAULT 0"),
+            ("processed_at", "TIMESTAMP"),
         ],
-        "placement_drives": [
-            ("campus_scope_id", "VARCHAR"),
-        ],
-        "audit_logs": [
-            ("campus_scope_id", "VARCHAR"),
+        "complaints": [("student_id", "VARCHAR")],
+        "fee_structures": [
+            ("academic_year", "VARCHAR DEFAULT ''"), ("campus", "VARCHAR DEFAULT ''"),
+            ("quota_id", "VARCHAR"), ("cycle_program_id", "VARCHAR"),
+            ("code", "VARCHAR DEFAULT ''"), ("academic_year_id", "VARCHAR"),
+            ("semester_id", "VARCHAR"), ("campus_id", "VARCHAR"), ("batch_id", "VARCHAR"),
+            ("student_type_id", "VARCHAR"), ("version", "INTEGER DEFAULT 1"),
+            ("workflow_id", "VARCHAR"), ("description", "TEXT DEFAULT ''"),
+            ("notes", "TEXT DEFAULT ''"), ("created_by", "VARCHAR DEFAULT ''"),
+            ("updated_by", "VARCHAR DEFAULT ''"), ("created_at", "TIMESTAMP"),
+            ("updated_at", "TIMESTAMP"),
         ],
     }
 
@@ -125,52 +147,12 @@ def ensure_additive_schema():
                 if column_name in existing:
                     continue
                 conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"))
-        if inspector.has_table("workflow_instances") and inspector.has_table("org_scopes"):
-            indexes = {index["name"] for index in inspect(conn).get_indexes("workflow_instances")}
-            if "ix_workflow_instances_campus_scope_id" not in indexes:
-                conn.execute(text("CREATE INDEX ix_workflow_instances_campus_scope_id ON workflow_instances (campus_scope_id)"))
-            foreign_keys = {fk.get("name") for fk in inspect(conn).get_foreign_keys("workflow_instances")}
-            if conn.dialect.name == "postgresql" and "fk_workflow_instances_campus_scope" not in foreign_keys:
-                conn.execute(text("ALTER TABLE workflow_instances ADD CONSTRAINT fk_workflow_instances_campus_scope FOREIGN KEY (campus_scope_id) REFERENCES org_scopes (id)"))
-        # Phase 6A: canonical ownership for infrastructure and placements.
-        # Existing rows stay NULL: no legacy text or descriptive value is used
-        # as evidence of campus ownership.
-        if inspector.has_table("org_scopes"):
-            for table_name, constraint_name in (
-                ("assets", "fk_assets_campus_scope"),
-                ("placement_drives", "fk_placement_drives_campus_scope"),
-                ("audit_logs", "fk_audit_logs_campus_scope"),
-            ):
-                if not inspector.has_table(table_name):
-                    continue
-                index_name = f"ix_{table_name}_campus_scope_id"
-                indexes = {index["name"] for index in inspect(conn).get_indexes(table_name)}
-                if index_name not in indexes:
-                    conn.execute(text(f"CREATE INDEX {index_name} ON {table_name} (campus_scope_id)"))
-                foreign_keys = {fk.get("name") for fk in inspect(conn).get_foreign_keys(table_name)}
-                if conn.dialect.name == "postgresql" and constraint_name not in foreign_keys:
-                    conn.execute(text(f"ALTER TABLE {table_name} ADD CONSTRAINT {constraint_name} FOREIGN KEY (campus_scope_id) REFERENCES org_scopes (id)"))
-        # Older hostel rows pre-date campus ownership.  Room inventory in the
-        # original seed belongs to Main Campus; allocation rows can only be
-        # backfilled when they are linked to an actual student record.
-        if inspector.has_table("hostel_rooms"):
-            conn.execute(text("UPDATE hostel_rooms SET campus = 'Main Campus' WHERE campus IS NULL OR campus = ''"))
-        if inspector.has_table("hostel_allocations") and inspector.has_table("students"):
-            if conn.dialect.name == "postgresql":
-                conn.execute(text("""
-                    UPDATE hostel_allocations AS allocation
-                    SET campus = students.campus
-                    FROM students
-                    WHERE allocation.student_id = students.id
-                      AND (allocation.campus IS NULL OR allocation.campus = '')
-                """))
-            else:
-                conn.execute(text("""
-                    UPDATE hostel_allocations
-                    SET campus = (SELECT campus FROM students WHERE students.id = hostel_allocations.student_id)
-                    WHERE (campus IS NULL OR campus = '')
-                      AND student_id IN (SELECT id FROM students)
-                """))
+
+
+def ensure_versioned_migrations():
+    """Apply Admissions schema revisions without resetting existing data."""
+    from migrations.runner import upgrade
+    upgrade(engine)
 
 
 def office(n: int) -> dict:
@@ -216,11 +198,6 @@ def _ensure_staff_contact_columns():
                 connection.execute(text(f"ALTER TABLE staff_members ADD COLUMN {name} {column_type}"))
 
 
-def level_privileged(level: int) -> bool:
-    # MFA for staff & privileged roles (Document §7 step 3) — students/parents optional.
-    return level <= 7
-
-
 # Demo username for each office head (matches the login screen's demo accounts).
 DEMO_USERNAMES = {
     1: "chairman", 2: "vice_chairman", 3: "campus_head", 4: "principal",
@@ -237,18 +214,12 @@ DEMO_USERNAMES = {
 }
 
 
-# Keep the SQLite test database aligned with the approved model even when an older
-# file already exists and startup seed is skipped by tests that use SessionLocal directly.
-# The local DB also needs the baseline org-scope and demo-user records that the
-# workflow approval path validates against; bootstrap them once at import time.
-ensure_additive_schema()
-
-
 def seed():
     Base.metadata.create_all(engine)
     _ensure_course_columns()
     _ensure_staff_contact_columns()
     ensure_additive_schema()
+    ensure_versioned_migrations()
     s = SessionLocal()
     try:
         # Tenant + scope tree (Document §6, §11).
@@ -351,10 +322,6 @@ def seed():
         if principal and principal.scope_ref == "scope_global":
             principal.scope_ref = CAMPUS_SCOPES[0]
 
-        campus_head = s.get(User, "user_3")
-        if campus_head and campus_head.scope_ref == "scope_global":
-            campus_head.scope_ref = CAMPUS_SCOPES[0]
-
         s.commit()
         return {"status": "seeded", "offices": len(OFFICES),
                 "campuses": len(CAMPUS_SCOPES),
@@ -363,14 +330,6 @@ def seed():
         s.close()
 
 
-# Bootstrap the SQLite database for local/test execution. This is deliberately
-# minimal and idempotent so that legacy DB files are upgraded and the reference
-# data used by workflow decisions is present before any endpoint logic runs.
-ensure_additive_schema()
-try:
-    seed()
-except Exception as e:
-    # Seed may partially fail on import; let the normal app startup handle it.
-    # The critical schema must be present for tests to work.
-    import sys
-    print(f"Warning: seed at import time partially failed: {e}", file=sys.stderr)
+def level_privileged(level: int) -> bool:
+    # MFA for staff & privileged roles (Document §7 step 3) — students/parents optional.
+    return level <= 7
