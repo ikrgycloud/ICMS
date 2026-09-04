@@ -576,15 +576,15 @@ def login(body: LoginIn, s=Depends(db)):
     u = s.query(User).filter(func.lower(User.username) == username).first()
     if not u or u.password_hash != pwhash(body.password):
         raise HTTPException(401, "Invalid credentials")
-    if body.demo_context:
-        if body.demo_context != "professor" or username != "professor":
-            raise HTTPException(422, "Invalid demo login context")
+    if username == "professor":
         professor = s.query(User).filter(
             User.username == "aarav_kulkarni", User.status == "active"
         ).first()
         if not professor:
             raise HTTPException(503, "Professor demo account is unavailable")
         u = professor
+    elif body.demo_context:
+        raise HTTPException(422, "Invalid demo login context")
     o = office(u.office_n)
     tok = issue_token(u.id, u.tenant_id, u.office_n, u.role, u.scope_level,
                       u.scope_ref, "mfa" if u.mfa_enabled else "password")
