@@ -16,6 +16,7 @@ import AcademicCalendar from './modules/AcademicCalendar'
 import AcademicRollover from './modules/AcademicRollover'
 import Students from './modules/Students'
 import Academics from './modules/Academics'
+import AcademicCoordinatorCenter from './modules/AcademicCoordinatorCenter'
 import Curriculum from './modules/Curriculum'
 import CoursesSubjects from './modules/CoursesSubjects'
 import Attendance from './modules/Attendance'
@@ -45,6 +46,7 @@ import AssociateProfessorHome from './personas/AssociateProfessorHome'
 import FacultySchedule from './personas/FacultySchedule'
 import ParentHome from './personas/ParentHome'
 import FrontDeskWorkspace from './frontdesk/FrontDeskWorkspace'
+import { PageHead } from './modules/kit'
 
 const LEVEL_COLORS: Record<number, string> = {
   1: '#d92d3a',
@@ -113,6 +115,16 @@ const FACULTY_ACTIVE_LABEL: Record<string, string> = {
   academics: 'My Sections', attendance: 'Attendance', examinations: 'Assessments & Marks',
   research: 'Research & Publications', academic_calendar: 'Academic Calendar', directory: 'Directory',
 }
+
+const COORDINATOR_NAV = [
+  ['Workspace', 'Overview', 'overview'],
+  ['Academic planning', 'Academic Calendar', 'academic_calendar'], ['Academic planning', 'Curriculum Execution', 'curriculum'],
+  ['scheduling', 'Course Offerings', 'coordinator_course_offerings'], ['scheduling', 'Sections & Timetable', 'coordinator_sections'], ['scheduling', 'Conflict Center', 'coordinator_conflicts'],
+  ['coordination', 'Academic Notices', 'coordinator_notices'],
+  ['authority', 'My Reviews', 'rollover'], ['authority', 'My Requests', 'coordinator_requests'],
+  ['reports', 'Academic Operations Reports', 'coordinator_reports'], ['reports', 'Audit', 'audit'],
+  ['reference', 'Directory', 'directory'],
+] as const
 
 const DIRECTOR_ADMISSIONS_NAV = [
   ['Overview', 'Overview', 'overview'],
@@ -191,7 +203,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     // Faculty & Staff is a Principal-specific presentation of the authorised
     // HR module.  It has its own route so that the list/profile experience is
     // retained when opened from the dashboard KPI or the Principal sidebar.
-    const virtualModule = (user?.office_n === 4 && ['faculty_staff', 'curriculum', 'courses_subjects'].includes(view)) || view.startsWith('director_') || view.startsWith('manager_')
+    const virtualModule = (user?.office_n === 4 && ['faculty_staff', 'curriculum', 'courses_subjects'].includes(view)) || view.startsWith('director_') || view.startsWith('manager_') || view.startsWith('coordinator_')
     // Finance is a student self-service destination even though students do
     // not receive the staff Finance workspace capability from the backend.
     if (!virtualModule && !(user?.persona === 'student' && view === 'finance') && !ws.modules.some((module: any) => module.key === view)) {
@@ -262,6 +274,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const admissionManagerShell = ['Admission Manager', 'Admissions Manager'].includes(user.active_role)
   const admissionsOperationsShell = directorAdmissionsShell || admissionManagerShell
   const admissionOfficeSingleRole = user.office_n === 15
+  const coordinatorShell = user.office_n === 17
   const sidebarModules = transportOfficeShell
     ? displayModules.filter((module: any) => !['Academics', 'Reference', 'Authority', 'Workspace'].includes(module.group))
     : displayModules
@@ -271,6 +284,11 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   })
   const order = chairmanShell ? CHAIRMAN_GROUP_ORDER : GROUP_ORDER
   const groupKeys = [...order.filter(key => groups[key]), ...Object.keys(groups).filter(key => !order.includes(key))]
+  const coordinatorGroups = COORDINATOR_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
+    ;(out[group] = out[group] || []).push({ group, label, key, enabled: true })
+    return out
+  }, {})
+  const coordinatorGroupKeys = [...new Set(COORDINATOR_NAV.map(([group]) => group))]
   const principalGroups = PRINCIPAL_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
     const source = displayModules.find((module: any) => module.key === key)
       || (key === 'courses_subjects' ? displayModules.find((module: any) => module.key === 'academics') : undefined)
@@ -299,7 +317,9 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const managerGroupKeys = [...new Set(ADMISSION_MANAGER_NAV.map(([group]) => group))]
   const activeAdmissionsGroups = directorAdmissionsShell ? directorGroups : managerGroups
   const activeAdmissionsGroupKeys = directorAdmissionsShell ? directorGroupKeys : managerGroupKeys
-  const current = (admissionsOperationsShell
+  const current = (coordinatorShell
+    ? Object.values(coordinatorGroups).flat().find((module: any) => module.key === view)
+    : admissionsOperationsShell
     ? Object.values(activeAdmissionsGroups).flat().find((module: any) => module.key === view)
     : undefined) || sidebarModules.find((module: any) => module.key === view) || sidebarModules[0]
 
@@ -325,13 +345,13 @@ export default function App({ onLogout }: { onLogout: () => void }) {
         </div>
 
         <nav className="side-nav">
-          {(principalShell ? Object.keys(principalGroups) : facultyShell ? Object.keys(facultyGroups) : admissionsOperationsShell ? activeAdmissionsGroupKeys : groupKeys).map(group => (
+          {(coordinatorShell ? coordinatorGroupKeys : principalShell ? Object.keys(principalGroups) : facultyShell ? Object.keys(facultyGroups) : admissionsOperationsShell ? activeAdmissionsGroupKeys : groupKeys).map(group => (
             <div key={group}>
               {admissionsOperationsShell ? <button className="side-sec director-nav-group" onClick={() => setCollapsedDirectorGroups(current => ({ ...current, [group]: !current[group] }))} type="button">{group}<span>{collapsedDirectorGroups[group] ? '+' : '−'}</span></button> : <div className="side-sec">{group}</div>}
-              {(!admissionsOperationsShell || !collapsedDirectorGroups[group]) && (principalShell ? principalGroups[group] : facultyShell ? facultyGroups[group] : admissionsOperationsShell ? activeAdmissionsGroups[group] : groups[group]).map((module: any) => (
+              {(!admissionsOperationsShell || !collapsedDirectorGroups[group]) && (coordinatorShell ? coordinatorGroups[group] : principalShell ? principalGroups[group] : facultyShell ? facultyGroups[group] : admissionsOperationsShell ? activeAdmissionsGroups[group] : groups[group]).map((module: any) => (
                 <button
                   key={(principalShell || facultyShell || admissionsOperationsShell) ? `${group}-${module.label}` : module.key}
-                  className={`nav-item ${(facultyShell ? FACULTY_ACTIVE_LABEL[view] === module.label : view === module.key) && (!(principalShell || facultyShell || admissionsOperationsShell) || module.enabled) ? 'on' : ''} ${(principalShell || facultyShell || admissionsOperationsShell) && !module.enabled ? 'nav-item-disabled' : ''}`}
+                  className={`nav-item ${(coordinatorShell ? view === module.key : facultyShell ? FACULTY_ACTIVE_LABEL[view] === module.label : view === module.key) && (!(principalShell || facultyShell || admissionsOperationsShell) || module.enabled) ? 'on' : ''} ${(principalShell || facultyShell || admissionsOperationsShell) && !module.enabled ? 'nav-item-disabled' : ''}`}
                   onClick={() => {
                     if ((principalShell || facultyShell || admissionsOperationsShell) && !module.enabled) return
                     setView(module.key)
@@ -478,6 +498,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
   }
   switch (view) {
     case 'overview':
+      if (user.office_n === 17) return <AcademicCoordinatorCenter onNavigate={go} />
       if (user.office_n === 15 && user.active_role === 'Director of Admissions') return <DirectorAdmissionsDashboard user={user} go={go} />
       if (user.persona === 'student') return <StudentHome user={user} go={go} />
       if (user.office_n === 12) return <AssociateProfessorHome go={go} />
@@ -508,6 +529,18 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <Curriculum />
     case 'courses_subjects':
       return <CoursesSubjects />
+    case 'coordinator_course_offerings':
+      return <CoordinatorPage title="Course Offerings" sub="Plan and monitor the courses offered in the current academic cycle." action="Create course offering" />
+    case 'coordinator_sections':
+      return <Academics caps={caps} />
+    case 'coordinator_conflicts':
+      return <CoordinatorPage title="Conflict Center" sub="Review scheduling conflicts and route each issue to the responsible academic office." action="Review conflicts" />
+    case 'coordinator_notices':
+      return <CoordinatorPage title="Academic Notices" sub="Prepare, publish, and track notices for the academic community." action="Create notice" />
+    case 'coordinator_requests':
+      return <CoordinatorPage title="My Requests" sub="Track requests raised by the Academic Coordinator and their approval status." action="Create request" />
+    case 'coordinator_reports':
+      return <CoordinatorPage title="Academic Operations Reports" sub="Review readiness, timetable coverage, curriculum execution, and delivery metrics." action="Export report" />
     case 'attendance':
       if (user.persona === 'student') return <StudentAttendanceView />
       return <Attendance caps={caps} />
@@ -578,6 +611,18 @@ function ModuleView({ view, module, user, onChange, go }: any) {
 function displayMeta(user: any, module: any) {
   if (user.office_n !== 1) return {}
   return CHAIRMAN_DISPLAY[module.key] || {}
+}
+
+function CoordinatorPage({ title, sub, action }: { title: string; sub: string; action: string }) {
+  return (
+    <main className="page-wrap fade-in">
+      <PageHead title={title} sub={sub} />
+      <section className="card" style={{ marginTop: 20 }}>
+        <div className="card-h"><div><h2>{title}</h2><p>This coordinator workspace has its own route, active state, and workflow.</p></div><button className="btn btn-crimson" type="button">{action}</button></div>
+        <div className="empty" style={{ padding: '48px 20px' }}>No {title.toLowerCase()} items are waiting for action.</div>
+      </section>
+    </main>
+  )
 }
 
 function toTitleCase(value: string) {

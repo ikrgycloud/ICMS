@@ -1354,6 +1354,7 @@ class TransportRoute(Base):
     vehicle_no = Column(String, default="")
     seats = Column(Integer, default=40)
     seats_taken = Column(Integer, default=0)
+    status = Column(String, default="active", index=True)
 
 
 class TransportStop(Base):

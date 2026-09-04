@@ -223,6 +223,7 @@ function TransportManager() {
   const [selectedRoute, setSelectedRoute] = useState<any>(null)
   const [selectedStop, setSelectedStop] = useState<any>(null)
   const [selectedVehicle, setSelectedVehicle] = useState<any>(null)
+  const [selectedDriver, setSelectedDriver] = useState<any>(null)
   const [studentAssignVehicleId, setStudentAssignVehicleId] = useState('')
   const [selectedAllocation, setSelectedAllocation] = useState<any>(null)
   const [expandedRoutes, setExpandedRoutes] = useState<Record<string, boolean>>({})
@@ -236,6 +237,7 @@ function TransportManager() {
   const [transportSearch, setTransportSearch] = useState('')
   const [studentSearch, setStudentSearch] = useState('')
   const [allocationStudentSearch, setAllocationStudentSearch] = useState('')
+  const [showStudentFilters, setShowStudentFilters] = useState(false)
   const [studentFilters, setStudentFilters] = useState({
     student: 'All',
     route: 'All',
@@ -311,6 +313,7 @@ function TransportManager() {
     setSelectedRoute(null)
     setSelectedStop(null)
     setSelectedVehicle(null)
+    setSelectedDriver(null)
     setSelectedAllocation(null)
     setSelectedStudent(null)
     setStudentAssignVehicleId('')
@@ -337,6 +340,10 @@ function TransportManager() {
         await api.deleteTransportStop?.(deleteConfirm.routeId, id, deleteConfirm.name)
       } else if (type === 'allocation') {
         await api.deleteTransportAllocation?.(id)
+      } else if (type === 'vehicle') {
+        await api.deleteTransportVehicle?.(id)
+      } else if (type === 'driver') {
+        await api.deleteTransportDriver?.(id)
       }
       
       setSuccess(`${deleteConfirm.name} deleted successfully`)
@@ -355,15 +362,17 @@ function TransportManager() {
       setLoading(true)
 
       if (modal === 'driver') {
-        const createdDriver = await api.createTransportDriver({
+        const payload = {
           name: form.name,
           employee_id: form.employee_id,
           phone: form.phone,
           license_number: form.license_number,
           license_expiry: form.license_expiry || null,
           vehicle_id: form.vehicle_id || null,
-        })
-        setSuccess(`Driver created. Login username: ${createdDriver.username} Â· Password: ${createdDriver.initial_password}`)
+        }
+        if (selectedDriver) await api.updateTransportDriver(selectedDriver.id, payload)
+        else await api.createTransportDriver(payload)
+        setSuccess(selectedDriver ? 'Driver updated successfully' : 'Driver created successfully')
       } else if (modal === 'vehicle') {
         const payload = {
           vehicle_number: form.vehicle_number,
@@ -379,14 +388,15 @@ function TransportManager() {
         }
         setSuccess(selectedVehicle ? 'Vehicle updated successfully' : 'Vehicle created successfully')
       } else if (modal === 'route') {
-        await api.createTransportRoute({
+        const payload = {
           name: form.name,
           route_code: form.route_code,
-          description: form.status || '',
           vehicle_no: form.vehicle_id || '',
-          status: 'ACTIVE',
-        })
-        setSuccess('Route created successfully')
+          seats: 40,
+        }
+        if (selectedRoute) await api.updateTransportRoute(selectedRoute.id, payload)
+        else await api.createTransportRoute(payload)
+        setSuccess(selectedRoute ? 'Route updated successfully' : 'Route created successfully')
       } else if (modal === 'stop' && selectedRoute) {
         const payload = {
           name: form.stop_name,
@@ -498,7 +508,7 @@ function TransportManager() {
             style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', fontSize: 16 }}
             onClick={() => setError('')}
           >
-            âœ•
+            <FiX />
           </button>
         </div>
       )}
@@ -516,11 +526,11 @@ function TransportManager() {
               ['Allocated', data.allocations.length, 'students'], ['Pending Requests', pending.length, 'requests'], ['Available Seats', seats, 'vehicles'],
             ].map(([label, value, target]) => <button className="kpi" key={label} onClick={() => setTab(target as Tab)}><div className="kpi-v">{value}</div><div className="kpi-l">{label}</div></button>)}
           </div>
-          <div className="transport-dashboard-links">
+          {false && <div className="transport-dashboard-links">
             {[['routes', 'Manage routes'], ['vehicles', 'Manage vehicles'], ['drivers', 'Manage drivers'], ['students', 'View students'], ['requests', 'Review requests'], ['allocations', 'View allocations']].map(([key, label]) => (
-              <button key={key} className="btn btn-out" onClick={() => setTab(key as Tab)}>{label} <span>â†’</span></button>
+              <button key={key} className="btn btn-out" onClick={() => setTab(key as Tab)}>{label} <span>→</span></button>
             ))}
-          </div>
+          </div>}
 
           <Section title="Pending Transport Requests">
             {filteredRequests.filter((x: any) => x.status === 'PENDING').length > 0 ? (
@@ -576,15 +586,17 @@ function TransportManager() {
                         <span className="transport-route-badge"><FaBus /></span>
                         <div className="transport-route-meta">
                           <div className="transport-route-mainline">
-                            <b>{route.route_code}</b>
+                            <b>{route.name}</b>
                             <Pill s={route.status} />
                           </div>
-                          <span>{route.name}</span>
+                          <span>{route.route_code}</span>
                         </div>
                       </div>
 
                       <div className="transport-route-right">
                         <span>{sortedStops.length} pickup points</span>
+                        <button className="icon-btn" title="Edit route" onClick={(e) => { e.stopPropagation(); setSelectedRoute(route); setForm({ ...emptyForm, name: route.name || '', route_code: route.route_code || '', vehicle_id: route.vehicle_no || '' }); setModal('route') }}><FiEdit2 /></button>
+                        <button className="icon-btn danger" title="Delete route" onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'route', id: route.id, name: route.name || route.route_code }) }}><FiTrash2 /></button>
                         <span className="transport-route-chevron">{expandedRoutes[route.id] ? <FiChevronUp /> : <FiChevronDown />}</span>
                       </div>
                     </button>
@@ -594,7 +606,7 @@ function TransportManager() {
                         <div className="transport-route-body-header">
                           <div>
                             <h4>Boarding Points</h4>
-                            <small>Daily pickup schedule â€¢ ordered from first to last stop</small>
+                            <small>Daily pickup schedule • ordered from first to last stop</small>
                           </div>
                           <button
                             className="btn btn-sm btn-crimson"
@@ -679,6 +691,7 @@ function TransportManager() {
                   <thead>
                     <tr>
                       <th>Vehicle Number</th>
+                      <th>Route</th>
                       <th>Type</th>
                       <th>Capacity</th>
                       <th>Occupied</th>
@@ -690,12 +703,13 @@ function TransportManager() {
                     {filteredVehicles.map((v: any) => (
                       <tr key={v.id}>
                         <td><b>{v.vehicle_number}</b></td>
+                        <td>{data.routes.find((r: any) => r.status !== 'INACTIVE' && r.vehicle_no === v.vehicle_number)?.name || 'No route assigned'}</td>
                         <td>{v.vehicle_type}</td>
                         <td>{v.capacity}</td>
                         <td>{v.occupied}</td>
                         <td>{Math.max(0, v.capacity - v.occupied)}</td>
                         <td><Pill s={v.status} /></td>
-                        <td><button className="link-btn" onClick={() => { setSelectedVehicle(v); setForm({ ...emptyForm, vehicle_number: v.vehicle_number, vehicle_type: v.vehicle_type, capacity: v.capacity, status: v.status, driver_id: v.driver_id || '' }); setModal('vehicle') }}>Edit</button></td>
+                        <td className="transport-table-actions"><button className="student-icon-btn" title="Edit vehicle" aria-label="Edit vehicle" onClick={() => { setSelectedVehicle(v); setForm({ ...emptyForm, vehicle_number: v.vehicle_number, vehicle_type: v.vehicle_type, capacity: v.capacity, status: v.status, driver_id: v.driver_id || '' }); setModal('vehicle') }}><FiEdit2 /></button><button className="student-icon-btn danger" title="Delete vehicle" aria-label="Delete vehicle" onClick={() => setDeleteConfirm({ type: 'vehicle', id: v.id, name: v.vehicle_number })}><FiTrash2 /></button></td>
                       </tr>
                     ))}
                   </tbody>
@@ -729,6 +743,7 @@ function TransportManager() {
                       <th>License</th>
                       <th>License Expiry</th>
                       <th>Status</th>
+                      <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -737,9 +752,10 @@ function TransportManager() {
                         <td><b>{d.name}</b></td>
                         <td className="mono">{d.employee_id}</td>
                         <td>{d.phone}</td>
-                        <td className="mono">{d.license_number}</td>
-                        <td className="mono">{d.license_expiry || 'ï¿½'}</td>
+                        <td className="mono">{d.license_number || d.license_no || '—'}</td>
+                        <td className="mono">{d.license_expiry || '—'}</td>
                         <td><Pill s={d.status} /></td>
+                        <td className="transport-table-actions"><button className="student-icon-btn" title="Edit driver" aria-label="Edit driver" onClick={() => { setSelectedDriver(d); setForm({ ...emptyForm, name: d.name, employee_id: d.employee_id, phone: d.phone, license_number: d.license_number || d.license_no || '', license_expiry: d.license_expiry || '' }); setModal('driver') }}><FiEdit2 /></button><button className="student-icon-btn danger" title="Delete driver" aria-label="Delete driver" onClick={() => setDeleteConfirm({ type: 'driver', id: d.id, name: d.name })}><FiTrash2 /></button></td>
                       </tr>
                     ))}
                   </tbody>
@@ -786,12 +802,13 @@ function TransportManager() {
             }
 
             return (
-              <Section title={`Student Transport Â· ${filteredAllocations.length} ${filteredAllocations.length === 1 ? 'record' : 'records'}`} action={<button className="btn btn-sm btn-crimson" onClick={() => setModal('vehicle')}><FiPlus /> New Vehicle</button>}>
+              <Section title={`Student Transport - ${filteredAllocations.length} ${filteredAllocations.length === 1 ? 'record' : 'records'}`} action={<button className="btn btn-sm btn-crimson" onClick={() => setModal('vehicle')}><FiPlus /> New Vehicle</button>}>
                 <div className="card">
                   <div className="card-pad" style={{ borderBottom: '1px solid var(--line)' }}>
                     <div className="student-transport-search"><FiSearch /><input type="text" placeholder="Search student transport..." value={studentSearch} onChange={(e) => setStudentSearch(e.target.value)} /></div>
                     
-                    <div className="student-transport-filters"><span className="student-filter-label"><FiFilter /> Filters</span>
+                    <button className="btn btn-sm btn-out transport-filter-toggle" onClick={() => setShowStudentFilters((open) => !open)}><FiFilter /> Filters {showStudentFilters ? <FiChevronUp /> : <FiChevronDown />}</button>
+                    {showStudentFilters && <div className="student-transport-filters">
                       <div className="transport-filter">
                         <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--txt-mute)', marginBottom: 6 }}>Student</label>
                         <select className="select" value={studentFilters.student} onChange={(e) => setStudentFilters({ ...studentFilters, student: e.target.value })}>
@@ -817,7 +834,7 @@ function TransportManager() {
                         </select>
                       </div>
                       <button className="btn btn-sm btn-out" onClick={() => setStudentFilters({ student: 'All', route: 'All', stop: 'All', year: 'All', fee: 'All' })}>Clear Filters</button>
-                    </div>
+                    </div>}
                   </div>
 
                   {data.vehicles.length > 0 ? (
@@ -838,7 +855,7 @@ function TransportManager() {
                                   {vehicle?.vehicle_number || 'Vehicle'}
                                   <span className="student-vehicle-status">{vehicle?.status?.toLowerCase() || 'active'}</span>
                                 </div>
-                                <small>{allocations.length} {allocations.length === 1 ? 'student' : 'students'} Â· {vehicle?.vehicle_type || 'Bus'}</small>
+                                <small>{allocations.length} {allocations.length === 1 ? 'student' : 'students'} - {vehicle?.vehicle_type || 'Bus'}</small>
                               </div>
                             </div>
                             <div className="student-vehicle-header-side">
@@ -935,7 +952,7 @@ function TransportManager() {
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-h">
               <h3>Confirm Delete</h3>
-              <button className="modal-x" onClick={() => setDeleteConfirm(null)}>âœ•</button>
+              <button className="modal-x" onClick={() => setDeleteConfirm(null)} aria-label="Close"><FiX /></button>
             </div>
             <div className="modal-b">
               <p>Are you sure you want to delete <b>{deleteConfirm.name}</b>?</p>
@@ -953,7 +970,7 @@ function TransportManager() {
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-h">
               <h3>Approve Request</h3>
-              <button className="modal-x" onClick={closeModal}>âœ•</button>
+              <button className="modal-x" onClick={closeModal} aria-label="Close"><FiX /></button>
             </div>
             <div className="modal-b">
               <RequestApprovalForm
@@ -990,7 +1007,7 @@ function TransportManager() {
       {modal === 'student-details' && selectedStudent && (
         <div className="modal-bg" onClick={closeModal}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-h"><h3>Student Transport Details</h3><button className="modal-x" onClick={closeModal}>âœ•</button></div>
+            <div className="modal-h"><h3>Student Transport Details</h3><button className="modal-x" onClick={closeModal} aria-label="Close"><FiX /></button></div>
             <div className="modal-b">
               <div className="student-detail-hero"><span className="assigned-student-icon"><FiUser /></span><div><h3>{selectedStudent.student_name || 'Student'}</h3><span className="mono">Roll No: {selectedStudent.roll_no || selectedStudent.student_id}</span></div></div>
               <div className="student-detail-grid"><div><small>Route</small><b>{selectedStudent.route || selectedStudent.route_id || 'â€”'}</b></div><div><small>Vehicle</small><b>{selectedStudent.vehicle || selectedStudent.vehicle_id || 'â€”'}</b></div><div><small>Pickup point</small><b>{selectedStudent.pickup || selectedStudent.pickup_stop_id || 'â€”'}</b></div><div><small>Status</small><Pill s={selectedStudent.status || 'ACTIVE'} /></div></div>
@@ -1006,16 +1023,16 @@ function TransportManager() {
             <div className="modal-h">
               <h3>
                 {modal === 'driver'
-                  ? 'Add Driver'
+                  ? (selectedDriver ? 'Edit Driver' : 'Add Driver')
                   : modal === 'vehicle'
                     ? (selectedVehicle ? 'Edit Vehicle' : 'Add Vehicle')
                     : modal === 'route'
-                      ? 'Create Route'
+                      ? (selectedRoute ? 'Edit Route' : 'Create Route')
                       : modal === 'stop'
                         ? `${selectedStop ? 'Edit stop' : 'Add stop'} Â· ${selectedRoute?.route_code}`
                         : 'Add Student Assignment'}
               </h3>
-              <button className="modal-x" onClick={closeModal}>âœ•</button>
+              <button className="modal-x" onClick={closeModal} aria-label="Close"><FiX /></button>
             </div>
 
             <div className="modal-b">
@@ -1059,7 +1076,7 @@ function TransportManager() {
                 <div className="grid-2">
                   <FormField label="Route Code *" value={form.route_code} onChange={(v) => setForm({ ...form, route_code: v })} />
                   <FormField label="Route Name *" value={form.name} onChange={(v) => setForm({ ...form, name: v })} />
-                  <div className="form-row"><label>Vehicle *</label><select className="select" value={form.vehicle_id} onChange={(e) => setForm({ ...form, vehicle_id: e.target.value })}><option value="">Select Vehicle</option>{data.vehicles.filter((v: any) => !data.routes.some((r: any) => r.status !== 'INACTIVE' && r.vehicle_no === v.vehicle_number)).map((v: any) => <option key={v.id} value={v.vehicle_number}>{v.vehicle_number}</option>)}</select></div>
+                  <div className="form-row"><label>Vehicle *</label><select className="select" value={form.vehicle_id} onChange={(e) => setForm({ ...form, vehicle_id: e.target.value })}><option value="">Select Vehicle</option>{data.vehicles.filter((v: any) => !data.routes.some((r: any) => r.status !== 'INACTIVE' && r.vehicle_no === v.vehicle_number && r.id !== selectedRoute?.id)).map((v: any) => <option key={v.id} value={v.vehicle_number}>{v.vehicle_number}</option>)}</select></div>
                   <div style={{ gridColumn: '1 / -1' }}>
                     <FormField label="Description" value={form.status} onChange={(v) => setForm({ ...form, status: v })} />
                   </div>
@@ -1071,8 +1088,8 @@ function TransportManager() {
                   <FormField label="Stop Name *" value={form.stop_name} onChange={(v) => setForm({ ...form, stop_name: v })} />
                   <FormField label="Sequence *" type="number" value={selectedStop ? form.sequence : ((selectedRoute?.stops || []).filter((s: any) => s.status !== 'INACTIVE').length + 1)} onChange={(v) => setForm({ ...form, sequence: v })} />
                   <FormField label="Address" value={form.stop_address} onChange={(v) => setForm({ ...form, stop_address: v })} />
-                  <FormField label="Pickup Time" value={form.pickup_time} onChange={(v) => setForm({ ...form, pickup_time: v })} />
-                  <FormField label="Drop Time" value={form.drop_time} onChange={(v) => setForm({ ...form, drop_time: v })} />
+                  <FormField label="Pickup Time" type="time" value={form.pickup_time} onChange={(v) => setForm({ ...form, pickup_time: v })} />
+                  <FormField label="Drop Time" type="time" value={form.drop_time} onChange={(v) => setForm({ ...form, drop_time: v })} />
                 </div>
               )}
 

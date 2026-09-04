@@ -6,12 +6,14 @@ from migrations import (v0001_admissions_foundation, v0002_repair_legacy_applica
 from migrations import v0005_admissions_eligibility
 from migrations import v0006_admissions_phase4
 from migrations import v0007_admissions_phase5
+from migrations import v0008_transport_route_status
 
 MIGRATIONS = [v0001_admissions_foundation, v0002_repair_legacy_application_status,
               v0003_admission_seat_pool_identity, v0004_admissions_phase2_application_context]
 MIGRATIONS.append(v0005_admissions_eligibility)
 MIGRATIONS.append(v0006_admissions_phase4)
 MIGRATIONS.append(v0007_admissions_phase5)
+MIGRATIONS.append(v0008_transport_route_status)
 
 
 def upgrade(engine):

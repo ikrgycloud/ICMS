@@ -3416,6 +3416,7 @@ def allocate_hostel(alloc_id: str, ctx=Depends(auth), s=Depends(db)):
 
 class TransportRouteIn(BaseModel):
     name: str
+    route_code: str = ""
     vehicle_no: str = ""
     seats: int = Field(40, ge=1, le=200)
 
@@ -3458,7 +3459,7 @@ class TransportAllocationIn(BaseModel):
     driver_id: str | None = None
 
 def _transport_bundle(s):
-    routes = s.query(D.TransportRoute).all()
+    routes = s.query(D.TransportRoute).filter(D.TransportRoute.status != "inactive").all()
     vehicles = s.query(D.TransportVehicle).all()
     drivers = s.query(D.TransportDriver).all()
     reqs = s.query(D.TransportRequest).order_by(desc(D.TransportRequest.created_at)).all()
@@ -3513,7 +3514,7 @@ def transport(ctx=Depends(auth), s=Depends(db)):
 @router.post("/transport/routes")
 def create_transport_route(body: TransportRouteIn, ctx=Depends(auth), s=Depends(db)):
     dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
-    row = D.TransportRoute(id=uid(), tenant_id=TENANT, name=body.name, vehicle_no=body.vehicle_no, seats=body.seats)
+    row = D.TransportRoute(id=uid(), tenant_id=TENANT, name=body.name, vehicle_no=body.vehicle_no, seats=body.seats, status="active")
     s.add(row); s.commit(); return {"id": row.id, "decision": dec.as_dict()}
 
 @router.post("/transport/stops")
@@ -3598,7 +3599,29 @@ def delete_transport_route(route_id: str, ctx=Depends(auth), s=Depends(db)):
     dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
     r=s.get(D.TransportRoute, route_id)
     if not r: raise HTTPException(404, "Route not found")
-    s.delete(r); s.commit(); return {"status":"deleted","decision":dec.as_dict()}
+    # Keep the route for history, but atomically remove its operational links.
+    # vehicle_no is the route assignment; clearing it leaves the vehicle and its
+    # driver assignment intact while making the vehicle route-less.
+    for allocation in s.query(D.TransportAllocation).filter(
+        D.TransportAllocation.route_id == route_id,
+        D.TransportAllocation.status == "active",
+    ).all():
+        allocation.status = "inactive"
+    r.status = "inactive"
+    r.vehicle_no = ""
+    s.commit()
+    return {"status":"inactive","decision":dec.as_dict()}
+
+@router.put("/transport/routes/{route_id}")
+def update_transport_route(route_id: str, body: TransportRouteIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
+    r = s.get(D.TransportRoute, route_id)
+    if not r: raise HTTPException(404, "Route not found")
+    r.name = body.name.strip() or r.name
+    r.vehicle_no = body.vehicle_no.strip()
+    r.seats = body.seats
+    s.commit()
+    return {"id": r.id, "decision": dec.as_dict()}
 
 @router.put("/transport/stops/{stop_id}")
 def update_transport_stop(stop_id: str, body: TransportStopIn, ctx=Depends(auth), s=Depends(db)):
@@ -3622,6 +3645,32 @@ def update_transport_vehicle(vehicle_id: str, body: TransportVehicleIn, ctx=Depe
     if not v: raise HTTPException(404, "Vehicle not found")
     v.number=body.number or body.vehicle_number or v.number; v.kind=body.kind; v.capacity=body.capacity; v.status=(body.status or "available").lower()
     s.commit(); return {"id":v.id,"decision":dec.as_dict()}
+
+@router.delete("/transport/vehicles/{vehicle_id}")
+def delete_transport_vehicle(vehicle_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    v = s.get(D.TransportVehicle, vehicle_id)
+    if not v: raise HTTPException(404, "Vehicle not found")
+    v.status = "inactive"; s.commit()
+    return {"status": "inactive", "decision": dec.as_dict()}
+
+@router.put("/transport/drivers/{driver_id}")
+def update_transport_driver(driver_id: str, body: TransportDriverIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    d = s.get(D.TransportDriver, driver_id)
+    if not d: raise HTTPException(404, "Driver not found")
+    d.name, d.employee_id, d.phone = body.name, body.employee_id, body.phone
+    d.license_no, d.license_expiry = body.license_no or body.license_number, body.license_expiry
+    s.commit(); return {"id": d.id, "decision": dec.as_dict()}
+
+@router.delete("/transport/drivers/{driver_id}")
+def delete_transport_driver(driver_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    d = s.get(D.TransportDriver, driver_id)
+    if not d: raise HTTPException(404, "Driver not found")
+    for v in s.query(D.TransportVehicle).filter(D.TransportVehicle.driver_id == driver_id).all(): v.driver_id = None
+    d.status = "inactive"; s.commit()
+    return {"status": "inactive", "decision": dec.as_dict()}
 
 class TransportTripIn(BaseModel):
     vehicle_id: str
