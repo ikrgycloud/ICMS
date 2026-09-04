@@ -22,6 +22,7 @@ from matrices import rbac_for, scope_for, approval_limit_for, APPROVAL_LIMITS
 from capabilities import (modules_for_office, module_meta, MODULE_ACTIONS,
                           MODULES, action_allowed_for_office)
 import domain_models as D
+from teaching import faculty_owns_section
 from models import User, Person, OrgScope, WorkflowInstance, Notification
 
 router = APIRouter(prefix="/api")
@@ -114,6 +115,26 @@ def actor_name(s, ctx):
 
 def _staff_profile(s, ctx):
     return s.query(D.StaffMember).filter(D.StaffMember.user_id == ctx["sub"]).first()
+
+
+def _faculty_or_403(s, ctx):
+    staff = _staff_profile(s, ctx)
+    if not staff or ctx["office_n"] not in {11, 12, 13, 14}:
+        raise HTTPException(403, "Teaching faculty access required")
+    return staff
+
+
+def _session_or_404(s, session_id):
+    session = s.query(D.ClassSession).get(session_id)
+    if not session:
+        raise HTTPException(404, "Class session not found")
+    return session
+
+
+def _checkin_window_open(session, now):
+    if not session.scheduled_start or not session.scheduled_end:
+        return True
+    return session.scheduled_start - timedelta(minutes=30) <= now <= session.scheduled_end + timedelta(minutes=30)
 
 
 def _section_or_404(s, section_id: str):
@@ -219,7 +240,9 @@ def principal_overview(academic_year: str = "", student_semester: str = "", ctx=
         except (TypeError, ValueError): return ""
     years = sorted(set(filter(None, (academic_year_for(t) for t in terms))), reverse=True)
     selected_year = academic_year if academic_year in years else (years[0] if years else "")
-    student_query = s.query(D.Student).filter(D.Student.status == "active")
+    student_query = _student_scope(
+        s.query(D.Student).filter(D.Student.status == "active"), ctx
+    )
     try:
         selected_student_semester = int(student_semester) if student_semester else 0
     except (TypeError, ValueError):
@@ -1707,28 +1730,52 @@ def attendance_roster(section_id: str, ctx=Depends(auth), s=Depends(db)):
 
 class MarkAttendanceIn(BaseModel):
     section_id: str
+    class_session_id: str
     present_ids: list[str] = []
     absent_ids: list[str] = []
+    statuses: dict[str, str] = {}
     on_date: str = ""
-
-
 @router.post("/attendance/mark")
 def mark_attendance(body: MarkAttendanceIn, ctx=Depends(auth), s=Depends(db)):
     dec, verb = gate(s, ctx, "attendance", "mark")
     require(dec)
-    d = date.fromisoformat(body.on_date) if body.on_date else date.today()
+    staff = _faculty_or_403(s, ctx)
+    session = _session_or_404(s, body.class_session_id)
+    if session.section_id != body.section_id:
+        raise HTTPException(422, "Class session does not belong to this section")
+    if session.faculty_id != staff.id or not faculty_owns_section(s, staff.id, body.section_id, session.session_date):
+        raise HTTPException(403, "You are not assigned to this class session")
+    if not session.checked_in_at:
+        raise HTTPException(409, "Check in to this class session before marking attendance")
+    if session.status == "attendance_finalized":
+        raise HTTPException(409, "Attendance is finalized; use the correction workflow when it is available")
+    if session.status in {"cancelled", "completed"}:
+        raise HTTPException(409, "Attendance cannot be recorded for this session")
+    d = date.fromisoformat(body.on_date) if body.on_date else session.session_date
+    if d != session.session_date:
+        raise HTTPException(422, "Attendance date must match the selected class session")
+    if not _checkin_window_open(session, datetime.utcnow()):
+        raise HTTPException(422, "Attendance marking is outside the allowed session window")
     who = actor_name(s, ctx)
+    roster_ids = {row.student_id for row in s.query(D.Enrollment).filter(D.Enrollment.section_id == body.section_id, D.Enrollment.status == "enrolled").all()}
+    raw_statuses = dict(body.statuses)
+    raw_statuses.update({student_id: "present" for student_id in body.present_ids})
+    raw_statuses.update({student_id: "absent" for student_id in body.absent_ids})
+    allowed_statuses = {"present", "absent", "late", "excused"}
+    if not raw_statuses or not set(raw_statuses).issubset(roster_ids):
+        raise HTTPException(422, "Attendance may only be recorded for active students in this section")
+    if any(status.lower() not in allowed_statuses for status in raw_statuses.values()):
+        raise HTTPException(422, "Attendance status must be Present, Absent, Late or Excused")
 
-    def upsert(student_id: str, present: bool):
+    def upsert(student_id: str, status: str):
         row = (
             s.query(D.AttendanceRecord)
-            .filter(
-                D.AttendanceRecord.section_id == body.section_id,
-                D.AttendanceRecord.student_id == student_id,
-                D.AttendanceRecord.on_date == d,
-            )
+            .filter(D.AttendanceRecord.class_session_id == session.id,
+                    D.AttendanceRecord.student_id == student_id)
             .first()
         )
+        if row and row.finalized_at:
+            raise HTTPException(409, "Attendance is finalized; use the correction workflow when it is available")
         if row is None:
             row = D.AttendanceRecord(
                 id=uid(),
@@ -1736,26 +1783,25 @@ def mark_attendance(body: MarkAttendanceIn, ctx=Depends(auth), s=Depends(db)):
                 section_id=body.section_id,
                 student_id=student_id,
                 on_date=d,
+                class_session_id=session.id,
             )
             s.add(row)
-        row.present = present
-        row.status = "present" if present else "absent"
+        normalized = status.lower()
+        row.present = normalized in {"present", "late", "excused"}
+        row.status = normalized
         row.note = ""
         row.marked_by = who
+        row.version_no = (row.version_no or 0) + 1 if row.id else 1
         row.updated_at = datetime.utcnow()
 
-    for sid in body.present_ids:
-        upsert(sid, True)
-    for sid in body.absent_ids:
-        upsert(sid, False)
+    for sid, status in raw_statuses.items():
+        upsert(sid, status)
     s.commit()
-    n = len(body.present_ids) + len(body.absent_ids)
+    n = len(raw_statuses)
     write_audit(s, ctx["sub"], who, ctx["office_n"], "attendance.mark",
                 f"section:{body.section_id}", "", "recorded",
                 f"Marked {n} students on {d.isoformat()}")
     return {"marked": n, "decision": dec.as_dict()}
-
-
 # --------------------------------------------------------------------------- #
 #  EXAMINATIONS: marks entry + result publication (SoD-separated)
 # --------------------------------------------------------------------------- #
@@ -2122,7 +2168,7 @@ def update_assessment(assessment_id: str, body: AssessmentUpsertIn, ctx=Depends(
 class EnterMarksIn(BaseModel):
     assessment_id: str
     marks: dict  # {student_id: score}
-
+MARKS_EDITABLE_STATES = {"draft", "returned"}
 
 @router.post("/exams/marks")
 def enter_marks(body: EnterMarksIn, ctx=Depends(auth), s=Depends(db)):
@@ -2136,6 +2182,8 @@ def enter_marks(body: EnterMarksIn, ctx=Depends(auth), s=Depends(db)):
         raise HTTPException(403, "You cannot enter marks for this section")
     if a.locked:
         raise HTTPException(409, "Assessment is locked; marks cannot be changed")
+    if (a.marks_state or "draft") not in MARKS_EDITABLE_STATES:
+        raise HTTPException(409, "Marks are submitted for review and cannot be edited")
     who = actor_name(s, ctx)
     valid_student_ids = {
         row.student_id
@@ -2146,22 +2194,28 @@ def enter_marks(body: EnterMarksIn, ctx=Depends(auth), s=Depends(db)):
     for stu_id, score in body.marks.items():
         if stu_id not in valid_student_ids:
             raise HTTPException(400, "Marks can be entered only for students enrolled in this section")
+        try:
+            score = float(score)
+        except (TypeError, ValueError):
+            raise HTTPException(422, "Marks must be numeric")
+        if score < 0 or score > a.max_marks:
+            raise HTTPException(422, f"Marks must be between 0 and {a.max_marks}")
         existing = s.query(D.Mark).filter(D.Mark.assessment_id == a.id,
                                           D.Mark.student_id == stu_id).first()
         if existing:
-            existing.score = float(score)
+            existing.score = score
             existing.status = "draft"
             existing.updated_at = datetime.utcnow()
         else:
             s.add(D.Mark(id=uid(), tenant_id=TENANT, assessment_id=a.id,
-                         student_id=stu_id, score=float(score), entered_by=who,
+                          student_id=stu_id, score=score, entered_by=who,
                          status="draft", updated_at=datetime.utcnow()))
     s.commit()
     write_audit(s, ctx["sub"], who, ctx["office_n"], "marks.enter",
                 f"assessment:{a.id}", "", "entered", f"Entered {len(body.marks)} marks for {a.name}")
-    return {"entered": len(body.marks), "decision": dec.as_dict()}
-
-
+    total_entered = s.query(D.Mark).filter(D.Mark.assessment_id == a.id).count()
+    return {"assessment_id": a.id, "entered": len(body.marks), "total_entered": total_entered,
+            "decision": dec.as_dict()}
 class PublishMarksIn(BaseModel):
     assessment_id: str
 

@@ -44,6 +44,20 @@ import { StudentAttendanceView, StudentCalendarView, StudentCoursesView, Student
 import FacultyHome from './personas/FacultyHome'
 import AssociateProfessorHome from './personas/AssociateProfessorHome'
 import FacultySchedule from './personas/FacultySchedule'
+import FacultyExaminations from './personas/FacultyExaminations'
+import { FacultyAssignments, StudentAssignments } from './personas/AssignmentViews'
+import FacultyCommunication from './personas/FacultyCommunication'
+import FacultyCourses from './personas/FacultyCourses'
+import FacultyDigitalId from './personas/FacultyDigitalId'
+import FacultyLeave from './personas/FacultyLeave'
+import FacultyPayroll from './personas/FacultyPayroll'
+import FacultyAssessments from './personas/FacultyAssessments'
+import FacultyAttendance from './personas/FacultyAttendance'
+import FacultyMarks from './personas/FacultyMarks'
+import FacultyMentoring from './personas/FacultyMentoring'
+import FacultyStudents from './personas/FacultyStudents'
+import { FacultyMaterials } from './personas/CourseMaterials'
+import FacultyConditionalView from './personas/FacultyConditionalViews'
 import ParentHome from './personas/ParentHome'
 import FrontDeskWorkspace from './frontdesk/FrontDeskWorkspace'
 import { PageHead } from './modules/kit'
@@ -101,18 +115,21 @@ const PRINCIPAL_NAV = [
 // teaching workspace described by the Professor Office information layout.
 // A link is only interactive when its backing module is authorised.
 const FACULTY_NAV = [
-  ['Workspace', 'Overview', 'overview'], ['Workspace', 'My Schedule', 'my_schedule'], ['Workspace', 'Messages', 'workflows'],
-  ['Teaching & Academics', 'My Sections', 'academics'], ['Teaching & Academics', 'Attendance', 'attendance'],
-  ['Teaching & Academics', 'Assessments & Marks', 'examinations'], ['Teaching & Academics', 'Examinations', 'examinations'],
-  ['Teaching & Academics', 'Course Materials', 'academics'], ['Teaching & Academics', 'Research & Publications', 'research'],
+  ['Workspace', 'Overview', 'overview'], ['Workspace', 'My Schedule', 'my_schedule'], ['Workspace', 'Messages', 'messages'], ['Workspace', 'Announcements', 'announcements'],
+  ['Teaching & Academics', 'My Sections', 'academics'], ['Teaching & Academics', 'Attendance', 'attendance'], ['Teaching & Academics', 'Assignments', 'assignments'],
+  ['Teaching & Academics', 'Assessments', 'assessments'], ['Teaching & Academics', 'Marks Entry', 'marks_entry'], ['Teaching & Academics', 'Examinations', 'examinations'],
+  ['Teaching & Academics', 'Course Materials', 'course_materials'], ['Teaching & Academics', 'My Students', 'students'], ['Teaching & Academics', 'Mentoring', 'mentoring'], ['Teaching & Academics', 'Research & Publications', 'research'],
   ['Teaching & Academics', 'Projects & Guidance', 'research'], ['Teaching & Academics', 'Academic Calendar', 'academic_calendar'],
-  ['Administration', 'Leave Requests', 'workflows'], ['Administration', 'My Requests & Approvals', 'workflows'],
-  ['Reference', 'Directory', 'directory'], ['Reference', 'Profile', 'directory'],
+  ['Administration', 'Leave Requests', 'leave'], ['Administration', 'Payroll', 'payroll'], ['Administration', 'My Requests & Approvals', 'workflows'],
+  ['Reference', 'Directory', 'directory'], ['Reference', 'Digital ID', 'digital_id'],
 ] as const
 
 const FACULTY_ACTIVE_LABEL: Record<string, string> = {
   overview: 'Overview', my_schedule: 'My Schedule', workflows: 'My Requests & Approvals',
   academics: 'My Sections', attendance: 'Attendance', examinations: 'Assessments & Marks',
+  assignments: 'Assignments', assessments: 'Assessments', marks_entry: 'Marks Entry',
+  course_materials: 'Course Materials', mentoring: 'Mentoring', leave: 'Leave Requests',
+  payroll: 'Payroll', digital_id: 'Digital ID', messages: 'Messages', announcements: 'Announcements',
   research: 'Research & Publications', academic_calendar: 'Academic Calendar', directory: 'Directory',
 }
 
@@ -203,7 +220,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     // Faculty & Staff is a Principal-specific presentation of the authorised
     // HR module.  It has its own route so that the list/profile experience is
     // retained when opened from the dashboard KPI or the Principal sidebar.
-    const virtualModule = (user?.office_n === 4 && ['faculty_staff', 'curriculum', 'courses_subjects'].includes(view)) || view.startsWith('director_') || view.startsWith('manager_') || view.startsWith('coordinator_')
+    const virtualModule = ([3, 4].includes(user?.office_n) && PRINCIPAL_NAV.some(([, , key]) => key === view)) || view.startsWith('director_') || view.startsWith('manager_') || view.startsWith('coordinator_')
     // Finance is a student self-service destination even though students do
     // not receive the staff Finance workspace capability from the backend.
     if (!virtualModule && !(user?.persona === 'student' && view === 'finance') && !ws.modules.some((module: any) => module.key === view)) {
@@ -265,7 +282,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
 
   const color = LEVEL_COLORS[user.level] || '#c9a24a'
   const chairmanShell = user.office_n === 1
-  const principalShell = user.office_n === 4
+  const principalShell = [3, 4].includes(user.office_n)
   const transportOfficeShell = user.office_n === 31
   const facultyShell = user.persona === 'faculty'
   const directorAdmissionsShell = user.office_n === 15 && user.active_role === 'Director of Admissions'
@@ -291,9 +308,9 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const coordinatorGroupKeys = [...new Set(COORDINATOR_NAV.map(([group]) => group))]
   const principalGroups = PRINCIPAL_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
     const source = displayModules.find((module: any) => module.key === key)
-      || (key === 'courses_subjects' ? displayModules.find((module: any) => module.key === 'academics') : undefined)
-      || (key === 'faculty_staff' ? { key, label, group, enabled: true } : undefined)
-    ;(out[group] = out[group] || []).push({ key, label, group, source, enabled: Boolean(source) })
+      || (user.office_n === 4 && key === 'courses_subjects' ? displayModules.find((module: any) => module.key === 'academics') : undefined)
+      || (user.office_n === 4 && key === 'faculty_staff' ? { key, label, group, enabled: true } : undefined)
+    ;(out[group] = out[group] || []).push({ key, label, group, source, enabled: true })
     return out
   }, {})
   const facultyGroups = FACULTY_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
@@ -322,6 +339,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     : admissionsOperationsShell
     ? Object.values(activeAdmissionsGroups).flat().find((module: any) => module.key === view)
     : undefined) || sidebarModules.find((module: any) => module.key === view) || sidebarModules[0]
+  const campusHeader = user.scope_level === 'campus' ? user.scope_ref : ''
 
   return (
     <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''} ${facultyShell ? 'faculty-shell' : ''} ${directorAdmissionsShell ? 'director-admissions-shell' : ''} ${admissionManagerShell ? 'admission-manager-shell' : ''}`}>
@@ -331,7 +349,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
             <div className="seal">IC</div>
             <div>
               <div className="brand-name">ICMS</div>
-              <div className="brand-sub">{principalShell ? 'Principal Portal' : directorAdmissionsShell ? 'Admissions Directorate' : admissionManagerShell ? 'Admissions Operations' : facultyShell ? 'University Group' : 'University Group'}</div>
+              <div className="brand-sub">{principalShell ? (user.office_n === 3 ? 'Campus Head Portal' : 'Principal Portal') : directorAdmissionsShell ? 'Admissions Directorate' : admissionManagerShell ? 'Admissions Operations' : facultyShell ? 'University Group' : 'University Group'}</div>
             </div>
           </div>
         </div>
@@ -380,7 +398,11 @@ export default function App({ onLogout }: { onLogout: () => void }) {
             <button className="icon-btn hamburger" onClick={() => setSideOpen(open => !open)} type="button">
               <MenuIcon />
             </button>
-            <div className="crumb">{user.office} <b>/ {current?.label}</b></div>
+            <div className="crumb">
+              {user.office}
+              {campusHeader && <b> / {campusHeader}</b>}
+              <b> / {current?.label}</b>
+            </div>
           </div>
 
           <div className="top-right">
@@ -511,6 +533,10 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'my_schedule':
       if (user.persona === 'faculty') return <FacultySchedule user={user} go={go} />
       return <MySchedule user={user} go={go} />
+    case 'messages':
+      return <FacultyCommunication mode="messages" />
+    case 'announcements':
+      return <FacultyCommunication mode="announcements" />
     case 'academic_calendar':
       return <AcademicCalendar user={user} caps={caps} />
     case 'rollover':
@@ -521,8 +547,12 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <Analytics user={user} />
     case 'students':
       if (user.persona === 'student') return <StudentHome user={user} go={go} />
+      if (user.persona === 'faculty') return <FacultyStudents />
       return <Students caps={caps} />
+    case 'mentoring':
+      return user.persona === 'faculty' ? <FacultyMentoring /> : <Students caps={caps} />
     case 'academics':
+      if (user.persona === 'faculty') return <FacultyCourses go={go} />
       if (user.persona === 'student') return <StudentCoursesView />
       return <Academics caps={caps} />
     case 'curriculum':
@@ -542,11 +572,23 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'coordinator_reports':
       return <CoordinatorPage title="Academic Operations Reports" sub="Review readiness, timetable coverage, curriculum execution, and delivery metrics." action="Export report" />
     case 'attendance':
+      if (user.persona === 'faculty') return <FacultyAttendance />
       if (user.persona === 'student') return <StudentAttendanceView />
       return <Attendance caps={caps} />
     case 'examinations':
       if (user.persona === 'student') return <StudentExaminationsView go={go} />
+      if (user.persona === 'faculty') return <FacultyExaminations />
       return <Examinations caps={caps} />
+    case 'assessments':
+      return user.persona === 'faculty' ? <FacultyAssessments go={go} /> : <Examinations caps={caps} />
+    case 'assignments':
+      if (user.persona === 'faculty') return <FacultyAssignments />
+      if (user.persona === 'student') return <StudentAssignments />
+      return <div className="empty">Assignments are not available for this role.</div>
+    case 'marks_entry':
+      return user.persona === 'faculty' ? <FacultyMarks /> : <Examinations caps={caps} />
+    case 'course_materials':
+      return user.persona === 'faculty' ? <FacultyMaterials /> : <div className="empty">Course materials are not available for this role.</div>
     case 'scores':
       if (user.persona === 'student') return <StudentScoresView />
       return <Examinations caps={caps} />
@@ -560,11 +602,22 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       if (user.persona === 'student') return <StudentLibraryView />
       return <Library caps={caps} />
     case 'hr':
+      if (user.persona === 'faculty') return <FacultyPayroll />
       return <HR caps={caps} />
+    case 'payroll':
+      return user.persona === 'faculty' ? <FacultyPayroll /> : <HR caps={caps} />
     case 'faculty_staff':
       return <FacultyStaff />
     case 'leave':
-      return <HR caps={caps} />
+      return user.persona === 'faculty' ? <FacultyLeave /> : <HR caps={caps} />
+    case 'digital_id':
+      return user.persona === 'faculty' ? <FacultyDigitalId /> : <div className="empty">Digital ID is not available for this role.</div>
+    case 'coordination':
+      return <FacultyConditionalView kind="coordination" />
+    case 'academic_risk':
+      return <FacultyConditionalView kind="risk" />
+    case 'course_registrations':
+      return <FacultyConditionalView kind="registrations" />
     case 'recruitment':
       return <HR caps={caps} />
     case 'procurement':

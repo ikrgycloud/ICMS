@@ -37,6 +37,8 @@ from models import (User, Person, Role, RolePermission, Delegation, WorkflowInst
                     DelegationContext)
 
 from domain_api import router as domain_router
+from faculty_api import router as faculty_router
+from faculty_portal_api import router as faculty_portal_router
 from admissions_api import router as admissions_router
 from portal_api import router as portal_router
 from integrations_api import router as integrations_router
@@ -57,6 +59,8 @@ app = FastAPI(title="ICMS — Integrated College/University Management System",
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                    allow_headers=["*"])
 app.include_router(domain_router)
+app.include_router(faculty_router)
+app.include_router(faculty_portal_router)
 app.include_router(admissions_router)
 app.include_router(portal_router)
 app.include_router(integrations_router)
@@ -133,11 +137,18 @@ def _ensure_payment_status_columns():
     from sqlalchemy import inspect, text
     s = SessionLocal()
     try:
-        if not inspect(s.bind).has_table("payments"):
+        inspector = inspect(s.bind)
+        if not inspector.has_table("payments"):
             return
-        s.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'success'"))
-        s.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS cleared_at TIMESTAMP"))
-        s.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS cleared_by VARCHAR DEFAULT ''"))
+        existing = {column["name"] for column in inspector.get_columns("payments")}
+        additions = {
+            "status": "VARCHAR DEFAULT 'success'",
+            "cleared_at": "TIMESTAMP",
+            "cleared_by": "VARCHAR DEFAULT ''",
+        }
+        for column_name, ddl in additions.items():
+            if column_name not in existing:
+                s.execute(text(f"ALTER TABLE payments ADD COLUMN {column_name} {ddl}"))
         s.execute(text("UPDATE payments SET status = 'success' WHERE status IS NULL"))
         s.commit()
     finally:
@@ -552,6 +563,7 @@ def _delegation_recipient_options(s):
 class LoginIn(BaseModel):
     username: str
     password: str
+    demo_context: str | None = None
 
 
 @app.post("/api/auth/login")
@@ -559,9 +571,20 @@ def login(body: LoginIn, s=Depends(db)):
     # IDs and email-style usernames should be convenient to type.  Preserve the
     # stored username but compare case-insensitively at authentication time.
     username = (body.username or "").strip().lower()
+    if username == "student":
+        username = "25ece072"
     u = s.query(User).filter(func.lower(User.username) == username).first()
     if not u or u.password_hash != pwhash(body.password):
         raise HTTPException(401, "Invalid credentials")
+    if body.demo_context:
+        if body.demo_context != "professor" or username != "professor":
+            raise HTTPException(422, "Invalid demo login context")
+        professor = s.query(User).filter(
+            User.username == "aarav_kulkarni", User.status == "active"
+        ).first()
+        if not professor:
+            raise HTTPException(503, "Professor demo account is unavailable")
+        u = professor
     o = office(u.office_n)
     tok = issue_token(u.id, u.tenant_id, u.office_n, u.role, u.scope_level,
                       u.scope_ref, "mfa" if u.mfa_enabled else "password")
@@ -606,6 +629,7 @@ def _user_payload(u, p, o, active_role=None, active_delegations=None):
         "role": u.role, "active_role": active_role or u.role,
         "persona": _persona_for(u.office_n),
         "scope_level": u.scope_level, "mfa": u.mfa_enabled,
+            "scope_ref": u.scope_ref,
         "modules": o["modules"], "functionalities": o["functionalities"],
         "workflows": o["workflows"], "purpose": o["purpose"],
         "reports_to": o["reports_to"], "internal_roles": o["internal_roles"],
@@ -1129,12 +1153,22 @@ def _wf_payload(s, wf, proc):
     approvals = (s.query(Approval).filter(Approval.workflow_id == wf.id)
                  .order_by(Approval.created_at).all())
     profile = s.query(WorkflowProfile).filter(WorkflowProfile.workflow_id == wf.id).first()
+    request_student = ""
+    correction_id = ""
+    if wf.process_key == "attendance_correction":
+        correction = (s.query(D.AttendanceCorrectionRequest)
+                      .filter(D.AttendanceCorrectionRequest.workflow_instance_id == wf.id).first())
+        if correction:
+            student = s.query(D.Student).get(correction.student_id)
+            request_student = student.name if student else correction.student_id
+            correction_id = correction.id
     return {
         "id": wf.id, "process_key": wf.process_key, "label": wf.label,
         "office_n": wf.office_n, "title": wf.title, "state": wf.state,
         "amount": wf.amount, "initiator": wf.initiator_name,
         "current_stage": wf.current_stage, "escalated": wf.escalated,
         "scope_level": wf.scope_level,
+        "request_student": request_student, "correction_id": correction_id,
         "chain": proc["chain"] if proc else [],
         "escalation": proc["escalation"] if proc else "",
         "created_at": wf.created_at.isoformat(),
@@ -1238,7 +1272,8 @@ def list_workflows(scope: str = "all", ctx=Depends(non_front_office), s=Depends(
     q = s.query(WorkflowInstance)
     pending_states = ["submitted", "under_review", "reviewed", "escalated"]
     if scope == "mine":
-        q = q.filter(WorkflowInstance.initiator_id == ctx["sub"])
+        rows = (q.filter(WorkflowInstance.initiator_id == ctx["sub"])
+                .order_by(desc(WorkflowInstance.updated_at)).limit(100).all())
     elif scope == "inbox":
         own_rows = (q.filter(WorkflowInstance.office_n == ctx["office_n"],
                              WorkflowInstance.state.in_(pending_states))

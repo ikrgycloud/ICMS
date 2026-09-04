@@ -14,7 +14,7 @@ applies uniformly.
 """
 from datetime import datetime, date
 from sqlalchemy import (Column, Integer, String, Boolean, Float, DateTime,
-                        Date, Text, ForeignKey, UniqueConstraint)
+                        Date, Text, ForeignKey, Index, UniqueConstraint)
 from models import Base
 
 
@@ -85,6 +85,50 @@ class Section(Base):
     schedule = Column(String, default="")   # "Mon 10:00, Wed 10:00"
     capacity = Column(Integer, default=60)
     scope_ref = Column(String, default="")  # department scope
+
+
+class TeachingAllocation(Base):
+    """Authoritative, time-bound faculty ownership of a teaching section."""
+    __tablename__ = "teaching_allocations"
+    __table_args__ = (
+        Index("ix_teaching_allocations_faculty_status", "faculty_id", "status"),
+        Index("ix_teaching_allocations_section_status", "section_id", "status"),
+    )
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    faculty_id = Column(String, ForeignKey("staff_members.id"), index=True)
+    course_id = Column(String, ForeignKey("courses.id"), index=True)
+    section_id = Column(String, ForeignKey("sections.id"), index=True)
+    academic_year = Column(String, default="")
+    term = Column(String, default="")
+    allocation_type = Column(String, default="primary")
+    lecture_hours = Column(Float, default=0)
+    lab_hours = Column(Float, default=0)
+    tutorial_hours = Column(Float, default=0)
+    workload_units = Column(Float, default=0)
+    assigned_by = Column(String, default="")
+    effective_from = Column(Date, nullable=True)
+    effective_to = Column(Date, nullable=True)
+    status = Column(String, default="draft", index=True)
+    is_coordinator = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CourseMaterial(Base):
+    __tablename__ = "course_materials"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    section_id = Column(String, ForeignKey("sections.id"), index=True)
+    title = Column(String)
+    description = Column(Text, default="")
+    material_type = Column(String, default="document")
+    resource_url = Column(String, default="")
+    topic = Column(String, default="")
+    status = Column(String, default="draft")
+    uploaded_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 
 # --------------------------------------------------------------------------- #
@@ -160,6 +204,88 @@ class StaffMember(Base):
     user_id = Column(String, nullable=True)
 
 
+class StaffCheckIn(Base):
+    __tablename__ = "staff_check_ins"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    staff_id = Column(String, ForeignKey("staff_members.id"), index=True)
+    on_date = Column(Date, default=date.today, index=True)
+    checked_in_at = Column(DateTime, default=datetime.utcnow)
+    note = Column(String, default="")
+
+
+class MentorAssignment(Base):
+    __tablename__ = "mentor_assignments"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    faculty_id = Column(String, ForeignKey("staff_members.id"), index=True)
+    student_id = Column(String, ForeignKey("students.id"), index=True)
+    assigned_at = Column(DateTime, default=datetime.utcnow)
+    status = Column(String, default="active")
+
+
+class MentoringCase(Base):
+    __tablename__ = "mentoring_cases"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    student_id = Column(String, ForeignKey("students.id"), index=True)
+    mentor_id = Column(String, ForeignKey("staff_members.id"), index=True)
+    department_id = Column(String, ForeignKey("departments.id"), index=True)
+    category = Column(String, default="Academic Performance")
+    risk_level = Column(String, default="low")
+    status = Column(String, default="open", index=True)
+    summary = Column(Text, default="")
+    action_plan = Column(Text, default="")
+    follow_up_date = Column(Date, nullable=True)
+    referred_to_office = Column(String, default="")
+    referred_to_user_id = Column(String, default="", index=True)
+    referred_at = Column(DateTime, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class MentoringNote(Base):
+    __tablename__ = "mentoring_notes"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    case_id = Column(String, ForeignKey("mentoring_cases.id"), index=True)
+    author_user_id = Column(String, ForeignKey("users.id"), index=True)
+    author_name = Column(String, default="")
+    note_type = Column(String, default="note")
+    content = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class MentoringFollowUp(Base):
+    __tablename__ = "mentoring_follow_ups"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    case_id = Column(String, ForeignKey("mentoring_cases.id"), index=True)
+    scheduled_for = Column(Date, nullable=False, index=True)
+    created_by = Column(String, ForeignKey("users.id"), index=True)
+    completed_at = Column(DateTime, nullable=True)
+    completed_by = Column(String, default="")
+    outcome = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class FacultyFunctionalAssignment(Base):
+    __tablename__ = "faculty_functional_assignments"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    faculty_id = Column(String, ForeignKey("staff_members.id"), index=True)
+    role_key = Column(String, index=True)
+    permission_key = Column(String, default="", index=True)
+    scope_type = Column(String, default="")
+    scope_ref = Column(String, default="", index=True)
+    status = Column(String, default="active", index=True)
+    valid_from = Column(DateTime, default=datetime.utcnow)
+    valid_to = Column(DateTime, nullable=True)
+    assigned_at = Column(DateTime, default=datetime.utcnow)
+
+
 # --------------------------------------------------------------------------- #
 #  Enrollment · attendance · assessment · results
 # --------------------------------------------------------------------------- #
@@ -180,12 +306,40 @@ class AttendanceRecord(Base):
     tenant_id = Column(String, index=True)
     section_id = Column(String, ForeignKey("sections.id"))
     student_id = Column(String, ForeignKey("students.id"))
+    class_session_id = Column(String, ForeignKey("class_sessions.id"), nullable=True, index=True)
     on_date = Column(Date, default=date.today)
     present = Column(Boolean, default=True)
     status = Column(String, default="present")
     note = Column(String, default="")
     marked_by = Column(String, default="")
+    version_no = Column(Integer, default=1)
+    finalized_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AttendanceCorrectionRequest(Base):
+    __tablename__ = "attendance_correction_requests"
+    __table_args__ = (
+        Index("ix_attendance_correction_requested_by", "requested_by"),
+        Index("ix_attendance_correction_status", "status"),
+        Index("ix_attendance_correction_workflow", "workflow_instance_id"),
+    )
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    attendance_record_id = Column(String, ForeignKey("attendance_records.id"), index=True)
+    class_session_id = Column(String, ForeignKey("class_sessions.id"), index=True)
+    student_id = Column(String, ForeignKey("students.id"), index=True)
+    section_id = Column(String, ForeignKey("sections.id"), index=True)
+    requested_by = Column(String, ForeignKey("users.id"), index=True)
+    original_status = Column(String)
+    requested_status = Column(String)
+    reason = Column(Text)
+    workflow_instance_id = Column(String, ForeignKey("workflow_instances.id"), unique=True, index=True)
+    status = Column(String, default="draft", index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    applied_at = Column(DateTime, nullable=True)
+    applied_by = Column(String, default="")
 
 
 class Assessment(Base):
@@ -210,6 +364,14 @@ class Assessment(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
     published_at = Column(DateTime, nullable=True)
     published_by = Column(String, default="")
+    marks_state = Column(String, default="draft", index=True)
+    workflow_instance_id = Column(String, ForeignKey("workflow_instances.id"), nullable=True, unique=True, index=True)
+    marks_submitted_by = Column(String, default="")
+    marks_submitted_at = Column(DateTime, nullable=True)
+    marks_approved_at = Column(DateTime, nullable=True)
+    marks_published_at = Column(DateTime, nullable=True)
+    marks_revision = Column(Integer, default=1)
+    marks_return_comment = Column(Text, default="")
 
 
 class Mark(Base):
@@ -1226,6 +1388,36 @@ class TimetableEntry(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
+class ClassSession(Base):
+    __tablename__ = "class_sessions"
+    __table_args__ = (
+        UniqueConstraint("timetable_entry_id", "session_date", name="uq_class_session_timetable_date"),
+        Index("ix_class_sessions_faculty_date", "faculty_id", "session_date"),
+        Index("ix_class_sessions_section_date", "section_id", "session_date"),
+    )
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    allocation_id = Column(String, ForeignKey("teaching_allocations.id"), nullable=True, index=True)
+    timetable_entry_id = Column(String, ForeignKey("timetable_entries.id"), nullable=True, index=True)
+    section_id = Column(String, ForeignKey("sections.id"), index=True)
+    faculty_id = Column(String, ForeignKey("staff_members.id"), index=True)
+    session_date = Column(Date, index=True)
+    scheduled_start = Column(DateTime, nullable=True)
+    scheduled_end = Column(DateTime, nullable=True)
+    actual_start = Column(DateTime, nullable=True)
+    actual_end = Column(DateTime, nullable=True)
+    room = Column(String, default="")
+    topic = Column(String, default="")
+    delivery_type = Column(String, default="")
+    status = Column(String, default="scheduled", index=True)
+    checked_in_at = Column(DateTime, nullable=True)
+    checked_in_by = Column(String, default="")
+    finalized_at = Column(DateTime, nullable=True)
+    finalized_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Assignment(Base):
     __tablename__ = "assignments"
     id = Column(String, primary_key=True)
@@ -1240,6 +1432,46 @@ class Assignment(Base):
     created_by = Column(String, default="")
     updated_by = Column(String, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    max_marks = Column(Float, default=100)
+    allow_late = Column(Boolean, default=True)
+    faculty_id = Column(String, ForeignKey("staff_members.id"), nullable=True)
+    teaching_allocation_id = Column(String, ForeignKey("teaching_allocations.id"), nullable=True)
+    published_at = Column(DateTime, nullable=True)
+    published_by = Column(String, default="")
+    closed_at = Column(DateTime, nullable=True)
+    closed_by = Column(String, default="")
+
+
+class AssignmentSubmission(Base):
+    __tablename__ = "assignment_submissions"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    assignment_id = Column(String, ForeignKey("assignments.id"), index=True)
+    student_id = Column(String, ForeignKey("students.id"), index=True)
+    submitted_at = Column(DateTime, default=datetime.utcnow)
+    attempt_no = Column(Integer, default=1)
+    status = Column(String, default="submitted")
+    is_late = Column(Boolean, default=False)
+    submission_text = Column(Text, default="")
+    file_name = Column(String, default="")
+    file_url = Column(String, default="")
+    returned_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AssignmentEvaluation(Base):
+    __tablename__ = "assignment_evaluations"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    submission_id = Column(String, ForeignKey("assignment_submissions.id"), unique=True, index=True)
+    evaluator_id = Column(String, ForeignKey("staff_members.id"), nullable=True)
+    marks_awarded = Column(Float, nullable=True)
+    feedback = Column(Text, default="")
+    internal_comment = Column(Text, default="")
+    status = Column(String, default="evaluated")
+    evaluated_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -1309,6 +1541,12 @@ class LeaveRequest(Base):
     reason = Column(String, default="")
     status = Column(String, default="pending")  # pending/approved/rejected
     decided_by = Column(String, default="")
+    workflow_instance_id = Column(String, ForeignKey("workflow_instances.id"), nullable=True, unique=True, index=True)
+    requested_by = Column(String, default="", index=True)
+    half_day = Column(Boolean, default=False)
+    submitted_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    returned_comment = Column(Text, default="")
 
 
 class JobPosting(Base):
@@ -1459,6 +1697,55 @@ class ResearchProject(Base):
     agency = Column(String, default="")
     grant_amount = Column(Float, default=0)
     status = Column(String, default="ongoing")  # proposed/ongoing/completed
+    owner_id = Column(String, ForeignKey("staff_members.id"), nullable=True, index=True)
+    category = Column(String, default="")
+    summary = Column(Text, default="")
+    start_date = Column(Date, nullable=True)
+    expected_end_date = Column(Date, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ResearchProgress(Base):
+    __tablename__ = "research_progress"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    project_id = Column(String, ForeignKey("research_projects.id"), index=True)
+    author_id = Column(String, ForeignKey("users.id"), index=True)
+    author_name = Column(String, default="")
+    content = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ResearchMilestone(Base):
+    __tablename__ = "research_milestones"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    project_id = Column(String, ForeignKey("research_projects.id"), index=True)
+    title = Column(String)
+    due_date = Column(Date, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    completed_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ResearchPublication(Base):
+    __tablename__ = "research_publications"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    owner_id = Column(String, ForeignKey("staff_members.id"), index=True)
+    title = Column(String)
+    publication_type = Column(String, default="journal")
+    venue = Column(String, default="")
+    authors = Column(Text, default="")
+    publication_date = Column(Date, nullable=True)
+    doi_url = Column(String, default="")
+    volume_issue_pages = Column(String, default="")
+    status = Column(String, default="draft")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 
 class Accreditation(Base):

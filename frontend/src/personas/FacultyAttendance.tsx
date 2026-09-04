@@ -3,29 +3,79 @@ import { api } from '../api'
 import { Empty, Spinner } from '../modules/kit'
 
 export default function FacultyAttendance() {
-  const [home, setHome] = useState<any>(null), [query, setQuery] = useState(''), [selected, setSelected] = useState<any>(null)
-  const [roster, setRoster] = useState<any[]>([]), [present, setPresent] = useState<Set<string>>(new Set()), [saving, setSaving] = useState(false), [message, setMessage] = useState('')
-  const [sectionFilter, setSectionFilter] = useState('all'), [courseFilter, setCourseFilter] = useState('all'), [attendanceDate, setAttendanceDate] = useState(new Date().toISOString().slice(0, 10))
-  const [checkIn, setCheckIn] = useState<any>(null), [checkingIn, setCheckingIn] = useState(false)
-  const load = () => api.facultyHome().then(setHome).catch(() => setHome({ error: true }))
-  useEffect(() => { load(); api.facultySelfCheckIn().then(setCheckIn).catch(() => setCheckIn({ checked_in: false })) }, [])
-  const open = async (section: any) => {
-    if (!checkIn?.checked_in) { setMessage('Complete your faculty self check-in before marking student attendance.'); return }
-    setSelected(section); setMessage('')
-    const data = await api.attendanceRoster(section.id), rows = data.roster || []
-    setRoster(rows); setPresent(new Set(rows.map((student: any) => student.student_id)))
+  const [home, setHome] = useState<any>(null)
+  const [sessions, setSessions] = useState<any[]>([])
+  const [selected, setSelected] = useState<any>(null)
+  const [roster, setRoster] = useState<any[]>([])
+  const [present, setPresent] = useState<Set<string>>(new Set())
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10))
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState('')
+
+  const load = async (targetDate = date) => {
+    try {
+      const [faculty, sessionData] = await Promise.all([api.facultyHome(), api.facultyClassSessions(targetDate)])
+      setHome(faculty)
+      setSessions(sessionData.sessions || [])
+    } catch { setHome({ error: true }) }
   }
-  const selfCheckIn = async () => { setCheckingIn(true); try { setCheckIn(await api.checkInFaculty()) } finally { setCheckingIn(false) } }
-  const save = async () => { if (!selected) return; setSaving(true); try { const ids = roster.map(item => item.student_id); await api.markAttendance({ section_id: selected.id, present_ids: ids.filter(id => present.has(id)), absent_ids: ids.filter(id => !present.has(id)), on_date: attendanceDate }); setMessage(`Student attendance saved for ${attendanceDate}.`); load() } catch (error: any) { setMessage(error.message || 'Could not save attendance.') } finally { setSaving(false) } }
+
+  useEffect(() => { load() }, [])
+
+  const open = async (session: any) => {
+    try {
+      const result = await api.attendanceRoster(session.section_id, session.id)
+      setRoster(result.roster || [])
+      setPresent(new Set((result.roster || []).map((student: any) => student.student_id)))
+      setSelected(session)
+      setMessage('')
+    } catch (error: any) { setMessage(error.message || 'Could not load the class roster.') }
+  }
+
+  const checkIn = async () => {
+    if (!selected) return
+    setSaving(true)
+    try {
+      await api.checkInClassSession(selected.id)
+      setSelected({ ...selected, status: 'checked_in', checked_in_at: new Date().toISOString() })
+      await load()
+    } catch (error: any) { setMessage(error.message || 'Could not check into this class session.') }
+    finally { setSaving(false) }
+  }
+
+  const save = async () => {
+    if (!selected) return
+    setSaving(true)
+    try {
+      const ids = roster.map(student => student.student_id)
+      await api.markAttendance({ section_id: selected.section_id, class_session_id: selected.id, present_ids: ids.filter(id => present.has(id)), absent_ids: ids.filter(id => !present.has(id)), on_date: date })
+      setMessage('Attendance saved. Finalize the session when the register is complete.')
+    } catch (error: any) { setMessage(error.message || 'Could not save attendance.') }
+    finally { setSaving(false) }
+  }
+
+  const finalize = async () => {
+    if (!selected) return
+    setSaving(true)
+    try { await api.finalizeClassSessionAttendance(selected.id); setSelected(null); setMessage('Attendance finalized.'); await load() }
+    catch (error: any) { setMessage(error.message || 'Could not finalize attendance.') }
+    finally { setSaving(false) }
+  }
+
   if (!home) return <Spinner />
   if (home.error) return <Empty icon="!" text="Attendance data could not be loaded." />
-  const all = home.sections || [], kpis = home.kpis || {}, students = kpis.students ?? all.reduce((total: number, item: any) => total + (item.enrolled || 0), 0)
-  const courses = Array.from(new Set<string>(all.map((item: any) => `${item.course_code} · ${item.title}`))).sort()
-  const filtered = all.filter((item: any) => (!query || `${item.course_code} ${item.title} ${item.section}`.toLowerCase().includes(query.toLowerCase())) && (sectionFilter === 'all' || item.id === sectionFilter) && (courseFilter === 'all' || `${item.course_code} · ${item.title}` === courseFilter))
-  const average = kpis.average_attendance, low = all.filter((item: any) => item.attendance_pct != null && item.attendance_pct < 75)
-  const cards = [['▣', all.length, 'Total Sections'], ['♧', students, 'Total Students'], ['◔', average == null ? '—' : `${Math.round(average)}%`, 'Average Attendance'], ['▧', kpis.classes_this_week ?? 0, 'Classes This Week']]
-  return <main className="attendance-workspace fade-in"><section className="att-heading"><h1>Attendance</h1><p>Check in first, then record attendance for students in your assigned sections.</p></section>
-    <section className="faculty-checkin-card"><div><span>Step 1 · Faculty self check-in</span><h2>{checkIn?.checked_in ? 'You are checked in for today' : 'Check in before taking a class'}</h2><p>{checkIn?.checked_in_at ? `Recorded at ${new Date(checkIn.checked_in_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Your self check-in unlocks student attendance for today.'}</p></div><button className={checkIn?.checked_in ? 'done' : ''} onClick={selfCheckIn} disabled={checkingIn || checkIn?.checked_in} type="button">{checkingIn ? 'Checking in…' : checkIn?.checked_in ? '✓ Checked in' : 'Check in now'}</button></section>
-    <section className="att-kpis">{cards.map(([icon, value, label], index) => <article className={`att-kpi a${index}`} key={String(label)}><i>{icon}</i><div><b>{value}</b><small>{label}</small></div></article>)}</section>
-    <div className="att-notice">ⓘ Student attendance is available after faculty self check-in and is recorded only for your assigned sections.</div><section className="att-layout"><div><div className="att-filters"><label>Section<select value={sectionFilter} onChange={event => setSectionFilter(event.target.value)}><option value="all">All Sections</option>{all.map((item: any) => <option key={item.id} value={item.id}>{item.course_code} · Section {item.section}</option>)}</select></label><label>Course<select value={courseFilter} onChange={event => setCourseFilter(event.target.value)}><option value="all">All Courses</option>{courses.map(course => <option key={course} value={course}>{course}</option>)}</select></label><label>Date<input type="date" value={attendanceDate} onChange={event => setAttendanceDate(event.target.value)} /></label><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search by course or section..." /></div><article className="att-register"><header><h2>Step 2 · Student Attendance</h2><button onClick={() => filtered[0] && open(filtered[0])} disabled={!checkIn?.checked_in} type="button">♧ Mark Student Attendance</button></header><div className="att-table-wrap"><table className="att-table"><thead><tr><th>Course</th><th>Section</th><th>Schedule</th><th>Room</th><th>Students</th><th>Avg Attendance</th><th>Action</th></tr></thead><tbody>{filtered.map((item: any) => <tr key={item.id}><td><b>{item.course_code}</b> · {item.title}</td><td>{item.section}</td><td>{item.schedule || 'TBD'}</td><td>{item.room || 'TBD'}</td><td>{item.enrolled || 0}</td><td><span className="att-progress"><i style={{ width: `${item.attendance_pct || 0}%` }} /></span><em>{item.attendance_pct == null ? '—' : `${Math.round(item.attendance_pct)}%`}</em></td><td><button onClick={() => open(item)} disabled={!checkIn?.checked_in} type="button">Open roster</button></td></tr>)}{!filtered.length && <tr><td colSpan={7}>No assigned sections found.</td></tr>}</tbody></table></div></article></div><aside className="att-aside"><article><header><h2>⚠ Attendance Alerts</h2></header>{low.slice(0, 4).map((item: any) => <div className="att-side-row" key={item.id}><p><b>{item.course_code}-{item.section}</b><small>{Math.round(item.attendance_pct)}% average attendance</small></p><button onClick={() => open(item)} disabled={!checkIn?.checked_in} type="button">View roster</button></div>)}{!low.length && <p className="att-empty">No low-attendance alerts.</p>}</article><article><header><h2>Attendance flow</h2></header><ol className="attendance-flow"><li className={checkIn?.checked_in ? 'done' : 'active'}>Faculty self check-in</li><li className={checkIn?.checked_in ? 'active' : ''}>Select course and section</li><li>Mark student attendance</li><li>Save the class register</li></ol></article></aside></section>{message && !selected && <p className="att-message">{message}</p>}{selected && <div className="att-modal-backdrop"><section className="att-modal"><header><div><h2>Mark Student Attendance</h2><p>{selected.course_code} · Section {selected.section} · {attendanceDate}</p></div><button onClick={() => setSelected(null)} type="button">×</button></header><div className="att-modal-body">{roster.map(student => <label key={student.student_id}><input type="checkbox" checked={present.has(student.student_id)} onChange={event => setPresent(current => { const next = new Set(current); event.target.checked ? next.add(student.student_id) : next.delete(student.student_id); return next })} /><span><b>{student.roll_no}</b> · {student.name}<small>Overall attendance: {student.pct == null ? '—' : `${student.pct}%`}</small></span></label>)}{!roster.length && <p>No enrolled students found.</p>}</div>{message && <p className="att-message">{message}</p>}<footer><button onClick={() => setSelected(null)} type="button">Cancel</button><button disabled={saving || !roster.length} onClick={save} type="button">{saving ? 'Saving…' : 'Save Student Attendance'}</button></footer></section></div>}</main>
+  const sections = home.sections || []
+  const cards = [['Sections', sections.length], ['Students', home.kpis?.students || 0], ['Sessions', sessions.length], ['Pending', sessions.filter(item => item.status !== 'attendance_finalized').length]]
+
+  return <main className="attendance-workspace fade-in">
+    <section className="att-heading"><h1>Attendance</h1><p>Select a scheduled class session, check in, and record its roster.</p></section>
+    <section className="att-kpis">{cards.map(([label, value], index) => <article className={`att-kpi a${index}`} key={String(label)}><div><b>{value}</b><small>{label}</small></div></article>)}</section>
+    <section className="att-layout"><div><div className="att-filters"><label>Date<input type="date" value={date} onChange={event => { setDate(event.target.value); setSelected(null); load(event.target.value) }} /></label></div>
+      <article className="att-register"><header><h2>Class Sessions</h2></header><div className="att-table-wrap"><table className="att-table"><thead><tr><th>Course</th><th>Section</th><th>Time</th><th>Room</th><th>Status</th><th>Action</th></tr></thead><tbody>{sessions.map(session => <tr key={session.id}><td><b>{session.course_code}</b> {session.course_title}</td><td>{session.section}</td><td>{session.scheduled_start ? new Date(session.scheduled_start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-'}</td><td>{session.room || '-'}</td><td><em>{session.status.replace('_', ' ')}</em></td><td><button onClick={() => open(session)} type="button">Open roster</button></td></tr>)}{!sessions.length && <tr><td colSpan={6}>No active timetable sessions for this date.</td></tr>}</tbody></table></div></article>
+    </div><aside className="att-aside"><article><header><h2>Attendance Flow</h2></header><ol className="attendance-flow"><li>Select class session</li><li>Check in to the session</li><li>Mark active roster</li><li>Finalize attendance</li></ol></article></aside></section>
+    {message && !selected && <p className="att-message">{message}</p>}
+    {selected && <div className="att-modal-backdrop"><section className="att-modal"><header><h2>{selected.course_code} - Section {selected.section}</h2><button onClick={() => setSelected(null)} type="button">x</button></header>
+      {!selected.checked_in_at && selected.status === 'scheduled' ? <div className="att-modal-body"><p>Attendance is locked until you check in to this class session.</p><button disabled={saving} onClick={checkIn} type="button">{saving ? 'Checking in...' : 'Check in to session'}</button></div> : <><div className="att-modal-body">{roster.map(student => <label key={student.student_id}><input type="checkbox" checked={present.has(student.student_id)} onChange={event => setPresent(current => { const next = new Set(current); event.target.checked ? next.add(student.student_id) : next.delete(student.student_id); return next })} /><span><b>{student.roll_no}</b> {student.name}<small>Overall attendance: {student.pct == null ? '-' : `${student.pct}%`}</small></span></label>)}{!roster.length && <p>No enrolled students found.</p>}</div>{message && <p className="att-message">{message}</p>}<footer><button onClick={() => setSelected(null)} type="button">Cancel</button><button disabled={saving || !roster.length} onClick={save} type="button">{saving ? 'Saving...' : 'Save attendance'}</button><button disabled={saving} onClick={finalize} type="button">Finalize</button></footer></>}
+    </section></div>}
+  </main>
 }

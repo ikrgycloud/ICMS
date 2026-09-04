@@ -301,7 +301,7 @@ def seed():
                            password_hash=pwhash("demo123"),
                            mfa_enabled=level_privileged(o["level"]),
                            office_n=n, role=head_role, scope_level=scope_for(n),
-                           scope_ref="scope_global"))
+                           scope_ref=CAMPUS_SCOPES[0] if n in {3, 4} else "scope_global"))
 
         s.flush()
 
@@ -314,13 +314,12 @@ def seed():
                 s.add(UserRole(id=urid, user_id=uid, role_id=f"role_{n}_0",
                                org_scope_id="scope_global"))
 
-        # The demo Principal is a campus role.  Older databases were seeded
-        # with the global scope for every demo account, which let this account
-        # see students belonging to other campuses.  Keep the scope explicit
-        # and in the same human-readable form used by Student.campus.
-        principal = s.get(User, "user_4")
-        if principal and principal.scope_ref == "scope_global":
-            principal.scope_ref = CAMPUS_SCOPES[0]
+        # Branch leadership must be scoped to its campus. Older databases were
+        # seeded with the global scope for every demo account.
+        for leadership_id in ("user_3", "user_4"):
+            leadership = s.get(User, leadership_id)
+            if leadership and leadership.scope_level == "campus":
+                leadership.scope_ref = CAMPUS_SCOPES[0]
 
         s.commit()
         return {"status": "seeded", "offices": len(OFFICES),

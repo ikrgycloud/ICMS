@@ -18,6 +18,16 @@ through authorize() in authority.py. This map only decides what is *offered*.
 
 # App module keys and their display metadata (icon is a glyph used by the UI).
 MODULES = {
+    "messages": {"label": "Messages", "icon": "Msg", "group": "Workspace"},
+    "announcements": {"label": "Announcements", "icon": "Ann", "group": "Workspace"},
+    "assignments": {"label": "Assignments", "icon": "Asn", "group": "Academics"},
+    "assessments": {"label": "Assessments", "icon": "Asm", "group": "Academics"},
+    "marks_entry": {"label": "Marks Entry", "icon": "Mrk", "group": "Academics"},
+    "course_materials": {"label": "Course Materials", "icon": "Mat", "group": "Academics"},
+    "mentoring": {"label": "Mentoring", "icon": "Mtr", "group": "Academics"},
+    "payroll": {"label": "Payroll", "icon": "Pay", "group": "Operations"},
+    "leave": {"label": "Leave Requests", "icon": "Lve", "group": "Operations"},
+    "digital_id": {"label": "Digital ID", "icon": "ID", "group": "Reference"},
     "frontdesk_dashboard": {"label": "Dashboard", "icon": "◆", "group": "Front Desk"},
     "frontdesk_visitors": {"label": "Visitor Management", "icon": "◉", "group": "Front Desk"},
     "frontdesk_appointments": {"label": "Appointments", "icon": "◷", "group": "Front Desk"},
@@ -77,10 +87,10 @@ OFFICE_MODULES = {
     8:  ["students", "grievance", "hostel", "approvals"],                          # Dean Student Affairs
     9:  ["research", "analytics", "approvals"],                                    # Dean R&D / IQAC
     10: ["academics", "students", "attendance", "examinations", "hr", "approvals"],# HOD
-    11: ["my_schedule", "academics", "attendance", "examinations", "research"], # Professor
-    12: ["my_schedule", "academics", "attendance", "examinations", "research"], # Associate Professor
-    13: ["my_schedule", "academics", "attendance", "examinations"],              # Assistant Professor
-    14: ["my_schedule", "academics", "attendance", "examinations"],              # Lecturer
+    11: ["my_schedule", "messages", "announcements", "academics", "attendance", "assignments", "assessments", "marks_entry", "examinations", "course_materials", "mentoring", "research", "leave", "payroll", "digital_id"], # Professor
+    12: ["my_schedule", "messages", "announcements", "academics", "attendance", "assignments", "assessments", "marks_entry", "examinations", "course_materials", "mentoring", "research", "leave", "payroll", "digital_id"], # Associate Professor
+    13: ["my_schedule", "messages", "announcements", "academics", "attendance", "assignments", "assessments", "marks_entry", "examinations", "course_materials", "mentoring", "leave", "payroll", "digital_id"], # Assistant Professor
+    14: ["my_schedule", "messages", "announcements", "academics", "attendance", "assignments", "assessments", "marks_entry", "examinations", "course_materials", "leave", "payroll", "digital_id"], # Lecturer
     15: ["admissions", "students", "approvals"],                                   # Admission Office
     16: ["examinations", "students", "approvals"],                                 # Exam Controller
     17: ["academics", "attendance", "rollover", "approvals"],                                  # Academic Coordinator

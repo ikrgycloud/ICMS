@@ -8,6 +8,7 @@ existing local database instead of short-circuiting after the first run.
 import json
 import random
 from datetime import date, datetime, timedelta
+from sqlalchemy import func
 
 from database import (SessionLocal, TENANT, engine, DEMO_USERNAMES, CAMPUS_SCOPES,
                       slug, ensure_additive_schema, ensure_versioned_migrations)
@@ -17,6 +18,8 @@ from models import (Base, Person, Role, User, UserRole, Delegation, DelegationPo
                     WorkflowInstance, WorkflowProfile, Approval, Notification,
                     DelegationOption, DelegationContext)
 import domain_models as D
+from teaching import (active_allocation_for_section, class_session_for_timetable,
+                      sync_section_faculty)
 
 R = random.Random(42)
 
@@ -2657,9 +2660,9 @@ def _bind_portal_accounts(s):
         login = _user(uname)
         if not login:
             continue
-        candidate = None
+        candidate = s.query(D.StaffMember).filter(D.StaffMember.user_id == login.id).first()
         for staff in s.query(D.StaffMember).all():
-            if staff.id in used_staff:
+            if candidate or staff.id in used_staff or staff.user_id:
                 continue
             if s.query(D.Section).filter(D.Section.faculty_person_id == staff.id).count() > 0:
                 candidate = staff
@@ -3594,6 +3597,547 @@ def _seed_student_portal_accounts(s):
     s.commit()
 
 
+def _ensure_aarav_kulkarni_professor_login(s):
+    """Give the CSE faculty member a stable, dedicated Professor demo account."""
+    staff = s.query(D.StaffMember).filter(
+        D.StaffMember.id == "staff_fac_1",
+        D.StaffMember.name == "Aarav Kulkarni",
+        D.StaffMember.dept_id == "dept_cse",
+    ).first()
+    if not staff:
+        return
+
+    person_id = "person_demo_aarav_kulkarni"
+    user_id = "user_demo_aarav_kulkarni"
+    username = "aarav_kulkarni"
+    person = s.get(Person, person_id)
+    if not person:
+        s.add(Person(id=person_id, tenant_id=TENANT, name=staff.name,
+                     email=staff.email or "aarav.kulkarni@icms.edu", contact=staff.phone or ""))
+    user = s.query(User).filter(User.username == username).first()
+    if not user:
+        user = User(id=user_id, tenant_id=TENANT, person_id=person_id, username=username,
+                    password_hash=pwhash("demo123"), status="active", mfa_enabled=False,
+                    office_n=11, role="Professor", scope_level="department", scope_ref=staff.dept_id)
+        s.add(user)
+        s.flush()
+    else:
+        user.office_n = 11
+        user.scope_level = "department"
+        user.scope_ref = staff.dept_id
+        user.status = "active"
+
+    staff.user_id = user.id
+    staff.office_n = 11
+    role_link_id = "ur_demo_aarav_kulkarni_professor"
+    if not s.get(UserRole, role_link_id):
+        s.add(UserRole(id=role_link_id, user_id=user.id, role_id="role_11_0",
+                       org_scope_id=staff.dept_id))
+    s.commit()
+
+def _seed_course_materials_demo(s):
+    """Small, repeatable material library for assigned demo sections."""
+    sections = s.query(D.Section).filter(D.Section.faculty_person_id.isnot(None)).all()
+    for index, section in enumerate(sections):
+        item_id = f"material_demo_{section.id}"
+        item = s.query(D.CourseMaterial).get(item_id)
+        if item:
+            continue
+        item = D.CourseMaterial(id=item_id, tenant_id=TENANT, section_id=section.id,
+            title=f"Unit {index + 1} Lecture Notes", description="Sample course resource for the assigned section.",
+            material_type="document", resource_url=f"data:text/plain;charset=utf-8,Unit%20{index + 1}%20Lecture%20Notes%0A%0AReview%20the%20key%20concepts%2C%20worked%20examples%2C%20and%20practice%20questions%20for%20this%20week.", topic=f"Week {index + 1}",
+            status="published" if index % 3 else "draft", uploaded_by="Faculty", created_at=datetime.utcnow(), updated_at=datetime.utcnow())
+        s.add(item)
+    # Older demo databases used an external placeholder URL that opens a blank
+    # page. Replace it with readable sample content while preserving real links.
+    for item in s.query(D.CourseMaterial).filter(D.CourseMaterial.resource_url == "https://example.edu/course-materials").all():
+        item.resource_url = f"data:text/plain;charset=utf-8,{item.title.replace(' ', '%20')}%0A%0A{item.description.replace(' ', '%20')}"
+    s.commit()
+
+def _seed_mentor_assignments(s):
+    """Create stable, explicit demo adviser assignments by department."""
+    faculty = s.query(D.StaffMember).filter(D.StaffMember.status == "active").order_by(D.StaffMember.id).all()
+    for staff in faculty:
+        if s.query(D.MentorAssignment).filter(D.MentorAssignment.faculty_id == staff.id, D.MentorAssignment.status == "active").count():
+            continue
+        candidates = (s.query(D.Student).filter(D.Student.dept_id == staff.dept_id, D.Student.status == "active").order_by(D.Student.roll_no).limit(12).all())
+        for student in candidates:
+            assignment_id = f"mentor_{staff.id}_{student.id}"
+            if not s.query(D.MentorAssignment).get(assignment_id):
+                s.add(D.MentorAssignment(id=assignment_id, tenant_id=TENANT, faculty_id=staff.id, student_id=student.id, status="active"))
+    s.commit()
+
+def _seed_faculty_functional_assignments(s):
+    """Demo responsibilities are explicit records, never inferred from designation at runtime."""
+    now = datetime.utcnow()
+    faculty = s.query(D.StaffMember).filter(D.StaffMember.status == "active").all()
+    projects = s.query(D.ResearchProject).all()
+    for staff in faculty:
+        roles = []
+        if "associate professor" in (staff.designation or "").lower():
+            # Advising is only granted where an actual advisee relationship exists.
+            if s.query(D.MentorAssignment).filter(D.MentorAssignment.faculty_id == staff.id, D.MentorAssignment.status == "active").first():
+                roles.append(("faculty_advisor", "advisor_registration_review", "department", staff.dept_id or ""))
+            # One explicit coordination responsibility per eligible faculty record.
+            section = s.query(D.Section).filter(D.Section.faculty_person_id == staff.id).first()
+            if section:
+                roles.append(("course_coordinator", "", "section", section.id))
+        for project in projects:
+            if (project.pi_name or "").strip().lower() == (staff.name or "").strip().lower():
+                roles.append(("pi", "", "research_project", project.id))
+        for role_key, permission_key, scope_type, scope_ref in roles:
+            assignment_id = f"functional_{staff.id}_{role_key}_{scope_ref or 'general'}"
+            if not s.query(D.FacultyFunctionalAssignment).get(assignment_id):
+                s.add(D.FacultyFunctionalAssignment(id=assignment_id, tenant_id=TENANT, faculty_id=staff.id,
+                    role_key=role_key, permission_key=permission_key, scope_type=scope_type, scope_ref=scope_ref,
+                    status="active", valid_from=now))
+    # Keep the seeded Professor workspace demonstrable while retaining the same
+    # assignment-driven access rule used in production.  A project is assigned
+    # only when that Professor has no existing research responsibility.
+    professors = [staff for staff in faculty if (staff.designation or "").lower() == "professor"]
+    for index, staff in enumerate(professors):
+        has_research = s.query(D.FacultyFunctionalAssignment).filter(
+            D.FacultyFunctionalAssignment.faculty_id == staff.id,
+            D.FacultyFunctionalAssignment.role_key.in_(["research_faculty", "pi", "principal_investigator", "co_pi", "research_supervisor"]),
+            D.FacultyFunctionalAssignment.status == "active").first()
+        if has_research or not projects:
+            continue
+        project = projects[index % len(projects)]
+        assignment_id = f"functional_{staff.id}_research_faculty_{project.id}"
+        if not s.query(D.FacultyFunctionalAssignment).get(assignment_id):
+            s.add(D.FacultyFunctionalAssignment(id=assignment_id, tenant_id=TENANT, faculty_id=staff.id,
+                role_key="research_faculty", scope_type="research_project", scope_ref=project.id,
+                status="active", valid_from=now))
+    s.commit()
+
+def _backfill_teaching_foundation(s):
+    """Idempotently project legacy section ownership/attendance into Phase 1 tables."""
+    for section in s.query(D.Section).filter(D.Section.faculty_person_id.isnot(None)).all():
+        active = (s.query(D.TeachingAllocation)
+                  .filter(D.TeachingAllocation.section_id == section.id,
+                          D.TeachingAllocation.status == "active")
+                  .first())
+        if not active:
+            course = s.query(D.Course).get(section.course_id)
+            active = D.TeachingAllocation(
+                id=f"alloc_legacy_{section.id}", tenant_id=TENANT,
+                faculty_id=section.faculty_person_id, course_id=section.course_id,
+                section_id=section.id, academic_year="2025-2026", term=section.term,
+                allocation_type="primary", lecture_hours=float(course.credits if course else 3),
+                workload_units=float(course.credits if course else 3), assigned_by="Legacy section assignment",
+                effective_from=date(2025, 1, 1), status="active",
+            )
+            s.add(active)
+    s.flush()
+    for section in s.query(D.Section).all():
+        sync_section_faculty(s, section.id)
+    s.flush()
+
+    # Every demonstrable teaching section has an explicit, section-scoped class
+    # coordinator for the attendance-correction first review stage.
+    for section in s.query(D.Section).all():
+        assignment_id = f"functional_correction_coordinator_{section.id}"
+        owner = active_allocation_for_section(s, section.id)
+        department = s.query(D.Department).get(section.dept_id)
+        candidates = (s.query(D.StaffMember)
+                      .filter(D.StaffMember.dept_id == section.dept_id,
+                              D.StaffMember.status == "active",
+                              D.StaffMember.user_id.isnot(None),
+                              D.StaffMember.office_n.in_([11, 12, 13, 14]))
+                      .all())
+        coordinator = next((staff for staff in candidates if (not owner or staff.id != owner.faculty_id)
+                           and (not department or staff.id != department.hod_person_id)), None)
+        if coordinator:
+            assignment = s.query(D.FacultyFunctionalAssignment).get(assignment_id)
+            if assignment:
+                assignment.faculty_id = coordinator.id
+                assignment.status = "active"
+            else:
+                s.add(D.FacultyFunctionalAssignment(
+                    id=assignment_id, tenant_id=TENANT, faculty_id=coordinator.id,
+                    role_key="course_coordinator", scope_type="section", scope_ref=section.id,
+                    status="active", valid_from=datetime.utcnow(),
+                ))
+    s.commit()
+
+    # Generate current-week timetable sessions for active allocations.
+    today = date.today(); week_start = today - timedelta(days=today.weekday())
+    entries = s.query(D.TimetableEntry).filter(D.TimetableEntry.status == "active").all()
+    for entry in entries:
+        session_date = week_start + timedelta(days=entry.day_of_week)
+        if (entry.effective_from and entry.effective_from > session_date) or (entry.effective_to and entry.effective_to < session_date):
+            continue
+        class_session_for_timetable(s, entry, session_date)
+    s.flush()
+
+    # A professor has one current-week session checked in with an editable
+    # roster, while other generated sessions remain scheduled for the demo.
+    professor_user = s.query(User).filter(User.username == DEMO_USERNAMES[11]).first()
+    professor = s.query(D.StaffMember).filter(D.StaffMember.user_id == professor_user.id).first() if professor_user else None
+    if professor:
+        existing_checked = (s.query(D.ClassSession)
+                            .filter(D.ClassSession.faculty_id == professor.id,
+                                    D.ClassSession.session_date >= week_start,
+                                    D.ClassSession.session_date <= week_start + timedelta(days=6),
+                                    D.ClassSession.checked_in_by == professor.id)
+                            .first())
+        checked = None if existing_checked else (s.query(D.ClassSession)
+                                                 .filter(D.ClassSession.faculty_id == professor.id,
+                                                         D.ClassSession.status == "scheduled")
+                                                 .order_by(D.ClassSession.session_date, D.ClassSession.scheduled_start)
+                                                 .first())
+        if checked:
+            checked.status = "checked_in"; checked.checked_in_at = datetime.utcnow(); checked.checked_in_by = professor.id
+            for enrollment in s.query(D.Enrollment).filter(D.Enrollment.section_id == checked.section_id, D.Enrollment.status == "enrolled").all():
+                existing = (s.query(D.AttendanceRecord)
+                            .filter(D.AttendanceRecord.class_session_id == checked.id,
+                                    D.AttendanceRecord.student_id == enrollment.student_id).first())
+                if not existing:
+                    s.add(D.AttendanceRecord(id=f"att_session_{checked.id}_{enrollment.student_id}", tenant_id=TENANT,
+                                              section_id=checked.section_id, student_id=enrollment.student_id,
+                                              class_session_id=checked.id, on_date=checked.session_date,
+                                              present=True, status="present", marked_by=professor.name, version_no=1))
+    s.flush()
+
+    # Existing attendance did not identify a timetable slot. Preserve it through
+    # one explicit legacy session per section/date rather than guessing a slot.
+    legacy_rows = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.class_session_id == None).all()
+    for record in legacy_rows:
+        session = (s.query(D.ClassSession)
+                   .filter(D.ClassSession.section_id == record.section_id,
+                           D.ClassSession.session_date == record.on_date,
+                           D.ClassSession.timetable_entry_id == None)
+                   .first())
+        if not session:
+            allocation = (s.query(D.TeachingAllocation)
+                          .filter(D.TeachingAllocation.section_id == record.section_id,
+                                  D.TeachingAllocation.status == "active").first())
+            faculty_id = allocation.faculty_id if allocation else ""
+            session = D.ClassSession(
+                id=f"session_legacy_{record.section_id}_{record.on_date.isoformat()}", tenant_id=TENANT,
+                allocation_id=allocation.id if allocation else None, section_id=record.section_id,
+                faculty_id=faculty_id, session_date=record.on_date, status="attendance_finalized",
+                checked_in_at=record.updated_at or datetime.utcnow(), finalized_at=record.updated_at or datetime.utcnow(),
+                checked_in_by=faculty_id, finalized_by=faculty_id,
+            )
+            s.add(session); s.flush()
+        record.class_session_id = session.id
+        record.finalized_at = record.finalized_at or session.finalized_at
+        record.version_no = record.version_no or 1
+    s.commit()
+
+def _seed_marks_submission_demo(s):
+    """Seed idempotent Phase 3 batches against a real professor-owned roster."""
+    professor = s.query(User).filter(User.username == "aarav_kulkarni").first()
+    staff = s.query(D.StaffMember).filter(D.StaffMember.user_id == professor.id).first() if professor else None
+    if not professor or not staff:
+        return
+    allocation = None
+    roster = []
+    for candidate in s.query(D.TeachingAllocation).filter(D.TeachingAllocation.faculty_id == staff.id, D.TeachingAllocation.status == "active").all():
+        candidate_roster = s.query(D.Enrollment).filter(D.Enrollment.section_id == candidate.section_id, D.Enrollment.status == "enrolled").all()
+        if candidate_roster:
+            allocation, roster = candidate, candidate_roster
+            break
+    if not allocation:
+        return
+    section = s.query(D.Section).get(allocation.section_id)
+    course = s.query(D.Course).get(section.course_id) if section else None
+    coordinator = s.query(User).filter(User.username == "academic_coordinator").first()
+    hod = s.query(User).filter(User.username == "hod").first()
+    controller = s.query(User).filter(User.username == "exam_controller").first()
+    examples = [
+        ("draft", "draft", 0, "", ""),
+        ("submitted", "submitted", 1, "submitted", ""),
+        ("hod", "under_review", 2, "under_review", ""),
+        ("exam", "under_review", 3, "under_review", ""),
+        ("returned", "returned", 1, "returned", "Please verify the rubric allocation."),
+        ("published", "published", 4, "approved", ""),
+    ]
+    now = datetime.utcnow()
+    for key, marks_state, stage, workflow_state, comment in examples:
+        assessment_id = f"phase3_marks_{key}"
+        assessment = _ensure(s, D.Assessment, assessment_id, lambda assessment_id=assessment_id, key=key: D.Assessment(
+            id=assessment_id, tenant_id=TENANT, section_id=section.id, name=f"Phase 3 {key.title()} marks",
+            max_marks=20, assessment_type="internal", scheduled_at=now - timedelta(days=3),
+            published=key == "published", status="published" if key == "published" else "draft",
+            academic_year=allocation.academic_year, created_by=staff.name, updated_by=staff.name,
+        ))
+        assessment.section_id = section.id; assessment.marks_state = marks_state; assessment.marks_return_comment = comment
+        assessment.marks_revision = assessment.marks_revision or 1
+        assessment.marks_submitted_by = professor.id if key != "draft" else ""
+        assessment.marks_submitted_at = now if key != "draft" else None
+        assessment.published = key == "published"; assessment.status = "published" if key == "published" else "draft"
+        assessment.published_at = now if key == "published" else None; assessment.published_by = controller.username if key == "published" and controller else ""
+        assessment.marks_published_at = now if key == "published" else None; assessment.marks_approved_at = now if key == "published" else None
+        if key != "draft":
+            workflow_id = f"wf_phase3_marks_{key}"
+            workflow = _ensure(s, WorkflowInstance, workflow_id, lambda workflow_id=workflow_id: WorkflowInstance(
+                id=workflow_id, tenant_id=TENANT, process_key="marks_submission", label="Marks submission", office_n=16,
+                title=f"{assessment.name} for {section.section_code}", initiator_id=professor.id, initiator_name=staff.name,
+                scope_level="department",
+            ))
+            workflow.state = workflow_state; workflow.current_stage = stage; workflow.updated_at = now
+            assessment.workflow_instance_id = workflow.id
+            s.flush()
+            decisions_by_key = {
+                "submitted": [],
+                "hod": [(1, coordinator, "APPROVE")],
+                "exam": [(1, coordinator, "APPROVE"), (2, hod, "APPROVE")],
+                "returned": [(1, coordinator, "RETURN")],
+                "published": [(1, coordinator, "APPROVE"), (2, hod, "APPROVE"), (3, controller, "APPROVE")],
+            }
+            s.query(Approval).filter(Approval.id.like(f"approval_phase3_marks_{key}_%")).delete(synchronize_session=False)
+            s.flush()
+            decisions = decisions_by_key[key]
+            for decision_stage, actor, decision in decisions:
+                if not actor: continue
+                approval_id = f"approval_phase3_marks_{key}_{decision_stage}"
+                approval = _ensure(s, Approval, approval_id, lambda approval_id=approval_id: Approval(id=approval_id, tenant_id=TENANT, workflow_id=workflow.id))
+                approval.actor_id = actor.id; approval.actor_name = actor.username; approval.stage = decision_stage
+                approval.stage_label = {1: "Evaluation Coordinator", 2: "HOD", 3: "Exam Controller"}[decision_stage]
+                approval.decision = decision; approval.authority = "FULL"; approval.reason = comment if decision == "RETURN" else "Seeded approval"
+        else:
+            assessment.workflow_instance_id = None
+        for index, enrollment in enumerate(roster, start=1):
+            mark_id = f"mark_{assessment_id}_{enrollment.student_id}"
+            mark = _ensure(s, D.Mark, mark_id, lambda mark_id=mark_id: D.Mark(id=mark_id, tenant_id=TENANT, assessment_id=assessment_id, student_id=enrollment.student_id))
+            mark.score = float(8 + (index % 10)); mark.entered_by = staff.name; mark.entered_at = now
+            mark.status = "published" if key == "published" else marks_state; mark.is_valid = True; mark.updated_at = now
+            mark.published_at = now if key == "published" else None; mark.published_by = controller.username if key == "published" and controller else ""
+    s.commit()
+
+def _ensure_karthik_menon_student_login(s):
+    """Bind the Phase 4 CS301 student to a stable Student Portal demo account."""
+    student = s.query(D.Student).filter(
+        D.Student.id == "stu_14",
+        D.Student.roll_no == "24CSE014",
+    ).first()
+    if not student:
+        return
+
+    person_id = "person_demo_karthik_menon"
+    user_id = "user_demo_24cse014"
+    username = "24CSE014"
+    user = s.query(User).filter(User.username == username).first()
+    if not user and student.user_id:
+        user = s.get(User, student.user_id)
+    if not user:
+        person = s.get(Person, person_id)
+        if not person:
+            s.add(Person(
+                id=person_id,
+                tenant_id=TENANT,
+                name=student.name,
+                email=student.email or "24cse014@icms.edu",
+                contact="",
+            ))
+        user = User(
+            id=user_id,
+            tenant_id=TENANT,
+            person_id=person_id,
+            username=username,
+            password_hash=pwhash("demo123"),
+            status="active",
+            mfa_enabled=False,
+            office_n=36,
+            role="Student",
+            scope_level="individual",
+            scope_ref=student.id,
+        )
+        s.add(user)
+        s.flush()
+    else:
+        user.username = username
+        user.office_n = 36
+        user.role = "Student"
+        user.scope_level = "individual"
+        user.scope_ref = student.id
+        user.status = "active"
+
+    for bound in s.query(D.Student).filter(D.Student.user_id == user.id).all():
+        if bound.id != student.id:
+            bound.user_id = None
+    student.user_id = user.id
+    role_link_id = "ur_demo_24cse014_student"
+    if not s.get(UserRole, role_link_id):
+        s.add(UserRole(
+            id=role_link_id,
+            user_id=user.id,
+            role_id="role_36_0",
+            org_scope_id=student.id,
+        ))
+    s.commit()
+
+
+def _ensure_legacy_student_roll_login(s):
+    """Keep the local-work roll-number login without replacing main's student account."""
+    current = s.query(D.Student).filter(D.Student.user_id == "user_36").first()
+    student = s.query(D.Student).filter(D.Student.roll_no == "25ECE072").first() or current
+    if not student:
+        return
+    user = s.get(User, "user_36")
+    if current and current.id != student.id:
+        current.user_id = None
+    user.username = "25ECE072"
+    user.scope_ref = student.id
+    student.user_id = user.id
+    s.commit()
+
+def _seed_faculty_leave_demo(s):
+    """Idempotent Phase 5 leave examples linked to the existing workflow tables."""
+    professor = s.query(User).filter(User.username == "aarav_kulkarni").first()
+    staff = s.query(D.StaffMember).filter(D.StaffMember.user_id == professor.id).first() if professor else None
+    department = s.query(D.Department).get(staff.dept_id) if staff else None
+    hod_staff = s.query(D.StaffMember).get(department.hod_person_id) if department else None
+    vp = s.query(User).filter(User.office_n == 5, User.status == "active").first()
+    principal = s.query(User).filter(User.office_n == 4, User.status == "active").first()
+    if not professor or not staff or not hod_staff or not hod_staff.user_id or not vp or not principal:
+        return
+    reviewers = {1: (hod_staff.user_id, hod_staff.name, "HOD"), 2: (vp.id, vp.role, "Vice Principal"), 3: (principal.id, principal.role, "Principal")}
+    examples = [
+        ("draft", "Casual", 20, "Draft leave request for personal work.", "draft", 0),
+        ("submitted", "Medical", 23, "Medical consultation leave.", "submitted", 1),
+        ("returned", "Casual", 26, "Returned request requiring schedule clarification.", "returned", 1),
+        ("vp", "Earned", 29, "Leave awaiting Vice Principal review.", "under_review", 2),
+        ("principal", "Duty", 32, "Leave awaiting Principal approval.", "under_review", 3),
+        ("approved", "Casual", 35, "Approved leave history.", "approved", 4),
+        ("rejected", "Medical", 38, "Rejected leave history.", "rejected", 1),
+    ]
+    today = date.today()
+    for key, kind, offset, reason, status, stage in examples:
+        leave_id = f"phase5_leave_{key}"
+        start = today + timedelta(days=offset)
+        leave = _ensure(s, D.LeaveRequest, leave_id, lambda leave_id=leave_id: D.LeaveRequest(id=leave_id, tenant_id=TENANT, staff_id=staff.id, staff_name=staff.name))
+        leave.staff_id = staff.id; leave.staff_name = staff.name; leave.kind = kind; leave.from_date = start; leave.to_date = start + timedelta(days=1)
+        leave.days = 2; leave.reason = reason; leave.requested_by = professor.id; leave.half_day = False; leave.status = status
+        leave.submitted_at = datetime.combine(today, datetime.min.time()) if stage else None; leave.updated_at = datetime.utcnow()
+        if stage:
+            workflow_id = f"phase5_wf_{key}"
+            workflow = _ensure(s, WorkflowInstance, workflow_id, lambda workflow_id=workflow_id: WorkflowInstance(id=workflow_id, tenant_id=TENANT, process_key="faculty_leave", label="Faculty leave", office_n=25, title=f"{kind} leave: {start.isoformat()} to {(start + timedelta(days=1)).isoformat()}", initiator_id=professor.id, initiator_name=staff.name, scope_level="department"))
+            workflow.process_key = "faculty_leave"; workflow.label = "Faculty leave"; workflow.office_n = 25; workflow.initiator_id = professor.id; workflow.initiator_name = staff.name
+            workflow.state = status; workflow.current_stage = stage; workflow.scope_level = "department"; workflow.updated_at = datetime.utcnow(); leave.workflow_instance_id = workflow.id
+            s.flush()
+            if status == "returned": leave.returned_comment = "Please clarify the handover plan before resubmitting."
+            if status == "rejected": leave.decided_by = hod_staff.name
+            if status == "approved": leave.decided_by = principal.role
+            for decision_stage in range(1, min(stage, 4)):
+                approval_id = f"phase5_approval_{key}_{decision_stage}"
+                actor_id, actor_name, label = reviewers[decision_stage]
+                approval = _ensure(s, Approval, approval_id, lambda approval_id=approval_id: Approval(id=approval_id, tenant_id=TENANT, workflow_id=workflow.id))
+                approval.workflow_id = workflow.id; approval.actor_id = actor_id; approval.actor_name = actor_name; approval.stage = decision_stage; approval.stage_label = label
+                approval.decision = "RETURN" if status == "returned" else ("REJECT" if status == "rejected" else "APPROVE")
+                approval.authority = "FULL"; approval.reason = leave.returned_comment if status == "returned" else ("Leave rejected for seeded test history." if status == "rejected" else "Seeded approval")
+        else:
+            leave.workflow_instance_id = None
+    s.commit()
+
+def _seed_assignment_submission_demo(s):
+    """Idempotent Phase 4 assignment data for Aarav's active CS301-style section."""
+    professor = s.query(User).filter(User.username == "aarav_kulkarni").first()
+    staff = s.query(D.StaffMember).filter(D.StaffMember.user_id == professor.id).first() if professor else None
+    if not professor or not staff:
+        return
+    allocation = next((row for row in s.query(D.TeachingAllocation).filter(D.TeachingAllocation.faculty_id == staff.id, D.TeachingAllocation.status == "active").all() if s.query(D.Enrollment).filter(D.Enrollment.section_id == row.section_id, D.Enrollment.status == "enrolled").count()), None)
+    if not allocation:
+        return
+    section = s.query(D.Section).get(allocation.section_id)
+    demo_student = s.query(D.Student).filter(D.Student.user_id == "user_36").first()
+    if demo_student:
+        enrollment_id = f"phase4_demo_enrollment_{demo_student.id}_{section.id}"
+        enrollment = _ensure(s, D.Enrollment, enrollment_id, lambda: D.Enrollment(id=enrollment_id, tenant_id=TENANT, student_id=demo_student.id, section_id=section.id))
+        enrollment.student_id = demo_student.id; enrollment.section_id = section.id; enrollment.status = "enrolled"
+        s.flush()
+    roster = s.query(D.Enrollment).filter(D.Enrollment.section_id == section.id, D.Enrollment.status == "enrolled").all()
+    if not roster:
+        return
+    now = datetime.utcnow()
+    draft = _ensure(s, D.Assignment, "phase4_assignment_draft", lambda: D.Assignment(id="phase4_assignment_draft", tenant_id=TENANT, section_id=section.id, title="Draft process worksheet"))
+    draft.section_id = section.id; draft.title = "Draft process worksheet"; draft.description = "Prepare your process scheduling notes."; draft.max_marks = 20; draft.due_at = now + timedelta(days=5); draft.status = "draft"; draft.allow_late = True; draft.faculty_id = staff.id; draft.teaching_allocation_id = allocation.id; draft.created_by = staff.name; draft.updated_by = staff.name
+    assignment = _ensure(s, D.Assignment, "phase4_assignment_published", lambda: D.Assignment(id="phase4_assignment_published", tenant_id=TENANT, section_id=section.id, title="Published architecture analysis"))
+    assignment.section_id = section.id; assignment.title = "Published architecture analysis"; assignment.description = "Compare two operating-system architecture approaches with evidence."; assignment.max_marks = 25; assignment.due_at = now - timedelta(days=1); assignment.status = "published"; assignment.allow_late = True; assignment.faculty_id = staff.id; assignment.teaching_allocation_id = allocation.id; assignment.created_by = staff.name; assignment.updated_by = staff.name; assignment.published_at = assignment.published_at or now - timedelta(days=5); assignment.published_by = staff.name
+    states = [("submitted", False, 1), ("late", True, 1), ("returned", False, 1), ("resubmitted", False, 2), ("evaluated", False, 1)]
+    for index, (status, late, attempt) in enumerate(states):
+        if index >= len(roster): break
+        student_id = roster[index].student_id
+        if status == "resubmitted":
+            old = _ensure(s, D.AssignmentSubmission, f"phase4_submission_{student_id}_1", lambda: D.AssignmentSubmission(id=f"phase4_submission_{student_id}_1", tenant_id=TENANT, assignment_id=assignment.id, student_id=student_id, attempt_no=1))
+            old.assignment_id = assignment.id; old.student_id = student_id; old.attempt_no = 1; old.status = "returned"; old.submission_text = "Initial draft requiring revision."; old.submitted_at = now - timedelta(days=3); old.returned_at = now - timedelta(days=2)
+        submission_id = f"phase4_submission_{student_id}_{attempt}"
+        submission = _ensure(s, D.AssignmentSubmission, submission_id, lambda submission_id=submission_id: D.AssignmentSubmission(id=submission_id, tenant_id=TENANT, assignment_id=assignment.id, student_id=student_id, attempt_no=attempt))
+        submission.assignment_id = assignment.id; submission.student_id = student_id; submission.attempt_no = attempt; submission.status = status; submission.is_late = late; submission.submission_text = f"Seeded {status} response for assignment evaluation."; submission.submitted_at = now - timedelta(days=2); submission.returned_at = now - timedelta(days=1) if status == "returned" else None
+        s.flush()
+        if status in {"returned", "evaluated"}:
+            evaluation = _ensure(s, D.AssignmentEvaluation, f"phase4_evaluation_{submission.id}", lambda: D.AssignmentEvaluation(id=f"phase4_evaluation_{submission.id}", tenant_id=TENANT, submission_id=submission.id, evaluator_id=staff.id))
+            evaluation.submission_id = submission.id; evaluation.evaluator_id = staff.id; evaluation.status = status; evaluation.feedback = "Please revise the evidence and resubmit." if status == "returned" else "Clear analysis with supporting evidence."; evaluation.marks_awarded = None if status == "returned" else 21; evaluation.evaluated_at = now - timedelta(hours=12)
+    s.commit()
+
+def _seed_mentoring_cases_demo(s):
+    """Idempotent Phase 6 cases for Aarav's real formal advisees."""
+    professor = s.query(User).filter(User.username == "aarav_kulkarni").first()
+    mentor = s.query(D.StaffMember).filter(D.StaffMember.user_id == professor.id).first() if professor else None
+    if not professor or not mentor:
+        return
+    student_ids = [row.student_id for row in s.query(D.MentorAssignment).filter(
+        D.MentorAssignment.faculty_id == mentor.id, D.MentorAssignment.status == "active").order_by(D.MentorAssignment.student_id).all()]
+    if len(student_ids) < 6:
+        return
+    department = s.query(D.Department).get(mentor.dept_id)
+    hod_staff = s.query(D.StaffMember).get(department.hod_person_id) if department else None
+    examples = [
+        ("low_open", "Other", "low", "Adjustment support after the first assessment.", "Review study routine and campus support options.", "open"),
+        ("attendance_medium", "Attendance", "medium", "Attendance needs a focused recovery plan.", "Agree on weekly attendance target and check in.", "open"),
+        ("backlog_high", "Backlogs", "high", "Published backlog outcome needs academic support.", "Prepare a recovery plan with subject faculty.", "open"),
+        ("follow_up", "Academic Performance", "medium", "Assessment performance requires a follow-up meeting.", "Review assessment feedback and weekly revision plan.", "open"),
+        ("referred", "Personal/Wellbeing", "high", "Student requested additional departmental support.", "Maintain mentor contact while department reviews support options.", "referred"),
+        ("resolved", "Career/Placement", "low", "Career guidance discussion completed.", "Share placement preparation resources.", "resolved"),
+    ]
+    today = date.today()
+    for index, (key, category, risk, summary, action_plan, status) in enumerate(examples):
+        case_id = f"phase6_case_{key}"
+        case = _ensure(s, D.MentoringCase, case_id, lambda case_id=case_id: D.MentoringCase(id=case_id, tenant_id=TENANT, student_id=student_ids[index], mentor_id=mentor.id))
+        case.student_id = student_ids[index]; case.mentor_id = mentor.id; case.department_id = mentor.dept_id
+        case.category = category; case.risk_level = risk; case.summary = summary; case.action_plan = action_plan; case.status = status
+        case.follow_up_date = today if key == "follow_up" else (today + timedelta(days=index + 2) if status in {"open", "referred"} else None)
+        case.referred_to_office = "hod" if status == "referred" else ""
+        case.referred_to_user_id = hod_staff.user_id if status == "referred" and hod_staff else ""
+        case.referred_at = datetime.utcnow() if status == "referred" else None
+        case.resolved_at = datetime.utcnow() if status == "resolved" else None
+        case.updated_at = datetime.utcnow()
+        note = _ensure(s, D.MentoringNote, f"phase6_note_{key}", lambda key=key: D.MentoringNote(id=f"phase6_note_{key}", tenant_id=TENANT, case_id=case.id, author_user_id=professor.id))
+        note.case_id = case.id; note.author_user_id = professor.id; note.author_name = mentor.name; note.note_type = "note"; note.content = f"Seeded mentoring context: {summary}"
+        if key == "follow_up":
+            follow = _ensure(s, D.MentoringFollowUp, "phase6_followup_due", lambda: D.MentoringFollowUp(id="phase6_followup_due", tenant_id=TENANT, case_id=case.id, scheduled_for=today, created_by=professor.id))
+            follow.case_id = case.id; follow.scheduled_for = today; follow.created_by = professor.id; follow.completed_at = None; follow.outcome = ""
+        if status == "referred":
+            referral = _ensure(s, D.MentoringNote, "phase6_referral_note", lambda: D.MentoringNote(id="phase6_referral_note", tenant_id=TENANT, case_id=case.id, author_user_id=professor.id))
+            referral.case_id = case.id; referral.author_user_id = professor.id; referral.author_name = mentor.name; referral.note_type = "referral"; referral.content = "Referral to the department HOD for support review."
+    s.commit()
+
+def _seed_research_demo(s):
+    professor = s.query(User).filter(User.username == "aarav_kulkarni").first()
+    staff = s.query(D.StaffMember).filter(D.StaffMember.user_id == professor.id).first() if professor else None
+    if not professor or not staff: return
+    today = date.today()
+    examples = [("draft", "Draft sustainable networks study", "draft"), ("active", "Active campus network resilience", "active"), ("completed", "Completed IoT energy analysis", "completed")]
+    for key, title, status in examples:
+        row = _ensure(s, D.ResearchProject, f"phase7_project_{key}", lambda key=key: D.ResearchProject(id=f"phase7_project_{key}", tenant_id=TENANT, title=title))
+        row.title=title; row.pi_name=staff.name; row.dept=staff.dept_id; row.owner_id=staff.id; row.category="Applied Research"; row.summary=f"Seeded {key} research project."; row.start_date=today-timedelta(days=30); row.expected_end_date=today+timedelta(days=120); row.agency="Internal Research Fund"; row.grant_amount=250000; row.status=status; row.updated_at=datetime.utcnow(); row.completed_at=datetime.utcnow() if status == "completed" else None
+        # PostgreSQL enforces this FK immediately. SessionLocal disables
+        # autoflush, so persist a new project before adding its child history.
+        s.flush()
+        if status == "active":
+            for index, content in enumerate(["Literature review and baseline completed.", "Prototype resilience tests are underway."], 1):
+                item = _ensure(s, D.ResearchProgress, f"phase7_progress_{index}", lambda index=index: D.ResearchProgress(id=f"phase7_progress_{index}", tenant_id=TENANT, project_id=row.id, author_id=professor.id))
+                item.project_id=row.id; item.author_id=professor.id; item.author_name=staff.name; item.content=content
+            milestone = _ensure(s, D.ResearchMilestone, "phase7_milestone_1", lambda: D.ResearchMilestone(id="phase7_milestone_1", tenant_id=TENANT, project_id=row.id, title="Prototype baseline"))
+            milestone.project_id=row.id; milestone.title="Prototype baseline"; milestone.due_date=today+timedelta(days=20)
+    for key, title, status in [("draft", "Draft network resilience publication", "draft"), ("published", "Published edge computing study", "published")]:
+        row = _ensure(s, D.ResearchPublication, f"phase7_publication_{key}", lambda key=key: D.ResearchPublication(id=f"phase7_publication_{key}", tenant_id=TENANT, owner_id=staff.id, title=title))
+        row.owner_id=staff.id; row.title=title; row.publication_type="journal"; row.venue="ICMS Journal of Computing"; row.authors=f"{staff.name}, Research Team"; row.publication_date=today-timedelta(days=10); row.doi_url="https://doi.org/10.1000/icms.phase7"; row.volume_issue_pages="Vol. 2, Issue 1, pp. 10-18"; row.status=status; row.updated_at=datetime.utcnow()
+    s.commit()
+
+
 def seed_domain():
     ensure_versioned_migrations()
     ensure_additive_schema()
@@ -3605,11 +4149,30 @@ def seed_domain():
         _seed_calendar_data(s)
         _seed_chairman_workflows(s)
         _bind_portal_accounts(s)
+        _ensure_aarav_kulkarni_professor_login(s)
+        _ensure_karthik_menon_student_login(s)
         _seed_student_portal_demo_profile(s)
         _seed_principal_dashboard_data(s)
         _seed_principal_schedule_events(s)
         _seed_development_backlog_history(s)
         _seed_development_principal_coverage(s)
+        _seed_course_materials_demo(s)
+        _seed_mentor_assignments(s)
+        _seed_faculty_functional_assignments(s)
+        _backfill_teaching_foundation(s)
+        _seed_marks_submission_demo(s)
+        _seed_faculty_leave_demo(s)
+        _seed_assignment_submission_demo(s)
+        _seed_mentoring_cases_demo(s)
+        _seed_research_demo(s)
+        legacy_published = [row[0] for row in s.query(D.Mark.assessment_id)
+                            .filter(D.Mark.status == "published").distinct().all()]
+        if legacy_published:
+            s.query(D.Assessment).filter(
+                D.Assessment.id.in_(legacy_published),
+                D.Assessment.marks_state == "draft",
+            ).update({"marks_state": "published"}, synchronize_session=False)
+            s.commit()
         # The consolidated domain model no longer includes the legacy
         # AdmissionCycle aggregate.  Keep compatibility with databases/code
         # variants that still provide it without breaking every app startup.
@@ -3619,6 +4182,7 @@ def seed_domain():
             _seed_admissions_phase4(s)
             _seed_admissions_phase5(s)
         _seed_student_portal_accounts(s)
+        _ensure_legacy_student_roll_login(s)
         return {
             "status": "domain-seeded",
             "schools": s.query(D.School).count(),

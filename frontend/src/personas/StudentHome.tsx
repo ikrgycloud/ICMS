@@ -630,7 +630,7 @@ function PortalGlyph({ kind }: { kind: string }) {
   }
 }
 
-function QrCode({ matrix }: { matrix: boolean[][] }) {
+export function QrCode({ matrix }: { matrix: boolean[][] }) {
   const size = matrix.length
   const cell = 4
   const padding = 4
@@ -662,7 +662,7 @@ function QrCode({ matrix }: { matrix: boolean[][] }) {
   )
 }
 
-function Barcode({ value }: { value: string }) {
+export function Barcode({ value }: { value: string }) {
   const pattern = buildCode39Pattern(value)
   const narrow = 2
   const wide = 4
@@ -692,7 +692,7 @@ const QR_EC_CODEWORDS = 7
 const QR_SIZE = 21
 const FORMAT_L_MASK_0 = 0b111011111000100
 
-function buildQrMatrix(rawValue: string) {
+export function buildQrMatrix(rawValue: string) {
   const value = String(rawValue || 'ICMS:ID').toUpperCase().replace(/[^0-9A-Z $%*+\-./:]/g, '')
   const dataCodewords = buildDataCodewords(value.slice(0, 25))
   const ecCodewords = buildErrorCodewords(dataCodewords, QR_EC_CODEWORDS)
