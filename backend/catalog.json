@@ -1,0 +1,1506 @@
+{
+ "levels": {
+  "1": {
+   "name": "Governance",
+   "color": "#6b4fb0"
+  },
+  "2": {
+   "name": "Executive",
+   "color": "#2f6db0"
+  },
+  "3": {
+   "name": "Campus Leadership",
+   "color": "#1f7a6d"
+  },
+  "4": {
+   "name": "Academic Leadership",
+   "color": "#c9962f"
+  },
+  "5": {
+   "name": "Faculty & Academic Staff",
+   "color": "#d4a72c"
+  },
+  "6": {
+   "name": "Administration (Academic & Student)",
+   "color": "#3a8a5a"
+  },
+  "7": {
+   "name": "Admin Support & Operations",
+   "color": "#2f7db0"
+  },
+  "8": {
+   "name": "Students & External Parties",
+   "color": "#5566aa"
+  }
+ },
+ "offices": [
+  {
+   "n": 1,
+   "name": "Chairman",
+   "level": 1,
+   "purpose": "Highest business & governance authority. Defines overall governance, policies, structure, branches and leadership. Every other role and module depends on this foundation.",
+   "internal_roles": [
+    "Chairman / Chairperson",
+    "Chairman's Office Secretary",
+    "Executive Assistant to Chairman"
+   ],
+   "functionalities": [
+    "Define institutional strategy & policy",
+    "Approve/close branches",
+    "Appoint & remove senior leadership",
+    "Org-wide oversight (academics, finance, risk)",
+    "Reserved & major financial approvals",
+    "Delegate authority to Vice Chairman",
+    "Receive top escalations"
+   ],
+   "workflows": [
+    "Strategic objective creation",
+    "Institutional policy approval",
+    "Branch creation / closure (final)",
+    "Senior leadership appointment"
+   ],
+   "modules": [
+    "Governance",
+    "Management Dashboard",
+    "Reporting",
+    "Analytics",
+    "Audit",
+    "Delegation"
+   ],
+   "scope": "Entire organization (all campuses)",
+   "reports_to": "Governing Body"
+  },
+  {
+   "n": 2,
+   "name": "Vice Chairman",
+   "level": 2,
+   "purpose": "Executive bridge between governance and operations. Implements Chairman's decisions, oversees branches, monitors leadership, converts strategy into execution.",
+   "internal_roles": [
+    "Vice Chairman",
+    "VC Office Coordinator",
+    "Executive Analyst"
+   ],
+   "functionalities": [
+    "Implement Chairman decisions",
+    "Oversee multiple branches",
+    "Monitor Campus/Principal performance",
+    "Convert strategy \u2192 operational targets",
+    "Handle escalations from branches",
+    "Recommend appointments & policies",
+    "Approve delegated executive matters"
+   ],
+   "workflows": [
+    "Strategic execution planning",
+    "Branch target setting",
+    "Executive approval",
+    "Escalation handling"
+   ],
+   "modules": [
+    "Management Dashboard",
+    "Organization Management",
+    "Finance (oversight)",
+    "Reporting",
+    "Analytics",
+    "Approvals",
+    "Delegation"
+   ],
+   "scope": "Entire organization / assigned branches",
+   "reports_to": "Chairman"
+  },
+  {
+   "n": 3,
+   "name": "Campus / Branch Head",
+   "level": 3,
+   "purpose": "Managing Director / CEO of a single branch. Overall accountability for a campus across academics, operations, finance and support services.",
+   "internal_roles": [
+    "Branch Director / Campus Head",
+    "Campus Administrator",
+    "Branch Manager",
+    "Campus Registrar"
+   ],
+   "functionalities": [
+    "Own end-to-end branch performance",
+    "Coordinate academic & administrative leadership",
+    "Approve branch plans & budgets (within limit)",
+    "Branch-level reporting to VC",
+    "Resource allocation across departments"
+   ],
+   "workflows": [
+    "Branch operational planning",
+    "Branch budget approval",
+    "Leadership coordination",
+    "Branch KPI review"
+   ],
+   "modules": [
+    "Campus Management",
+    "Organization Management",
+    "Finance (branch)",
+    "Reporting",
+    "Approvals"
+   ],
+   "scope": "One campus / branch",
+   "reports_to": "Vice Chairman"
+  },
+  {
+   "n": 4,
+   "name": "Principal",
+   "level": 3,
+   "purpose": "Highest operational & academic authority within a branch \u2014 the whole branch, not just academics.",
+   "internal_roles": [
+    "Principal",
+    "Principal's Office Secretary",
+    "Branch Academic Coordinator"
+   ],
+   "functionalities": [
+    "Manage branch operations & governance",
+    "Oversee departments, faculty, students",
+    "Approve branch finance within limits",
+    "Manage workforce & infrastructure requests",
+    "Handle discipline, grievances, escalations",
+    "Ensure accreditation compliance"
+   ],
+   "workflows": [
+    "Branch operational plan",
+    "Procurement/expense approval (\u2264limit)",
+    "Faculty & staff leave approval",
+    "Student disciplinary action",
+    "Result publication (per exam authority)"
+   ],
+   "modules": [
+    "Campus Management",
+    "Academic Management",
+    "SIS",
+    "Finance (branch)",
+    "Examination",
+    "Admissions",
+    "Facilities",
+    "Approvals"
+   ],
+   "scope": "One branch (operational authority)",
+   "reports_to": "Campus / Branch Head"
+  },
+  {
+   "n": 5,
+   "name": "Vice Principal",
+   "level": 3,
+   "purpose": "Principal's academic & operational deputy. Coordinates academic execution and exercises delegated authority.",
+   "internal_roles": [
+    "Vice Principal",
+    "Academic Coordinator",
+    "Administrative Coordinator"
+   ],
+   "functionalities": [
+    "Coordinate academic execution",
+    "Coordinate departments (HODs)",
+    "Manage timetable & curriculum execution",
+    "Monitor attendance & academic quality",
+    "Approve delegated leave & requests",
+    "Escalate serious issues to Principal"
+   ],
+   "workflows": [
+    "Academic planning",
+    "Timetable approval",
+    "Attendance correction",
+    "Delegated leave approval"
+   ],
+   "modules": [
+    "Academic Management",
+    "Department Management",
+    "Timetable",
+    "Attendance",
+    "Examination (ops)",
+    "Approvals"
+   ],
+   "scope": "One branch (academic/operational deputy)",
+   "reports_to": "Principal"
+  },
+  {
+   "n": 6,
+   "name": "Dean \u2014 Academics",
+   "level": 4,
+   "purpose": "Faculty/School-level academic leadership across multiple departments; owns curriculum and academic quality.",
+   "internal_roles": [
+    "Dean (Academics)",
+    "Associate Dean",
+    "Assistant Dean",
+    "Academic Director"
+   ],
+   "functionalities": [
+    "Curriculum governance",
+    "Program planning & approval",
+    "Academic calendar ownership",
+    "Cross-department faculty allocation",
+    "Academic quality & result trends"
+   ],
+   "workflows": [
+    "Curriculum approval",
+    "Academic calendar approval",
+    "Program planning"
+   ],
+   "modules": [
+    "Academic Management",
+    "Curriculum",
+    "Courses",
+    "Timetable",
+    "Results",
+    "Quality Assurance"
+   ],
+   "scope": "Faculty / School (academics)",
+   "reports_to": "Principal / Vice Principal"
+  },
+  {
+   "n": 7,
+   "name": "Dean \u2014 Administration",
+   "level": 4,
+   "purpose": "Administrative leadership of a school/faculty \u2014 operations, resourcing and coordination with support offices.",
+   "internal_roles": [
+    "Dean (Administration)",
+    "Administrative Director",
+    "Administrative Officer"
+   ],
+   "functionalities": [
+    "School administrative operations",
+    "Resource & facility coordination",
+    "Administrative staff oversight",
+    "Budget coordination with Finance"
+   ],
+   "workflows": [
+    "Administrative planning",
+    "Resource allocation",
+    "Budget coordination"
+   ],
+   "modules": [
+    "Organization Management",
+    "Facilities",
+    "HR (school)",
+    "Finance (school)",
+    "Reporting"
+   ],
+   "scope": "Faculty / School (administration)",
+   "reports_to": "Principal / Campus Head"
+  },
+  {
+   "n": 8,
+   "name": "Dean \u2014 Student Affairs",
+   "level": 4,
+   "purpose": "Leadership of student welfare, engagement, discipline, grievance, clubs and anti-ragging.",
+   "internal_roles": [
+    "Dean (Student Affairs)",
+    "Director of Student Affairs",
+    "Student Welfare Officer"
+   ],
+   "functionalities": [
+    "Student welfare governance",
+    "Grievance & discipline oversight",
+    "Anti-ragging compliance",
+    "Clubs & engagement oversight",
+    "Counselling coordination"
+   ],
+   "workflows": [
+    "Student grievance",
+    "Disciplinary action",
+    "Anti-ragging complaint"
+   ],
+   "modules": [
+    "Student Affairs",
+    "Counseling",
+    "Clubs",
+    "Events",
+    "Complaints / Grievance",
+    "Discipline"
+   ],
+   "scope": "Campus (student welfare)",
+   "reports_to": "Principal"
+  },
+  {
+   "n": 9,
+   "name": "Dean \u2014 R&D / IQAC",
+   "level": 4,
+   "purpose": "Leadership of research, innovation and internal quality assurance / accreditation readiness.",
+   "internal_roles": [
+    "Dean (R&D)",
+    "IQAC Head",
+    "Director of Research",
+    "Accreditation Coordinator"
+   ],
+   "functionalities": [
+    "Research strategy & grants oversight",
+    "Innovation / incubation",
+    "IQAC quality metrics",
+    "Accreditation readiness (NAAC/NBA/ISO)",
+    "Academic audit"
+   ],
+   "workflows": [
+    "Research project approval",
+    "Grant sanction",
+    "Accreditation submission",
+    "Academic audit"
+   ],
+   "modules": [
+    "Research",
+    "Innovation",
+    "Grant Management",
+    "Quality Assurance",
+    "Accreditation"
+   ],
+   "scope": "University / Campus (research & quality)",
+   "reports_to": "Principal / VC"
+  },
+  {
+   "n": 10,
+   "name": "HOD Office",
+   "level": 5,
+   "purpose": "Department-level academic leadership \u2014 manages faculty, programs, courses and department performance.",
+   "internal_roles": [
+    "Head of Department (HOD)",
+    "Associate HOD",
+    "Department Coordinator",
+    "Program Coordinator",
+    "Course Coordinator",
+    "Class Coordinator",
+    "Faculty Advisor"
+   ],
+   "functionalities": [
+    "Faculty workload assignment",
+    "Course allocation",
+    "Department targets & budget",
+    "Attendance & internal-marks review",
+    "At-risk student monitoring",
+    "Research within department"
+   ],
+   "workflows": [
+    "Faculty workload assignment",
+    "Course allocation",
+    "Attendance correction review",
+    "Internal marks review"
+   ],
+   "modules": [
+    "Department Management",
+    "Courses",
+    "Curriculum",
+    "Timetable",
+    "Attendance",
+    "LMS",
+    "Examination"
+   ],
+   "scope": "One department",
+   "reports_to": "Dean / Principal"
+  },
+  {
+   "n": 11,
+   "name": "Professor Office",
+   "level": 5,
+   "purpose": "Senior teaching & research faculty delivering courses, mentoring and leading research.",
+   "internal_roles": [
+    "Professor",
+    "Research Faculty",
+    "Principal Investigator"
+   ],
+   "functionalities": [
+    "Teaching assigned courses",
+    "Research supervision",
+    "Curriculum contribution",
+    "Mentoring / advising",
+    "Assessment design"
+   ],
+   "workflows": [
+    "Marks submission",
+    "Assessment creation",
+    "Research supervision"
+   ],
+   "modules": [
+    "LMS",
+    "Courses",
+    "Attendance",
+    "Assessment",
+    "Marks",
+    "Research",
+    "Faculty Portal"
+   ],
+   "scope": "Assigned courses / research",
+   "reports_to": "HOD"
+  },
+  {
+   "n": 12,
+   "name": "Associate Professor Office",
+   "level": 5,
+   "purpose": "Mid-senior faculty delivering teaching, assessment and coordination roles.",
+   "internal_roles": [
+    "Associate Professor",
+    "Course Coordinator",
+    "Faculty Advisor"
+   ],
+   "functionalities": [
+    "Teaching & assessment",
+    "Course coordination",
+    "Student advising",
+    "Curriculum support"
+   ],
+   "workflows": [
+    "Marks submission",
+    "Attendance correction request",
+    "Course coordination"
+   ],
+   "modules": [
+    "LMS",
+    "Courses",
+    "Attendance",
+    "Assessment",
+    "Marks",
+    "Faculty Portal"
+   ],
+   "scope": "Assigned courses",
+   "reports_to": "HOD"
+  },
+  {
+   "n": 13,
+   "name": "Assistant Professor Office",
+   "level": 5,
+   "purpose": "Entry/mid faculty delivering teaching and assessment for assigned classes.",
+   "internal_roles": [
+    "Assistant Professor",
+    "Faculty Advisor",
+    "Lab Instructor"
+   ],
+   "functionalities": [
+    "Teaching assigned classes",
+    "Assessment & marks",
+    "Lab supervision",
+    "Student mentoring"
+   ],
+   "workflows": [
+    "Marks submission",
+    "Attendance marking",
+    "Assessment creation"
+   ],
+   "modules": [
+    "LMS",
+    "Courses",
+    "Attendance",
+    "Assessment",
+    "Marks",
+    "Faculty Portal"
+   ],
+   "scope": "Assigned courses",
+   "reports_to": "HOD"
+  },
+  {
+   "n": 14,
+   "name": "Lecturer Office",
+   "level": 5,
+   "purpose": "Teaching staff (incl. visiting/guest/TA) delivering classes and supporting assessment.",
+   "internal_roles": [
+    "Senior Lecturer",
+    "Lecturer",
+    "Visiting Faculty",
+    "Adjunct Faculty",
+    "Guest Faculty",
+    "Teaching Assistant",
+    "Lab Technician"
+   ],
+   "functionalities": [
+    "Class delivery",
+    "Attendance marking",
+    "Assessment support",
+    "TA / lab duties"
+   ],
+   "workflows": [
+    "Attendance marking",
+    "Marks entry (assist)",
+    "Class delivery"
+   ],
+   "modules": [
+    "LMS",
+    "Courses",
+    "Attendance",
+    "Assessment",
+    "Faculty Portal"
+   ],
+   "scope": "Assigned courses / classes",
+   "reports_to": "HOD"
+  },
+  {
+   "n": 15,
+   "name": "Admission Office",
+   "level": 6,
+   "purpose": "Applicant acquisition through enrolment: applications, verification, entrance tests, counselling, offers.",
+   "internal_roles": [
+    "Director of Admissions",
+    "Admissions Manager",
+    "Admissions Officer",
+    "Admission Counselor",
+    "Application Reviewer",
+    "Document Verification Officer",
+    "Enrollment Officer",
+    "Entrance Exam Coordinator",
+    "Scholarship Admission Officer",
+    "International Admissions Officer",
+    "Admission Helpdesk Executive"
+   ],
+   "functionalities": [
+    "Application intake & review",
+    "Document verification",
+    "Entrance test management",
+    "Counselling & offers",
+    "Fee-linked admission",
+    "Enrolment handoff to Records"
+   ],
+   "workflows": [
+    "Student admission",
+    "Document verification",
+    "Enrollment",
+    "Entrance exam scheduling",
+    "Scholarship admission"
+   ],
+   "modules": [
+    "Admissions",
+    "Enrollment",
+    "Document Management",
+    "Fees (verification)",
+    "Scholarships",
+    "SIS"
+   ],
+   "scope": "Campus / Program (admissions)",
+   "reports_to": "Principal / Registrar"
+  },
+  {
+   "n": 16,
+   "name": "Examination Controller Office",
+   "level": 6,
+   "purpose": "End-to-end examination integrity: scheduling, question papers, invigilation, evaluation, results, revaluation, certificates & transcripts.",
+   "internal_roles": [
+    "Controller of Examinations",
+    "Deputy Controller",
+    "Assistant Controller",
+    "Examination Officer",
+    "Examination Coordinator",
+    "Question Paper Coordinator",
+    "Evaluation Coordinator",
+    "QP Setter",
+    "QP Moderator",
+    "Evaluator",
+    "Revaluator",
+    "Scrutiny Officer",
+    "Invigilator",
+    "Chief Invigilator",
+    "Flying Squad",
+    "Examination Auditor",
+    "Result Processing Officer",
+    "Grade Verification Officer",
+    "Transcript Officer",
+    "Certificate Officer",
+    "Exam Cell Administrator"
+   ],
+   "functionalities": [
+    "Exam scheduling",
+    "Question paper lifecycle (set\u2192moderate\u2192approve)",
+    "Invigilation rostering",
+    "Evaluation & moderation",
+    "Result processing & publication",
+    "Revaluation & scrutiny",
+    "Certificate & transcript issuance"
+   ],
+   "workflows": [
+    "Examination scheduling",
+    "Question paper approval",
+    "Marks submission \u2192 moderation",
+    "Result publication",
+    "Result correction / revaluation",
+    "Certificate & transcript issuance"
+   ],
+   "modules": [
+    "Examination",
+    "Question Paper",
+    "Results",
+    "Grading",
+    "Certificates",
+    "Transcripts",
+    "Audit"
+   ],
+   "scope": "University / Campus / Program (exams)",
+   "reports_to": "Principal / VC"
+  },
+  {
+   "n": 17,
+   "name": "Academic Coordinator Office",
+   "level": 6,
+   "purpose": "Coordinates academic operations across departments \u2014 calendar, timetable, curriculum execution.",
+   "internal_roles": [
+    "Academic Coordinator",
+    "Program Coordinator",
+    "Curriculum Officer",
+    "Timetable Officer"
+   ],
+   "functionalities": [
+    "Academic calendar execution",
+    "Timetable coordination",
+    "Curriculum tracking",
+    "Cross-department scheduling"
+   ],
+   "workflows": [
+    "Academic calendar setup",
+    "Timetable creation & approval",
+    "Curriculum tracking"
+   ],
+   "modules": [
+    "Academic Management",
+    "Timetable",
+    "Curriculum",
+    "Courses",
+    "Reporting"
+   ],
+   "scope": "Faculty / Department (academic ops)",
+   "reports_to": "Dean / Vice Principal"
+  },
+  {
+   "n": 18,
+   "name": "Placement Office",
+   "level": 6,
+   "purpose": "Career services: employer relations, placements, internships and training.",
+   "internal_roles": [
+    "Director of Placements",
+    "Placement Manager",
+    "Corporate Relations Manager",
+    "Placement Officer",
+    "Career Counselor",
+    "Internship Coordinator",
+    "Employer Relations Officer",
+    "Training Coordinator",
+    "Placement Coordinator",
+    "Placement Assistant"
+   ],
+   "functionalities": [
+    "Employer onboarding & relations",
+    "Job & internship postings",
+    "Student registration & shortlisting",
+    "Placement drives & interviews",
+    "Offers & training"
+   ],
+   "workflows": [
+    "Employer onboarding",
+    "Job posting",
+    "Internship approval",
+    "Placement approval",
+    "Training scheduling"
+   ],
+   "modules": [
+    "Placement",
+    "Internship",
+    "Training",
+    "Company / Job",
+    "Career Portal"
+   ],
+   "scope": "Campus / Department (careers)",
+   "reports_to": "Principal"
+  },
+  {
+   "n": 19,
+   "name": "Library Office",
+   "level": 6,
+   "purpose": "Physical & digital library: catalogue, acquisition, circulation, digital resources.",
+   "internal_roles": [
+    "University / College Librarian",
+    "Deputy Librarian",
+    "Assistant Librarian",
+    "Library Manager",
+    "Cataloguing Officer",
+    "Digital Library Officer",
+    "Acquisition Officer",
+    "Library Assistant",
+    "Library Attendant"
+   ],
+   "functionalities": [
+    "Catalogue management",
+    "Acquisition",
+    "Circulation (loan/return)",
+    "Digital library",
+    "Fines (Finance link)"
+   ],
+   "workflows": [
+    "Acquisition approval",
+    "Book loan / return",
+    "Fine assessment"
+   ],
+   "modules": [
+    "Library",
+    "Catalogue",
+    "Circulation",
+    "Digital Library",
+    "Acquisition"
+   ],
+   "scope": "Campus / Department",
+   "reports_to": "Principal / Dean"
+  },
+  {
+   "n": 20,
+   "name": "Grievance Office",
+   "level": 6,
+   "purpose": "Student & staff grievance handling, counselling coordination and welfare support.",
+   "internal_roles": [
+    "Grievance Officer",
+    "Student Counselor",
+    "Student Welfare Officer",
+    "Student Support Officer",
+    "Anti-Ragging Officer"
+   ],
+   "functionalities": [
+    "Grievance intake & tracking",
+    "Counselling referral",
+    "Welfare support",
+    "Anti-ragging handling",
+    "Resolution & escalation"
+   ],
+   "workflows": [
+    "Student grievance",
+    "Counselling referral",
+    "Anti-ragging complaint"
+   ],
+   "modules": [
+    "Complaints / Grievance",
+    "Counseling",
+    "Student Affairs"
+   ],
+   "scope": "Campus (grievance & welfare)",
+   "reports_to": "Dean Student Affairs / Principal"
+  },
+  {
+   "n": 21,
+   "name": "Discipline Office",
+   "level": 6,
+   "purpose": "Student discipline: case management, hearings and disciplinary action within policy.",
+   "internal_roles": [
+    "Student Discipline Officer",
+    "Disciplinary Committee Member",
+    "Proctor"
+   ],
+   "functionalities": [
+    "Disciplinary case management",
+    "Hearings & documentation",
+    "Action within policy",
+    "Escalation to Principal / VC"
+   ],
+   "workflows": [
+    "Disciplinary action",
+    "Case hearing",
+    "Escalation"
+   ],
+   "modules": [
+    "Discipline",
+    "Student Affairs",
+    "Document Management",
+    "Audit"
+   ],
+   "scope": "Campus (discipline)",
+   "reports_to": "Dean Student Affairs / Principal"
+  },
+  {
+   "n": 22,
+   "name": "Finance Manager Office",
+   "level": 7,
+   "purpose": "Institutional finance leadership: fees, budgets, scholarships, refunds, financial control.",
+   "internal_roles": [
+    "CFO",
+    "Finance Director",
+    "Finance Manager",
+    "Financial Controller",
+    "Budget Officer",
+    "Scholarship Finance Officer",
+    "Refund Officer"
+   ],
+   "functionalities": [
+    "Fee structure & collection oversight",
+    "Budget planning & control",
+    "Scholarships & refunds",
+    "Financial reporting",
+    "Approvals within limits (SoD)"
+   ],
+   "workflows": [
+    "Fee waiver",
+    "Scholarship",
+    "Refund",
+    "Expense approval",
+    "Budget approval"
+   ],
+   "modules": [
+    "Finance",
+    "Fees",
+    "Scholarships",
+    "Budget",
+    "Reporting",
+    "Audit"
+   ],
+   "scope": "University / Campus (finance)",
+   "reports_to": "CFO / Campus Head"
+  },
+  {
+   "n": 23,
+   "name": "Accounts Office",
+   "level": 7,
+   "purpose": "Day-to-day accounting: transactions, fee collection, payments, cashiering, reconciliation.",
+   "internal_roles": [
+    "Accounts Manager",
+    "Accountant",
+    "Accounts Officer",
+    "Accounts Executive",
+    "Cashier",
+    "Fee Collection Officer",
+    "Fee Verification Officer",
+    "Vendor Payment Officer",
+    "Accounts Clerk"
+   ],
+   "functionalities": [
+    "Fee collection & receipts",
+    "Payments & reconciliation",
+    "Cashiering",
+    "Vendor payments (post-approval)",
+    "Ledger maintenance"
+   ],
+   "workflows": [
+    "Fee collection",
+    "Vendor payment",
+    "Reconciliation"
+   ],
+   "modules": [
+    "Finance",
+    "Fees",
+    "Payments",
+    "Reporting"
+   ],
+   "scope": "Campus (accounts)",
+   "reports_to": "Finance Manager"
+  },
+  {
+   "n": 24,
+   "name": "HR Manager Office",
+   "level": 7,
+   "purpose": "Workforce lifecycle leadership: recruitment, performance, training, employee relations, compliance.",
+   "internal_roles": [
+    "Chief HR Officer",
+    "HR Director",
+    "HR Manager",
+    "HR Business Partner",
+    "Recruitment Manager",
+    "Employee Relations Officer",
+    "Learning & Development Manager",
+    "Performance Management Officer",
+    "HR Compliance Officer"
+   ],
+   "functionalities": [
+    "Recruitment & onboarding",
+    "Performance management",
+    "Training & development",
+    "Employee relations",
+    "HR compliance"
+   ],
+   "workflows": [
+    "Recruitment",
+    "Faculty/staff appraisal",
+    "Promotion",
+    "Onboarding"
+   ],
+   "modules": [
+    "HR",
+    "Recruitment",
+    "Performance Management",
+    "Training",
+    "Document Management"
+   ],
+   "scope": "University / Campus (HR)",
+   "reports_to": "CHRO / Campus Head"
+  },
+  {
+   "n": 25,
+   "name": "HR Executive Office",
+   "level": 7,
+   "purpose": "HR operations: attendance, leave, payroll inputs, records and day-to-day HR service.",
+   "internal_roles": [
+    "HR Executive",
+    "HR Officer",
+    "Payroll Specialist",
+    "Attendance Officer",
+    "Training Coordinator",
+    "HR Administrator",
+    "HR Clerk"
+   ],
+   "functionalities": [
+    "Leave & attendance management",
+    "Payroll inputs (to Finance)",
+    "Employee records",
+    "Training coordination",
+    "HR helpdesk"
+   ],
+   "workflows": [
+    "Faculty leave",
+    "Staff leave",
+    "Payroll input preparation"
+   ],
+   "modules": [
+    "HR",
+    "Leave",
+    "Payroll (inputs)",
+    "Attendance",
+    "Document Management"
+   ],
+   "scope": "Campus (HR operations)",
+   "reports_to": "HR Manager"
+  },
+  {
+   "n": 26,
+   "name": "Admin Manager Office",
+   "level": 7,
+   "purpose": "General administration & procurement/inventory coordination for the campus.",
+   "internal_roles": [
+    "Administrative Manager",
+    "Administrative Officer",
+    "Procurement Head",
+    "Procurement Manager",
+    "Purchase Officer",
+    "Vendor Manager",
+    "Contract Manager",
+    "Inventory Manager"
+   ],
+   "functionalities": [
+    "General administration",
+    "Procurement & purchasing",
+    "Vendor & contract management",
+    "Inventory & asset coordination"
+   ],
+   "workflows": [
+    "Purchase request",
+    "Purchase order",
+    "Vendor onboarding",
+    "Asset request"
+   ],
+   "modules": [
+    "Organization Management",
+    "Procurement",
+    "Inventory",
+    "Asset Management",
+    "Vendor Management"
+   ],
+   "scope": "Campus (general administration)",
+   "reports_to": "Campus Head / Principal"
+  },
+  {
+   "n": 27,
+   "name": "IT Manager Office",
+   "level": 7,
+   "purpose": "Technology backbone: infrastructure, applications, ERP/LMS admin, cybersecurity, helpdesk.",
+   "internal_roles": [
+    "CIO",
+    "CTO",
+    "IT Director",
+    "IT Manager",
+    "Infrastructure Manager",
+    "Network Administrator",
+    "System Administrator",
+    "Database Administrator",
+    "Cybersecurity Officer",
+    "Application Administrator",
+    "ERP Administrator",
+    "LMS Administrator",
+    "Helpdesk Manager",
+    "IT Support Engineer"
+   ],
+   "functionalities": [
+    "Infrastructure & network",
+    "Application & ERP/LMS admin",
+    "Cybersecurity & access",
+    "IT helpdesk & incidents",
+    "Integrations"
+   ],
+   "workflows": [
+    "IT access request",
+    "Incident / ticket",
+    "Integration onboarding",
+    "User provisioning"
+   ],
+   "modules": [
+    "IT Helpdesk",
+    "IAM",
+    "Integration/API Management",
+    "Configuration",
+    "System Administration",
+    "Monitoring"
+   ],
+   "scope": "University / Campus (technology)",
+   "reports_to": "CIO / Campus Head"
+  },
+  {
+   "n": 28,
+   "name": "System Administrator Office",
+   "level": 7,
+   "purpose": "Technical administration of the platform within governed limits and full audit.",
+   "internal_roles": [
+    "System Administrator",
+    "Organization Administrator",
+    "Campus Administrator",
+    "Application Administrator",
+    "ERP Administrator",
+    "Security Administrator",
+    "Database Administrator",
+    "Audit Administrator",
+    "Configuration Administrator",
+    "Integration Administrator",
+    "Support Administrator"
+   ],
+   "functionalities": [
+    "User & role provisioning",
+    "Configuration management",
+    "Integration administration",
+    "Security administration",
+    "Audit administration (SoD)"
+   ],
+   "workflows": [
+    "User creation",
+    "Role assignment",
+    "Permission changes",
+    "Configuration change"
+   ],
+   "modules": [
+    "System Administration",
+    "IAM",
+    "Configuration",
+    "Integration/API Management",
+    "Audit"
+   ],
+   "scope": "Platform / tenant (technical)",
+   "reports_to": "CIO / Security Admin"
+  },
+  {
+   "n": 29,
+   "name": "Maintenance Office",
+   "level": 7,
+   "purpose": "Physical infrastructure: buildings, utilities, maintenance, housekeeping, engineering.",
+   "internal_roles": [
+    "Facilities Director",
+    "Facilities Manager",
+    "Maintenance Manager",
+    "Civil / Electrical / Mechanical Engineer",
+    "HVAC Technician",
+    "Electrician",
+    "Plumber",
+    "Carpenter",
+    "Maintenance Technician",
+    "Housekeeping Supervisor",
+    "Housekeeping Staff"
+   ],
+   "functionalities": [
+    "Maintenance ticketing",
+    "Infrastructure projects",
+    "Utilities management",
+    "Housekeeping",
+    "Asset upkeep"
+   ],
+   "workflows": [
+    "Maintenance request",
+    "Infrastructure request",
+    "Asset request"
+   ],
+   "modules": [
+    "Facilities",
+    "Asset Management",
+    "Maintenance",
+    "Procurement (link)"
+   ],
+   "scope": "Campus (facilities & maintenance)",
+   "reports_to": "Facilities Director / Campus Head"
+  },
+  {
+   "n": 30,
+   "name": "Hostel Warden Office",
+   "level": 7,
+   "purpose": "Residential operations: allocation, wardens, mess, discipline and hostel security.",
+   "internal_roles": [
+    "Hostel Director / Administrator",
+    "Chief Warden",
+    "Hostel Warden",
+    "Assistant Warden",
+    "Resident Advisor",
+    "Hostel Supervisor",
+    "Mess Manager",
+    "Hostel Security",
+    "Housekeeping"
+   ],
+   "functionalities": [
+    "Room allocation & transfer",
+    "Warden supervision",
+    "Mess management",
+    "Hostel discipline",
+    "Hostel fees (link)"
+   ],
+   "workflows": [
+    "Hostel allocation",
+    "Hostel transfer",
+    "Mess management"
+   ],
+   "modules": [
+    "Hostel",
+    "Room",
+    "Mess",
+    "Discipline (hostel)",
+    "Fees (hostel)"
+   ],
+   "scope": "Campus / Hostel",
+   "reports_to": "Hostel Director / Principal"
+  },
+  {
+   "n": 31,
+   "name": "Transport Office",
+   "level": 7,
+   "purpose": "Fleet, routes, drivers, vehicle maintenance and student/staff transport.",
+   "internal_roles": [
+    "Transport Manager",
+    "Transport Officer",
+    "Fleet Manager",
+    "Route Coordinator",
+    "Bus Supervisor",
+    "Driver",
+    "Vehicle Maintenance Staff",
+    "Transport Assistant"
+   ],
+   "functionalities": [
+    "Fleet management",
+    "Route planning & allocation",
+    "GPS monitoring",
+    "Vehicle maintenance",
+    "Transport fees (link)"
+   ],
+   "workflows": [
+    "Transport allocation",
+    "Route assignment",
+    "Vehicle maintenance"
+   ],
+   "modules": [
+    "Transport",
+    "Vehicle",
+    "Route",
+    "Fees (transport)",
+    "GPS Integration"
+   ],
+   "scope": "Campus (transport)",
+   "reports_to": "Principal / Campus Head"
+  },
+  {
+   "n": 32,
+   "name": "Purchase Office",
+   "level": 7,
+   "purpose": "Sourcing & purchasing: requisitions, POs, vendor management, contracts.",
+   "internal_roles": [
+    "Purchase Officer",
+    "Procurement Executive",
+    "Vendor Manager",
+    "Contract Manager"
+   ],
+   "functionalities": [
+    "Requisition processing",
+    "Purchase orders",
+    "Vendor management",
+    "Contract management"
+   ],
+   "workflows": [
+    "Purchase request",
+    "Purchase order",
+    "Vendor onboarding"
+   ],
+   "modules": [
+    "Procurement",
+    "Vendor Management",
+    "Contracts",
+    "Finance (link)"
+   ],
+   "scope": "Campus (procurement)",
+   "reports_to": "Admin Manager / CFO"
+  },
+  {
+   "n": 33,
+   "name": "Store / Inventory Office",
+   "level": 7,
+   "purpose": "Stores, inventory and asset custody & issuance.",
+   "internal_roles": [
+    "Store Manager",
+    "Storekeeper",
+    "Inventory Manager",
+    "Inventory Assistant"
+   ],
+   "functionalities": [
+    "Stock receipt & issue",
+    "Inventory tracking",
+    "Reorder alerts",
+    "Asset custody"
+   ],
+   "workflows": [
+    "Stock receipt",
+    "Stock issue",
+    "Asset request"
+   ],
+   "modules": [
+    "Inventory",
+    "Asset Management",
+    "Procurement (link)"
+   ],
+   "scope": "Campus (stores & inventory)",
+   "reports_to": "Admin Manager"
+  },
+  {
+   "n": 34,
+   "name": "Security Office",
+   "level": 7,
+   "purpose": "Campus safety: guarding, gate control, CCTV, emergency response, fire & safety.",
+   "internal_roles": [
+    "Chief Security Officer",
+    "Security Manager",
+    "Security Supervisor",
+    "Security Officer",
+    "Security Guard",
+    "Gate Security",
+    "CCTV Operator",
+    "Emergency Response Team",
+    "Fire & Safety Officer"
+   ],
+   "functionalities": [
+    "Guarding & gate control",
+    "CCTV monitoring",
+    "Incident management",
+    "Emergency response",
+    "Fire & safety"
+   ],
+   "workflows": [
+    "Incident reporting",
+    "Visitor management (link)",
+    "Emergency response"
+   ],
+   "modules": [
+    "Security",
+    "Visitor Management",
+    "CCTV Integration",
+    "Access Control",
+    "Incident Management"
+   ],
+   "scope": "Campus (safety & security)",
+   "reports_to": "Chief Security Officer / Campus Head"
+  },
+  {
+   "n": 35,
+   "name": "Front Office / Reception",
+   "level": 7,
+   "purpose": "Reception, visitor handling, helpdesk, telephony and campus assistance.",
+   "internal_roles": [
+    "Front Office Manager",
+    "Reception Supervisor",
+    "Receptionist",
+    "Front Desk Executive",
+    "Visitor Management Executive",
+    "Telephone Operator",
+    "Helpdesk Executive",
+    "Concierge"
+   ],
+   "functionalities": [
+    "Reception & visitor handling",
+    "Appointment scheduling",
+    "Helpdesk / query routing",
+    "Telephony & assistance"
+   ],
+   "workflows": [
+    "Visitor management",
+    "Appointment scheduling",
+    "Query routing"
+   ],
+   "modules": [
+    "Front Office",
+    "Visitor Management",
+    "Communication",
+    "Helpdesk"
+   ],
+   "scope": "Campus (front office)",
+   "reports_to": "Admin Manager / Campus Head"
+  },
+  {
+   "n": 36,
+   "name": "Student Portal",
+   "level": 8,
+   "purpose": "First-class end users consuming academic & campus services; may hold multiple concurrent sub-roles.",
+   "internal_roles": [
+    "Enrolled Student",
+    "UG / PG / Doctoral Student",
+    "International Student",
+    "Scholarship Student",
+    "Hosteller",
+    "Day Scholar",
+    "Class Representative",
+    "Student Representative",
+    "Club Member",
+    "Club Leader",
+    "Student Council Member"
+   ],
+   "functionalities": [
+    "Course registration",
+    "Attendance & timetable view",
+    "Assignments & results",
+    "Fee payment",
+    "Library / hostel / transport",
+    "Placement opportunities",
+    "Grievance raising"
+   ],
+   "workflows": [
+    "Course registration",
+    "Student leave",
+    "Fee payment",
+    "Grievance"
+   ],
+   "modules": [
+    "Student Portal",
+    "Courses",
+    "Attendance",
+    "Timetable",
+    "Results",
+    "Fees",
+    "Library",
+    "Hostel",
+    "Transport",
+    "Placement",
+    "LMS"
+   ],
+   "scope": "Own data (+ representative scope)",
+   "reports_to": "\u2014"
+  },
+  {
+   "n": 37,
+   "name": "Parent / Guardian Portal",
+   "level": 8,
+   "purpose": "Guardians with a scoped portal limited to their linked student(s)' authorized data.",
+   "internal_roles": [
+    "Parent",
+    "Primary Guardian",
+    "Secondary Guardian",
+    "Legal Guardian",
+    "Emergency Contact"
+   ],
+   "functionalities": [
+    "View child attendance & performance",
+    "Fee dues & payment",
+    "Notices & communication",
+    "Parent-initiated leave"
+   ],
+   "workflows": [
+    "Student linking",
+    "Parent-initiated leave",
+    "Fee payment"
+   ],
+   "modules": [
+    "Parent Portal",
+    "Attendance (view)",
+    "Fees",
+    "Results (view)",
+    "Notifications",
+    "Communication"
+   ],
+   "scope": "Linked student's permitted data",
+   "reports_to": "\u2014"
+  },
+  {
+   "n": 38,
+   "name": "Alumni Portal",
+   "level": 8,
+   "purpose": "Graduated members: networking, mentoring, donations and recruitment.",
+   "internal_roles": [
+    "Alumni Member",
+    "Alumni Chapter Coordinator",
+    "Alumni Mentor",
+    "Alumni Donor",
+    "Alumni Employer / Recruiter"
+   ],
+   "functionalities": [
+    "Alumni network & chapters",
+    "Mentorship",
+    "Donations",
+    "Events",
+    "Job posting (if recruiter)"
+   ],
+   "workflows": [
+    "Alumni registration",
+    "Mentorship matching",
+    "Donation"
+   ],
+   "modules": [
+    "Alumni",
+    "Placement (as recruiter)",
+    "Events",
+    "Donations",
+    "Communication"
+   ],
+   "scope": "Own profile / chapter",
+   "reports_to": "\u2014"
+  },
+  {
+   "n": 39,
+   "name": "External Auditor Portal",
+   "level": 8,
+   "purpose": "External examiners, government inspectors, accreditation & external auditors with tightly scoped, audited access.",
+   "internal_roles": [
+    "External Examiner",
+    "External Evaluator",
+    "External Academic Auditor",
+    "Government Inspector",
+    "Accreditation Auditor",
+    "Regulatory Officer",
+    "External Auditor"
+   ],
+   "functionalities": [
+    "Assigned evaluation / audit",
+    "Grade submission (external)",
+    "Compliance evidence review",
+    "Regulatory inspection"
+   ],
+   "workflows": [
+    "External evaluation",
+    "Accreditation audit",
+    "Regulatory inspection"
+   ],
+   "modules": [
+    "Examination (scoped)",
+    "Accreditation",
+    "Compliance",
+    "Audit",
+    "External Portal"
+   ],
+   "scope": "Regulated read scope",
+   "reports_to": "\u2014"
+  },
+  {
+   "n": 40,
+   "name": "Governing Body / Trustee Portal",
+   "level": 8,
+   "purpose": "Board of Governors / Trustees providing governance oversight and reserved approvals.",
+   "internal_roles": [
+    "Board Member",
+    "Trustee Member",
+    "Independent Member",
+    "Advisory Member",
+    "Secretary",
+    "Treasurer"
+   ],
+   "functionalities": [
+    "Governance oversight",
+    "Reserved approvals",
+    "Policy ratification",
+    "Financial oversight",
+    "Risk & audit review"
+   ],
+   "workflows": [
+    "Policy ratification",
+    "Reserved approval",
+    "Board review"
+   ],
+   "modules": [
+    "Governance",
+    "Management Dashboard",
+    "Reporting",
+    "Audit",
+    "Compliance"
+   ],
+   "scope": "Governance oversight (read + reserved approvals)",
+   "reports_to": "\u2014"
+  }
+ ]
+}
