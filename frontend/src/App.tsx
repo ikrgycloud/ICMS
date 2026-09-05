@@ -115,22 +115,22 @@ const PRINCIPAL_NAV = [
 // teaching workspace described by the Professor Office information layout.
 // A link is only interactive when its backing module is authorised.
 const FACULTY_NAV = [
-  ['Workspace', 'Overview', 'overview'], ['Workspace', 'My Schedule', 'my_schedule'], ['Workspace', 'Messages', 'messages'], ['Workspace', 'Announcements', 'announcements'],
+  ['Workspace', 'Overview', 'overview'], ['Workspace', 'My Schedule', 'my_schedule'], ['Workspace', 'Messages', 'messages'],
   ['Teaching & Academics', 'My Sections', 'academics'], ['Teaching & Academics', 'Attendance', 'attendance'], ['Teaching & Academics', 'Assignments', 'assignments'],
-  ['Teaching & Academics', 'Assessments', 'assessments'], ['Teaching & Academics', 'Marks Entry', 'marks_entry'], ['Teaching & Academics', 'Examinations', 'examinations'],
-  ['Teaching & Academics', 'Course Materials', 'course_materials'], ['Teaching & Academics', 'My Students', 'students'], ['Teaching & Academics', 'Mentoring', 'mentoring'], ['Teaching & Academics', 'Research & Publications', 'research'],
-  ['Teaching & Academics', 'Projects & Guidance', 'research'], ['Teaching & Academics', 'Academic Calendar', 'academic_calendar'],
-  ['Administration', 'Leave Requests', 'leave'], ['Administration', 'Payroll', 'payroll'], ['Administration', 'My Requests & Approvals', 'workflows'],
-  ['Reference', 'Directory', 'directory'], ['Reference', 'Digital ID', 'digital_id'],
+  ['Teaching & Academics', 'Assessments & Marks', 'assessments'], ['Teaching & Academics', 'Marks', 'marks_entry'], ['Teaching & Academics', 'Examinations', 'examinations'],
+  ['Teaching & Academics', 'Course Materials', 'course_materials'], ['Teaching & Academics', 'Mentoring & Advisees', 'mentoring'], ['Teaching & Academics', 'Research & Guidance', 'research'],
+  ['Communication', 'Announcements', 'announcements'],
+  ['Self Service', 'My Profile', 'directory'], ['Self Service', 'Digital ID', 'digital_id'], ['Self Service', 'Leave & Requests', 'leave'], ['Self Service', 'Payroll', 'payroll'],
+  ['Workflow', 'My Requests', 'workflows'],
 ] as const
 
 const FACULTY_ACTIVE_LABEL: Record<string, string> = {
-  overview: 'Overview', my_schedule: 'My Schedule', workflows: 'My Requests & Approvals',
+  overview: 'Overview', my_schedule: 'My Schedule', workflows: 'My Requests',
   academics: 'My Sections', attendance: 'Attendance', examinations: 'Assessments & Marks',
-  assignments: 'Assignments', assessments: 'Assessments', marks_entry: 'Marks Entry',
-  course_materials: 'Course Materials', mentoring: 'Mentoring', leave: 'Leave Requests',
+  assignments: 'Assignments', assessments: 'Assessments & Marks', marks_entry: 'Marks',
+  course_materials: 'Course Materials', mentoring: 'Mentoring & Advisees', leave: 'Leave & Requests',
   payroll: 'Payroll', digital_id: 'Digital ID', messages: 'Messages', announcements: 'Announcements',
-  research: 'Research & Publications', academic_calendar: 'Academic Calendar', directory: 'Directory',
+  research: 'Research & Guidance', academic_calendar: 'Academic Calendar', directory: 'My Profile',
 }
 
 const COORDINATOR_NAV = [
@@ -220,7 +220,10 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     // Faculty & Staff is a Principal-specific presentation of the authorised
     // HR module.  It has its own route so that the list/profile experience is
     // retained when opened from the dashboard KPI or the Principal sidebar.
-    const virtualModule = ([3, 4].includes(user?.office_n) && PRINCIPAL_NAV.some(([, , key]) => key === view)) || view.startsWith('director_') || view.startsWith('manager_') || view.startsWith('coordinator_')
+    const virtualModule = ([3, 4].includes(user?.office_n) && PRINCIPAL_NAV.some(([, , key]) => key === view))
+      || (user?.persona === 'faculty' && FACULTY_NAV.some(([, , key]) => key === view))
+      || (user?.persona === 'student' && ['assignments', 'course_materials'].includes(view))
+      || view.startsWith('director_') || view.startsWith('manager_') || view.startsWith('coordinator_')
     // Finance is a student self-service destination even though students do
     // not receive the staff Finance workspace capability from the backend.
     if (!virtualModule && !(user?.persona === 'student' && view === 'finance') && !ws.modules.some((module: any) => module.key === view)) {
@@ -315,7 +318,9 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   }, {})
   const facultyGroups = FACULTY_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
     const source = displayModules.find((module: any) => module.key === key)
-    ;(out[group] = out[group] || []).push({ key, label, group, source, enabled: Boolean(source) })
+    // Professor workspace pages have their own role-specific screens.  They
+    // remain available even when no generic module card is returned.
+    ;(out[group] = out[group] || []).push({ key, label, group, source, enabled: true })
     return out
   }, {})
   const directorGroups = DIRECTOR_ADMISSIONS_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
