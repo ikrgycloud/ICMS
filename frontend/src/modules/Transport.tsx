@@ -24,6 +24,13 @@ export default function Transport({ caps }: { caps: any }) {
           </table>
         </div>
       </div>
+      <div className="card" style={{ marginTop: 20 }}>
+        <div className="card-h"><h3>Pending transport requests</h3></div>
+        <div className="tbl-scroll"><table className="tbl"><thead><tr><th>Student</th><th>Preferred pickup point</th><th>Status</th></tr></thead><tbody>
+          {(data.requests || []).map((request: any) => <tr key={request.id}><td><b>{request.student}</b></td><td>{request.pickup_point || 'Not provided'}</td><td><span className={`pill s-${request.status}`}>{request.status}</span></td></tr>)}
+          {!(data.requests || []).length && <tr><td colSpan={3}><div className="empty">No pending transport requests</div></td></tr>}
+        </tbody></table></div>
+      </div>
     </div>
   )
 }

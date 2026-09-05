@@ -12,10 +12,12 @@ const DAY_OPTIONS = [
 ]
 
 export default function Academics({ caps }: { caps: any }) {
-  const [tab, setTab] = useState<'sections' | 'courses'>('sections')
+  const [tab, setTab] = useState<'programmes' | 'sections' | 'courses'>('programmes')
   const [sections, setSections] = useState<any>(null)
   const [courses, setCourses] = useState<any>(null)
+  const [programmes, setProgrammes] = useState<any>(null)
   const [showAdd, setShowAdd] = useState(false)
+  const [showProgrammeAdd, setShowProgrammeAdd] = useState(false)
   const [showTimetable, setShowTimetable] = useState(false)
   const [showAnnouncement, setShowAnnouncement] = useState(false)
   const [decision, setDecision] = useState<any>(null)
@@ -23,6 +25,7 @@ export default function Academics({ caps }: { caps: any }) {
   const [timetable, setTimetable] = useState<any>({ entries: [] })
   const [editingEntry, setEditingEntry] = useState<any>(null)
   const [form, setForm] = useState({ course_id: '', section_code: 'B', room: 'LH-5', schedule: 'Mon/Wed 10:00' })
+  const [programmeForm, setProgrammeForm] = useState({ department_id: '', code: '', name: '', level: 'UG', duration_years: 4 })
   const [timetableForm, setTimetableForm] = useState({
     day_of_week: 0,
     start_time: '09:00',
@@ -42,6 +45,7 @@ export default function Academics({ caps }: { caps: any }) {
   function load() {
     api.sections().then(setSections).catch(() => {})
     api.courses().then(setCourses).catch(() => {})
+    api.academicProgrammes().then(setProgrammes).catch(() => {})
   }
 
   useEffect(() => {
@@ -53,6 +57,22 @@ export default function Academics({ caps }: { caps: any }) {
       const response = await api.createSection(form)
       setDecision(response.decision)
       setShowAdd(false)
+      load()
+    } catch (error: any) {
+      setDecision({ outcome: 'DENY', reason: error.message })
+    }
+  }
+
+  async function submitProgramme() {
+    if (!programmeForm.department_id || !programmeForm.code.trim() || !programmeForm.name.trim()) {
+      setDecision({ outcome: 'DENY', reason: 'Choose a department and enter the programme code and name.' })
+      return
+    }
+    try {
+      const response = await api.createAcademicProgramme(programmeForm)
+      setDecision(response.decision)
+      setShowProgrammeAdd(false)
+      setProgrammeForm({ department_id: '', code: '', name: '', level: 'UG', duration_years: 4 })
       load()
     } catch (error: any) {
       setDecision({ outcome: 'DENY', reason: error.message })
@@ -131,20 +151,23 @@ export default function Academics({ caps }: { caps: any }) {
     }
   }
 
-  if (!sections || !courses) return <Spinner />
+  if (!sections || !courses || !programmes) return <Spinner />
 
   return (
     <div className="fade-in">
       <PageHead
         title="Academics"
         sub="Course catalog, sections, timetable management, and targeted student notices"
-        right={<GatedBtn can={!!caps.create_section} onClick={() => { setForm({ ...form, course_id: courses.courses[0]?.id || '' }); setShowAdd(true) }}>+ Create section</GatedBtn>}
+        right={tab === 'programmes' ? <GatedBtn can={!!caps.create_program} onClick={() => { setProgrammeForm({ ...programmeForm, department_id: programmes.departments[0]?.id || '' }); setShowProgrammeAdd(true) }}>+ Create programme</GatedBtn> : <GatedBtn can={!!caps.create_section} onClick={() => { setForm({ ...form, course_id: courses.courses[0]?.id || '' }); setShowAdd(true) }}>+ Create section</GatedBtn>}
       />
 
       <div className="tabs">
+        <button className={`tab ${tab === 'programmes' ? 'on' : ''}`} onClick={() => setTab('programmes')} type="button">Programmes ({programmes.programmes.length})</button>
         <button className={`tab ${tab === 'sections' ? 'on' : ''}`} onClick={() => setTab('sections')} type="button">Sections ({sections.sections.length})</button>
         <button className={`tab ${tab === 'courses' ? 'on' : ''}`} onClick={() => setTab('courses')} type="button">Course catalog ({courses.courses.length})</button>
       </div>
+
+      {tab === 'programmes' && <div className="card"><div className="card-pad"><p className="hint">Create the programme master here, then the Admissions Office can add it to an admission cycle.</p></div><div className="tbl-scroll"><table className="tbl"><thead><tr><th>Code</th><th>Programme</th><th>Department</th><th>Level</th><th>Duration</th></tr></thead><tbody>{programmes.programmes.map((programme: any) => <tr key={programme.id}><td className="mono"><b>{programme.code}</b></td><td>{programme.name}</td><td>{programme.department}</td><td>{programme.level}</td><td>{programme.duration_years} years</td></tr>)}</tbody></table></div></div>}
 
       {tab === 'sections' && (
         <div className="card">
@@ -213,6 +236,8 @@ export default function Academics({ caps }: { caps: any }) {
           <div className="form-row"><label>Schedule</label><input className="inp" value={form.schedule} onChange={e => setForm({ ...form, schedule: e.target.value })} /></div>
         </Modal>
       )}
+
+      {showProgrammeAdd && <Modal title="Create academic programme" onClose={() => setShowProgrammeAdd(false)} footer={<><button className="btn btn-out" onClick={() => setShowProgrammeAdd(false)} type="button">Cancel</button><button className="btn btn-brass" onClick={submitProgramme} type="button">Create programme</button></>}><div className="form-row"><label>Department</label><select className="select" value={programmeForm.department_id} onChange={e => setProgrammeForm({ ...programmeForm, department_id: e.target.value })}><option value="">Choose department</option>{programmes.departments.map((department: any) => <option key={department.id} value={department.id}>{department.code} - {department.name}</option>)}</select></div><div className="grid-2"><div className="form-row"><label>Programme code</label><input className="inp" value={programmeForm.code} onChange={e => setProgrammeForm({ ...programmeForm, code: e.target.value.toUpperCase() })} placeholder="BTECH-AI" /></div><div className="form-row"><label>Level</label><select className="select" value={programmeForm.level} onChange={e => setProgrammeForm({ ...programmeForm, level: e.target.value })}>{['UG', 'PG', 'DIPLOMA', 'PHD', 'CERTIFICATE'].map(level => <option key={level}>{level}</option>)}</select></div></div><div className="grid-2"><div className="form-row"><label>Programme name</label><input className="inp" value={programmeForm.name} onChange={e => setProgrammeForm({ ...programmeForm, name: e.target.value })} placeholder="B.Tech Artificial Intelligence" /></div><div className="form-row"><label>Duration in years</label><input className="inp" type="number" min="1" max="10" value={programmeForm.duration_years} onChange={e => setProgrammeForm({ ...programmeForm, duration_years: Number(e.target.value) })} /></div></div></Modal>}
 
       {showTimetable && (
         <Modal

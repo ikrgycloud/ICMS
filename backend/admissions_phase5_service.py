@@ -1,6 +1,10 @@
 """Phase 5 applicant finance, final approval, and atomic conversion services."""
 from datetime import datetime, timedelta
+from email.message import EmailMessage
 import json
+import os
+import secrets
+import smtplib
 
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
@@ -9,9 +13,38 @@ import domain_models as D
 from admissions_service import transition_application
 from core import uid, write_audit
 from models import Approval, Notification, Person, Role, User, UserRole, WorkflowInstance
+from authority import pwhash
 
 
 ACTIVE_ALLOCATIONS = {"RESERVED", "ALLOCATED"}
+
+
+def _send_student_credentials(email, name, student_id, username, temporary_password, programme,
+                              campus, section, fee_summary, hostel_requested, transport_requested):
+    """Deliver credentials only when the institution has configured SMTP."""
+    host = os.getenv("SMTP_HOST", "").strip()
+    if not host or not email:
+        return False, "SMTP is not configured"
+    message = EmailMessage()
+    message["From"] = os.getenv("SMTP_FROM", "admissions@example.edu")
+    message["To"] = email
+    message["Subject"] = "ICMS student account activation"
+    message.set_content(
+        f"Hello {name},\n\nYour admission is complete.\n\n"
+        f"Student ID / Roll number: {student_id}\nUsername: {username}\nTemporary password: {temporary_password}\n\n"
+        f"Programme: {programme}\nCampus: {campus}\nAcademic section: {section}\n\n"
+        f"Admission fee summary: {fee_summary}\n"
+        f"Hostel request: {'Sent to Hostel Department' if hostel_requested else 'Not requested'}\n"
+        f"Transport request: {'Sent to Transport Department' if transport_requested else 'Not requested'}\n\n"
+        "Please sign in and change your password immediately. Keep these credentials private."
+    )
+    with smtplib.SMTP(host, int(os.getenv("SMTP_PORT", "587")), timeout=10) as smtp:
+        if os.getenv("SMTP_TLS", "true").lower() == "true":
+            smtp.starttls()
+        if os.getenv("SMTP_USERNAME"):
+            smtp.login(os.getenv("SMTP_USERNAME"), os.getenv("SMTP_PASSWORD", ""))
+        smtp.send_message(message)
+    return True, "Credential email delivered"
 
 
 def _app(session, ctx, application_id, statuses=None, expected_version=None, lock=False):
@@ -244,7 +277,9 @@ def convert_to_student(session,ctx,application_id,expected_version):
         prefix=f"{(cycle.academic_year if cycle else str(datetime.utcnow().year))[-2:]}{(program.code if program else 'STU').replace('-','')[:6]}"
         roll=f"{prefix}{app.id.upper()[-8:]}"
         person=Person(id=uid(),tenant_id=app.tenant_id,name=app.applicant_name,email=app.email,contact=app.phone or "");session.add(person)
-        user=User(id=uid(),tenant_id=app.tenant_id,person_id=person.id,username=f"student-{app.application_no or app.id}",password_hash="pending_activation",office_n=36,role="Student",scope_level="individual",scope_ref="")
+        username = f"student-{app.application_no or app.id}"
+        temporary_password = secrets.token_urlsafe(10)
+        user=User(id=uid(),tenant_id=app.tenant_id,person_id=person.id,username=username,password_hash=pwhash(temporary_password),office_n=36,role="Student",scope_level="individual",scope_ref="")
         session.add(user);session.flush()
         role=session.query(Role).filter_by(tenant_id=app.tenant_id,office_n=36).first()
         if not role: role=Role(id=uid(),tenant_id=app.tenant_id,office_n=36,name="Student",category="individual");session.add(role);session.flush()
@@ -254,6 +289,16 @@ def convert_to_student(session,ctx,application_id,expected_version):
         if not section:
             raise HTTPException(409,"An academic section is required before student conversion")
         session.add(D.Enrollment(id=uid(),tenant_id=app.tenant_id,student_id=student.id,section_id=section.id,status="enrolled"))
+        profile = json.loads(app.profile_json or "{}")
+        joining = profile.get("joining_preferences", {})
+        hostel_requested = bool(joining.get("hostel_required"))
+        transport_requested = bool(joining.get("transport_required"))
+        if hostel_requested and not session.query(D.HostelAllocation).filter_by(student_id=student.id).first():
+            session.add(D.HostelAllocation(id=uid(), tenant_id=app.tenant_id, room_id=None,
+                        student_id=student.id, student_name=student.name, status="requested"))
+        if transport_requested and not session.query(D.TransportRequest).filter_by(student_id=student.id).first():
+            session.add(D.TransportRequest(id=uid(), tenant_id=app.tenant_id, student_id=student.id,
+                        student_name=student.name, pickup_point=str(joining.get("pickup_point") or ""), status="requested"))
         for link in session.query(D.ApplicationGuardian).filter_by(application_id=app.id).all(): session.add(D.StudentGuardian(id=uid(),tenant_id=app.tenant_id,student_id=student.id,guardian_id=link.guardian_id,relationship=link.relationship,is_primary=link.is_primary))
         for invoice in session.query(D.FeeInvoice).filter_by(application_id=app.id).all(): invoice.student_id=student.id
         allocation=session.query(D.AdmissionSeatAllocation).filter(D.AdmissionSeatAllocation.application_id==app.id,D.AdmissionSeatAllocation.status.in_(ACTIVE_ALLOCATIONS)).first()
@@ -262,7 +307,32 @@ def convert_to_student(session,ctx,application_id,expected_version):
         app=transition_application(session,ctx,app.id,"enroll",app.status_version,"Atomically converted to student",skip_capability=True,commit=False)
         session.add(Notification(id=uid(),tenant_id=app.tenant_id,user_id=user.id,severity="info",title="Enrollment confirmed",body=f"Your student identifier is {roll}"))
         write_audit(session,ctx["sub"],ctx["sub"],ctx["office_n"],"admission.convert",f"application:{app.id}","READY_TO_ADMIT","ENROLLED",roll,commit=False)
-        session.commit(); return conversion,student
+        session.commit()
+        invoice = session.query(D.FeeInvoice).filter_by(application_id=app.id, invoice_type="admission_fee").first()
+        fee_components = session.query(D.ApplicantFeeAssignment).filter_by(application_id=app.id).all()
+        component_summary = "; ".join(
+            f"{item.component_name}: Rs. {float(item.amount or 0) - float(item.waived_amount or 0):,.2f}"
+            for item in fee_components
+        )
+        if invoice:
+            fee_summary = (
+                f"Invoice {invoice.challan_no or invoice.id}: Rs. {float(invoice.amount or 0):,.2f} paid; "
+                f"balance Rs. {max(0, float(invoice.amount or 0) - float(invoice.paid or 0)):,.2f}. "
+                f"Components: {component_summary or 'Not itemized'}"
+            )
+        else:
+            fee_summary = "No admission fee invoice is linked to this enrollment."
+        try:
+            delivered, delivery_note = _send_student_credentials(
+                app.email, app.applicant_name, roll, username, temporary_password,
+                program.name if program else app.program_name, app.campus, section.name,
+                fee_summary, hostel_requested, transport_requested,
+            )
+        except Exception as exc:
+            delivered, delivery_note = False, f"Credential email failed: {exc}"
+        write_audit(session, ctx["sub"], ctx["sub"], ctx["office_n"], "admission.credentials.email",
+                    f"application:{app.id}", "", "DELIVERED" if delivered else "PENDING", delivery_note)
+        return conversion,student
     except IntegrityError:
         session.rollback()
         existing=session.query(D.AdmissionConversion).filter_by(application_id=application_id,status="completed").first()

@@ -74,7 +74,7 @@ def applicant_context(application, token):
 
 
 def assert_editable(application):
-    if application.current_status != "DRAFT":
+    if application.current_status not in {"DRAFT", "CORRECTION_REQUIRED"}:
         raise HTTPException(409, "Submitted applications are read-only until a future correction workflow reopens them")
 
 
@@ -123,8 +123,9 @@ def submit_application(session, application, token, expected_version):
     assert_version(application, expected_version)
     validate_submission(session, application)
     application.submitted_at = now_utc()
+    action = "resubmit" if application.current_status == "CORRECTION_REQUIRED" else "submit"
     result = transition_application(session, applicant_context(application, token), application.id,
-                                    "submit", expected_version, "Applicant submitted application",
+                                    action, expected_version, "Applicant submitted application",
                                     skip_capability=True)
     return result
 
@@ -139,10 +140,12 @@ def application_payload(session, application):
                .order_by(D.ApplicationStatusHistory.created_at).all())
     completeness = document_completeness(session, application)
     return {"id": application.id, "application_no": application.application_no,
-            "applicant_name": application.applicant_name, "email": application.email, "phone": application.phone,
+            "applicant_name": application.applicant_name, "name": application.applicant_name,
+            "email": application.email, "phone": application.phone,
             "date_of_birth": application.date_of_birth.isoformat() if application.date_of_birth else None,
             "gender": application.gender, "profile": json.loads(application.profile_json or "{}"),
             "cycle": {"id": cycle.id, "name": cycle.name, "academic_year": cycle.academic_year} if cycle else None,
+            "program_id": application.selected_program_id, "program": application.program_name,
             "campus": application.campus, "current_status": application.current_status,
             "status": application.status, "status_version": application.status_version,
             "submitted_at": application.submitted_at.isoformat() if application.submitted_at else None,

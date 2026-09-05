@@ -1349,6 +1349,45 @@ def add_student(body: StudentIn, ctx=Depends(auth), s=Depends(db)):
 # --------------------------------------------------------------------------- #
 #  ACADEMICS: courses & sections
 # --------------------------------------------------------------------------- #
+class ProgramIn(BaseModel):
+    department_id: str
+    code: str
+    name: str
+    level: str = "UG"
+    duration_years: int = Field(ge=1, le=10)
+
+
+@router.get("/academics/programmes")
+def list_programmes(ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "academics", "view")[0])
+    departments = {row.id: row for row in s.query(D.Department).filter_by(tenant_id=ctx["tenant_id"]).all()}
+    programmes = s.query(D.Program).filter_by(tenant_id=ctx["tenant_id"]).order_by(D.Program.name).all()
+    return {"programmes": [{"id": row.id, "code": row.code, "name": row.name, "level": row.level,
+             "duration_years": row.duration_years, "department_id": row.dept_id,
+             "department": departments[row.dept_id].name if row.dept_id in departments else ""} for row in programmes],
+            "departments": [{"id": row.id, "code": row.code, "name": row.name} for row in departments.values()]}
+
+
+@router.post("/academics/programmes")
+def create_programme(body: ProgramIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "academics", "create_program")
+    require(dec)
+    code, name, level = body.code.strip().upper(), body.name.strip(), body.level.strip().upper()
+    if not code or not name or level not in {"UG", "PG", "DIPLOMA", "PHD", "CERTIFICATE"}:
+        raise HTTPException(422, "Programme code, name, and a valid level are required")
+    department = s.get(D.Department, body.department_id)
+    if not department or department.tenant_id != ctx["tenant_id"]:
+        raise HTTPException(404, "Department not found")
+    if s.query(D.Program).filter(D.Program.tenant_id == ctx["tenant_id"], D.Program.code == code).first():
+        raise HTTPException(409, "A programme with this code already exists")
+    row = D.Program(id=uid(), tenant_id=ctx["tenant_id"], dept_id=department.id, code=code, name=name,
+                    level=level, duration_years=body.duration_years)
+    s.add(row); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academics.programme.create",
+                f"programme:{row.id}", "", "active", f"{row.code} - {row.name}")
+    return {"id": row.id, "decision": {"outcome": "ALLOW", "reason": "Programme created successfully"}}
+
+
 @router.get("/academics/courses")
 def list_courses(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view")[0])
@@ -3421,7 +3460,11 @@ def transport(ctx=Depends(auth), s=Depends(db)):
     return {"routes": [{"id": r.id, "name": r.name, "stops": r.stops,
                         "vehicle": r.vehicle_no, "seats": r.seats,
                         "taken": r.seats_taken, "free": r.seats - r.seats_taken}
-                       for r in rows]}
+                       for r in rows],
+            "requests": [{"id": request.id, "student": request.student_name,
+                          "pickup_point": request.pickup_point, "status": request.status}
+                         for request in s.query(D.TransportRequest)
+                         .filter(D.TransportRequest.status == "requested").all()]}
 
 
 # --------------------------------------------------------------------------- #

@@ -123,7 +123,7 @@ MODULE_ACTIONS = {
     "academics":    {"view": "view", "create_section": "create", "create_course": "create", "edit": "edit",
                      "assign_faculty": "assign"},
 
-    "academics":    {"view": "view", "create_section": "create", "edit": "edit",
+    "academics":    {"view": "view", "create_program": "create", "create_course": "create", "create_section": "create", "edit": "edit",
                      "assign_faculty": "assign", "manage_timetable": "edit",
                      "create_task": "create", "edit_task": "edit",
                      "publish_task": "publish", "close_task": "edit",
@@ -185,6 +185,7 @@ ACTION_OFFICE_ALLOW = {
     ("students", "add"): {15},                        # Admissions owns student creation
     ("students", "edit"): {10, 15},                   # HOD and Admissions maintain records
     ("academics", "create_section"): {6, 10, 17},     # Dean Acad, HOD, Acad Coordinator
+    ("academics", "create_program"): {6, 10, 17},     # Academic programme master owners
     ("academics", "create_course"): {6, 10, 17},      # Curriculum owners
     ("academics", "assign_faculty"): {6, 10, 17},
     ("academics", "manage_timetable"): {6, 10, 17},

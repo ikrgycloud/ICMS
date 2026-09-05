@@ -30,7 +30,14 @@ async function req(path: string, opts: RequestInit = {}) {
           const message = item.msg || item.message || JSON.stringify(item)
           return field ? `${field}: ${message}` : message
         }).join(', ')
-      : data.detail
+      : data.detail && typeof data.detail === 'object'
+        ? (() => {
+            const error = data.detail as { message?: unknown; msg?: unknown; missing?: unknown }
+            const message = typeof error.message === 'string' ? error.message : typeof error.msg === 'string' ? error.msg : ''
+            const missing = Array.isArray(error.missing) ? error.missing.filter((item): item is string => typeof item === 'string').join(', ') : ''
+            return message ? (missing ? `${message}: ${missing}` : message) : JSON.stringify(data.detail)
+          })()
+        : data.detail
     throw new Error(detail || `Request failed (${res.status})`)
   }
   return data
@@ -192,6 +199,8 @@ export const api = {
   addStudent: (b: any) => req('/students', { method: 'POST', body: JSON.stringify(b) }),
 
   // ---- academics ----
+  academicProgrammes: () => req('/academics/programmes'),
+  createAcademicProgramme: (body: any) => req('/academics/programmes', { method: 'POST', body: JSON.stringify(body) }),
   courses: () => req('/academics/courses'),
   createCourse: (b: any) => req('/academics/courses', { method: 'POST', body: JSON.stringify(b) }),
   sections: () => req('/academics/sections'),
@@ -232,6 +241,36 @@ export const api = {
   applications: () => req('/admissions'),
   decideApplication: (application_id: string, action: string) =>
     req('/admissions/decide', { method: 'POST', body: JSON.stringify({ application_id, action }) }),
+  admissionAction: (id: string, action: string, expected_status_version: number, reason = '') =>
+    req(`/admissions/${id}/actions`, { method: 'POST', body: JSON.stringify({ action, expected_status_version, reason }) }),
+  admissionCorrections: () => req('/admissions/corrections'),
+  openAdmissionDocument: async (applicationId: string, documentId: string) => {
+    const viewer = window.open('', '_blank')
+    if (!viewer) throw new Error('Allow pop-ups to view the document.')
+    const headers: Record<string, string> = {}
+    const t = tok()
+    if (t) headers.Authorization = `Bearer ${t}`
+    const res = await fetch(`${BASE}/admissions/${applicationId}/documents/${documentId}/content`, { headers })
+    if (!res.ok) {
+      viewer.close()
+      const data = await res.json().catch(() => ({}))
+      throw new Error(data.detail || 'Could not open the document.')
+    }
+    const url = URL.createObjectURL(await res.blob())
+    viewer.location.href = url
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  },
+  fetchAdmissionDocument: async (applicationId: string, documentId: string) => {
+    const headers: Record<string, string> = {}
+    const t = tok()
+    if (t) headers.Authorization = `Bearer ${t}`
+    const res = await fetch(`${BASE}/admissions/${applicationId}/documents/${documentId}/content`, { headers })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error(data.detail || 'Could not load the document.')
+    }
+    return { url: URL.createObjectURL(await res.blob()), mimeType: res.headers.get('content-type') || '' }
+  },
   admissionCycles: () => req('/admissions/cycles'),
   admissionProgrammes: () => req('/admissions/programmes'),
   admissionProgramIntake: () => req('/admissions/program-intake'),
@@ -248,8 +287,11 @@ export const api = {
   bindAdmissionProgram: (cycleId: string, body: any) => req(`/admissions/cycles/${cycleId}/programs`, { method: 'POST', body: JSON.stringify(body) }),
   openAdmissionPrograms: () => req('/admissions/open-programs'),
   startApplicantApplication: (body: any) => req('/admissions/applicant/start', { method: 'POST', body: JSON.stringify(body) }),
+  applicantSession: () => req('/admissions/applicant/session', { method: 'POST' }),
+  recoverApplicantAccess: (body: any) => req('/admissions/applicant/access', { method: 'POST', body: JSON.stringify(body) }),
   applicantApplication: (id: string, token: string) => req(`/admissions/applicant/${id}`, { headers: { 'X-Applicant-Access-Token': token } }),
   saveApplicantProfile: (id: string, token: string, body: any) => req(`/admissions/applicant/${id}/profile`, { method: 'PUT', headers: { 'X-Applicant-Access-Token': token }, body: JSON.stringify(body) }),
+  saveApplicantJoiningPreferences: (id: string, token: string, body: any) => req(`/admissions/applicant/${id}/joining-preferences`, { method: 'PUT', headers: { 'X-Applicant-Access-Token': token }, body: JSON.stringify(body) }),
   applicantRequirements: (id: string, token: string) => req(`/admissions/applicant/${id}/document-requirements`, { headers: { 'X-Applicant-Access-Token': token } }),
   addApplicantPreference: (id: string, token: string, body: any) => req(`/admissions/applicant/${id}/preferences`, { method: 'POST', headers: { 'X-Applicant-Access-Token': token }, body: JSON.stringify(body) }),
   reorderApplicantPreferences: (id: string, token: string, body: any) => req(`/admissions/applicant/${id}/preferences/order`, { method: 'PUT', headers: { 'X-Applicant-Access-Token': token }, body: JSON.stringify(body) }),
@@ -286,6 +328,11 @@ export const api = {
   admissionOffers: (status = '') => req(`/admissions/offers?status=${status}`),
   resolveAdmissionFees: (id: string, expected_status_version: number, fee_structure_id?: string) => req(`/admissions/${id}/fees/resolve`, { method: 'POST', body: JSON.stringify({ expected_status_version, fee_structure_id }) }),
   issueAdmissionInvoice: (id: string, expected_status_version: number) => req(`/admissions/${id}/invoice`, { method: 'POST', body: JSON.stringify({ expected_status_version }) }),
+  recordAdmissionPayment: (id: string, body: any) => req(`/admissions/${id}/payments`, { method: 'POST', body: JSON.stringify(body) }),
+  verifyAdmissionPayment: (id: string, paymentId: string, body: any) => req(`/admissions/${id}/payments/${paymentId}/verify`, { method: 'POST', body: JSON.stringify(body) }),
+  clearAdmissionFinance: (id: string, expected_status_version: number) => req(`/admissions/${id}/finance/clear`, { method: 'POST', body: JSON.stringify({ expected_status_version }) }),
+  requestAdmissionFinalApproval: (id: string, expected_status_version: number) => req(`/admissions/${id}/final-approval`, { method: 'POST', body: JSON.stringify({ expected_status_version }) }),
+  completeAdmissionFinalApproval: (id: string, expected_status_version: number) => req(`/admissions/${id}/final-approval/complete`, { method: 'POST', body: JSON.stringify({ expected_status_version }) }),
   admissionChecklist: (id: string) => req(`/admissions/${id}/ready-to-admit`),
   convertAdmission: (id: string, expected_status_version: number) => req(`/admissions/${id}/convert`, { method: 'POST', body: JSON.stringify({ expected_status_version }) }),
 

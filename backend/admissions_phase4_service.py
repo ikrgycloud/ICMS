@@ -31,8 +31,12 @@ def advance_eligible(session, ctx, application_id, expected_version):
     app = session.get(D.Application, application_id)
     if not app: raise HTTPException(404, "Application not found")
     _scope(session, app, ctx)
-    if app.current_status != "ELIGIBLE": raise HTTPException(409, "Application is not eligible")
     settings = _settings(session, app)
+    if app.current_status == "ASSESSMENT_QUALIFIED":
+        if settings.get("counselling_required"):
+            return transition_application(session, ctx, app.id, "start_counselling", expected_version, "Counselling required after the qualified assessment")
+        return transition_application(session, ctx, app.id, "start_allocation", expected_version, "Assessment qualified; ready for seat allocation")
+    if app.current_status != "ELIGIBLE": raise HTTPException(409, "Application must be eligible or assessment-qualified to advance")
     if settings.get("entrance_required"):
         return transition_application(session, ctx, app.id, "start_assessment", expected_version, "Assessment required by programme policy")
     if settings.get("counselling_required"):
@@ -113,10 +117,10 @@ def allocate(session, ctx, application_id, seat_pool_id, expected_version, round
     if used >= pool.capacity or claimed != 1:
         position = (session.query(func.max(D.AdmissionSeatAllocation.waitlist_position)).filter_by(seat_pool_id=pool.id, status="WAITLISTED").scalar() or 0) + 1
         allocation = D.AdmissionSeatAllocation(id=uid(), tenant_id=app.tenant_id, application_id=app.id, seat_pool_id=pool.id, round_no=round_no, status="WAITLISTED", merit_rank=merit.rank if merit else None, waitlist_position=position)
-        session.add(allocation); session.commit(); app = transition_application(session, ctx, app.id, "waitlist", app.status_version, f"No seat available; waitlist position {position}")
+        session.add(allocation); session.flush(); app = transition_application(session, ctx, app.id, "waitlist", app.status_version, f"No seat available; waitlist position {position}")
     else:
         allocation = D.AdmissionSeatAllocation(id=uid(), tenant_id=app.tenant_id, application_id=app.id, seat_pool_id=pool.id, round_no=round_no, status="RESERVED", merit_rank=merit.rank if merit else None)
-        session.add(allocation); session.commit(); app = transition_application(session, ctx, app.id, "allocate", app.status_version, "Seat reserved")
+        session.add(allocation); session.flush(); app = transition_application(session, ctx, app.id, "allocate", app.status_version, "Seat reserved")
     write_audit(session, ctx["sub"], ctx["sub"], ctx["office_n"], "admission.allocate", f"application:{app.id}", "", allocation.status, allocation.id)
     return app, allocation
 
@@ -164,12 +168,41 @@ def recommend_offer(session, ctx, application_id, expected_version):
     _scope(session, app, ctx)
     allocation = session.query(D.AdmissionSeatAllocation).filter(D.AdmissionSeatAllocation.application_id == app.id, D.AdmissionSeatAllocation.status.in_(ACTIVE_ALLOCATION_STATUSES)).first()
     if not allocation: raise HTTPException(409, "A valid allocation is required")
-    app = transition_application(session, ctx, app.id, "recommend_offer", expected_version, "Offer recommended")
-    user = session.get(User, ctx["sub"]); person = session.get(Person, user.person_id) if user else None
-    wf = WorkflowInstance(id=uid(), tenant_id=app.tenant_id, process_key="student_admission", label="Student admission", office_n=15, title=f"Offer {app.application_no}", state="submitted", initiator_id=ctx["sub"], initiator_name=person.name if person else ctx["sub"], current_stage=1, scope_level=ctx.get("scope_level", "campus"))
-    session.add(wf); session.add(D.AdmissionWorkflowLink(id=uid(), tenant_id=app.tenant_id, application_id=app.id, workflow_id=wf.id, purpose="admission_offer", status="active")); session.commit()
-    app = transition_application(session, ctx, app.id, "approve_offer", app.status_version, "Offer workflow submitted for approval")
-    return app, wf
+    if app.status_version != expected_version:
+        raise HTTPException(409, "Application changed; reload before performing this action")
+
+    if app.current_status not in {"ALLOCATED", "OFFER_RECOMMENDATION_PENDING", "OFFER_APPROVAL_PENDING"}:
+        raise HTTPException(409, "Direct offer issue is only available after seat allocation")
+
+    try:
+        # Institution policy: the Admissions Office sends offers directly after
+        # allocation. Retain the canonical states, but do not create an approval workflow.
+        if app.current_status == "ALLOCATED":
+            app = transition_application(session, ctx, app.id, "recommend_offer", app.status_version,
+                                         "Offer prepared for direct issue", skip_capability=True, commit=False)
+        if app.current_status == "OFFER_RECOMMENDATION_PENDING":
+            app = transition_application(session, ctx, app.id, "approve_offer", app.status_version,
+                                         "Approval bypassed by direct-offer policy", skip_capability=True, commit=False)
+        if app.current_status == "OFFER_APPROVAL_PENDING":
+            app = transition_application(session, ctx, app.id, "issue_offer", app.status_version,
+                                         "Offer issued directly by Admissions Office", skip_capability=True, commit=False)
+
+        pool = session.get(D.AdmissionSeatPool, allocation.seat_pool_id)
+        offer = D.AdmissionOffer(id=uid(), tenant_id=app.tenant_id, application_id=app.id,
+                                 allocation_id=allocation.id, workflow_id=None,
+                                 offer_no=f"OFF-{datetime.utcnow().year}-{uid().upper()}", status="ISSUED",
+                                 issued_at=datetime.utcnow(), expires_at=datetime.utcnow() + timedelta(days=7),
+                                 program_id=app.selected_program_id, campus=app.campus,
+                                 quota_id=pool.quota_id if pool else None, conditions_json="[]")
+        allocation.status = "ALLOCATED"
+        session.add(offer)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    write_audit(session, ctx["sub"], ctx["sub"], ctx["office_n"], "admission.offer.issue_direct",
+                f"application:{app.id}", "ALLOCATED", "OFFERED", offer.offer_no)
+    return app, offer
 
 
 def issue_offer(session, ctx, application_id, expected_version, expiry_days=7):

@@ -3325,6 +3325,25 @@ def _seed_admissions_phase2(s):
             application_no="APP-PH2-SUBMITTED", applicant_name="Phase Two Submitted", email="phase2.submitted@example.test",
             phone="9000000002", program_id=program.id, selected_program_id=program.id, program_name=program.name,
             campus=binding.campus, status="submitted", current_status="SUBMITTED", status_version=1, submitted_at=now))
+    s.flush()
+    # Fully populate the applicant demo record so the public portal has useful
+    # profile, preference, and document data before a real applicant starts.
+    demo = s.get(D.Application, "app_phase2_draft")
+    if demo:
+        if not demo.profile_json or demo.profile_json == "{}":
+            demo.profile_json = json.dumps({"qualifying_percentage": 82, "board": "State Board", "category": "GENERAL"})
+        if not s.query(D.ApplicationPreference).filter_by(application_id=demo.id).first():
+            s.add(D.ApplicationPreference(id="app_pref_phase2_demo", tenant_id=TENANT,
+                application_id=demo.id, program_id=demo.selected_program_id, preference_rank=1))
+        for document_id, requirement_id, document_type, file_name in [
+            ("app_doc_phase2_demo_marks", "adm_doc_phase2_marks", "Qualifying examination marksheet", "Aarav-Sharma-marksheet.pdf"),
+            ("app_doc_phase2_demo_identity", "adm_doc_phase2_identity", "Government identity", "Aarav-Sharma-id.pdf"),
+        ]:
+            if not s.get(D.ApplicationDocument, document_id):
+                s.add(D.ApplicationDocument(id=document_id, tenant_id=TENANT, application_id=demo.id,
+                    requirement_id=requirement_id, document_type=document_type,
+                    storage_key=f"seed/admissions/{file_name}", file_name=file_name,
+                    mime_type="application/pdf", verification_status="pending"))
     s.commit()
 
 
@@ -3387,6 +3406,11 @@ def _seed_admissions_phase4(s):
     pool=s.get(D.AdmissionSeatPool,"adm_pool_phase4_regular")
     if not pool:
         pool=D.AdmissionSeatPool(id="adm_pool_phase4_regular",tenant_id=TENANT,cycle_id=cycle.id,campus=binding.campus,program_id=program.id,quota_id=quota.id if quota else None,category_code="GENERAL",intake_key="phase4",capacity=5,status="open");s.add(pool)
+    # An unrestricted pool is required for applicants who qualify through the
+    # standard path and do not have a quota-specific eligibility decision.
+    general_pool=s.get(D.AdmissionSeatPool,"adm_pool_phase4_general")
+    if not general_pool:
+        general_pool=D.AdmissionSeatPool(id="adm_pool_phase4_general",tenant_id=TENANT,cycle_id=cycle.id,campus=binding.campus,program_id=program.id,quota_id=None,category_code="GENERAL",intake_key="phase4-general",capacity=10,status="open");s.add(general_pool)
     states=["ELIGIBLE","ASSESSMENT_PENDING","ASSESSMENT_QUALIFIED","COUNSELLING_PENDING","COUNSELLING_COMPLETED","ALLOCATION_PENDING","ALLOCATED","WAITLISTED","OFFER_RECOMMENDATION_PENDING","OFFER_APPROVAL_PENDING","OFFERED","OFFER_ACCEPTED","OFFER_DECLINED","OFFER_EXPIRED"]
     active={"ALLOCATED","OFFER_RECOMMENDATION_PENDING","OFFER_APPROVAL_PENDING","OFFERED","OFFER_ACCEPTED"}
     now=datetime.utcnow()

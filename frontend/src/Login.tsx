@@ -104,6 +104,10 @@ export default function Login({ onDone, onBack }: { onDone: (u: any) => void; on
             <span className="t">Demo accounts · {offices.length || 40} offices</span>
             <span className="p">password: demo123</span>
           </div>
+          <button className="auth-acct" style={{ width: '100%', marginBottom: 10 }} onClick={() => { setUsername('applicant_demo'); setPassword('demo123'); setErr('') }}>
+            <span className="idx" style={{ background: '#12855b' }}>A</span>
+            <div style={{ minWidth: 0 }}><div className="u">applicant_demo</div><div className="r">Applicant Portal · pre-enrollment application</div></div>
+          </button>
           <div className="auth-lvlfilter">
             <button className={`auth-lvl ${filter === 0 ? 'on' : ''}`} onClick={() => setFilter(0)}>All</button>
             {[1, 2, 3, 4, 5, 6, 7, 8].map(l => (

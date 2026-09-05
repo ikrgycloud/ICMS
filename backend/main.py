@@ -577,8 +577,10 @@ def login(body: LoginIn, s=Depends(db)):
     }
 
 
-def _persona_for(office_n):
+def _persona_for(office_n, role=""):
     """Coarse persona that decides which home dashboard the frontend renders."""
+    if role == "Applicant":
+        return "applicant"
     if office_n == 36:
         return "student"
     if office_n == 37:
@@ -604,7 +606,7 @@ def _user_payload(u, p, o, active_role=None, active_delegations=None):
         "level_name": LEVELS[str(o["level"])]["name"],
         "level_color": LEVELS[str(o["level"])]["color"],
         "role": u.role, "active_role": active_role or u.role,
-        "persona": _persona_for(u.office_n),
+        "persona": _persona_for(u.office_n, active_role or u.role),
         "scope_level": u.scope_level, "mfa": u.mfa_enabled,
         "modules": o["modules"], "functionalities": o["functionalities"],
         "workflows": o["workflows"], "purpose": o["purpose"],

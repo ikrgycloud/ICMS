@@ -1356,6 +1356,17 @@ class TransportRoute(Base):
     seats_taken = Column(Integer, default=0)
 
 
+class TransportRequest(Base):
+    """A transport-department work item created from an accepted applicant request."""
+    __tablename__ = "transport_requests"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    student_id = Column(String, default="")
+    student_name = Column(String, default="")
+    pickup_point = Column(String, default="")
+    status = Column(String, default="requested")  # requested/assigned/cancelled
+
+
 class Asset(Base):
     __tablename__ = "assets"
     id = Column(String, primary_key=True)

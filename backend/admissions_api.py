@@ -1,12 +1,20 @@
 """Phase 1 admissions API: compatibility read/decision endpoints plus actions."""
+import base64
+import binascii
 import json
+import os
+import smtplib
+import io
+from pathlib import Path
+from email.message import EmailMessage
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy import desc
 
 from admissions_schemas import (AdmissionActionIn, LegacyAdmissionDecisionIn, CycleIn, CycleProgramIn,
-                                ApplicantStartIn, ApplicantProfileIn, PreferenceIn, PreferenceOrderIn,
+                                ApplicantStartIn, ApplicantLookupIn, ApplicantProfileIn, JoiningPreferencesIn, PreferenceIn, PreferenceOrderIn,
                                 DocumentIn, ApplicantSubmitIn)
 from admissions_schemas import (EligibilityRuleIn, QuotaIn, EligibilityEvaluateIn, AssessmentIn,
     CounsellingSessionIn, CounsellingIn, SeatPoolIn, AllocationIn, OfferActionIn, FeeResolutionIn,
@@ -19,15 +27,87 @@ from admissions_phase5_service import (resolve_fees, issue_applicant_invoice, re
 from admissions_phase2_service import (application_for_token, application_payload, assert_editable,
     assert_version, create_access_token, cycle_program_or_404, now_utc, parse_datetime,
     save_application, submit_application, cycle_is_open, document_completeness)
+from admission_storage import document_storage
 from domain_api import gate, require
 from capabilities import MODULE_ACTIONS, action_allowed_for_office
 from core import auth, db, uid, write_audit
 from database import office, TENANT
 from matrices import rbac_for
-from models import WorkflowInstance, User, Approval
+from models import WorkflowInstance, User, Approval, Person
 import domain_models as D
 
 router = APIRouter(prefix="/api", tags=["admissions"])
+
+
+def _send_application_receipt(email, name, application_no):
+    """Send a best-effort acknowledgement without blocking application creation."""
+    host = os.getenv("SMTP_HOST", "").strip()
+    if not host or not email:
+        return False
+    message = EmailMessage()
+    message["From"] = os.getenv("SMTP_FROM", "admissions@example.edu")
+    message["To"] = email
+    message["Subject"] = f"ICMS application created - {application_no}"
+    message.set_content(
+        f"Hello {name},\n\nYour ICMS admission application has been created.\n\n"
+        f"Application number: {application_no}\nPersonal email: {email}\n\n"
+        "Save these details. You can use the application number and this email to check your application status."
+    )
+    with smtplib.SMTP(host, int(os.getenv("SMTP_PORT", "587")), timeout=10) as smtp:
+        if os.getenv("SMTP_TLS", "true").lower() == "true":
+            smtp.starttls()
+        if os.getenv("SMTP_USERNAME"):
+            smtp.login(os.getenv("SMTP_USERNAME"), os.getenv("SMTP_PASSWORD", ""))
+        smtp.send_message(message)
+    return True
+
+
+def _send_offer_acceptance_receipt(email, name, offer_no, programme, campus):
+    """Confirm a seat reservation after an applicant accepts an issued offer."""
+    host = os.getenv("SMTP_HOST", "").strip()
+    if not host or not email:
+        return False
+    message = EmailMessage()
+    message["From"] = os.getenv("SMTP_FROM", "admissions@example.edu")
+    message["To"] = email
+    message["Subject"] = f"ICMS offer accepted - seat reserved ({offer_no})"
+    message.set_content(
+        f"Hello {name},\n\nYou accepted admission offer {offer_no}.\n\n"
+        f"Programme: {programme}\nCampus: {campus}\n\n"
+        "Your seat is reserved. Submit your hostel and transport preferences in the Applicant Portal if needed. "
+        "This is not final enrollment yet: complete the fee and final approval steps to receive your roll number and student account credentials."
+    )
+    with smtplib.SMTP(host, int(os.getenv("SMTP_PORT", "587")), timeout=10) as smtp:
+        if os.getenv("SMTP_TLS", "true").lower() == "true":
+            smtp.starttls()
+        if os.getenv("SMTP_USERNAME"):
+            smtp.login(os.getenv("SMTP_USERNAME"), os.getenv("SMTP_PASSWORD", ""))
+        smtp.send_message(message)
+    return True
+
+
+def _send_offer_issued_receipt(email, name, offer_no, programme, campus, expires_at):
+    host = os.getenv("SMTP_HOST", "").strip()
+    if not host or not email:
+        return False
+    message = EmailMessage()
+    message["From"] = os.getenv("SMTP_FROM", "admissions@example.edu")
+    message["To"] = email
+    message["Subject"] = f"ICMS admission offer - {offer_no}"
+    message.set_content(
+        f"Hello {name},\n\nAn ICMS admission offer has been issued for you.\n\n"
+        f"Offer number: {offer_no}\nProgramme: {programme}\nCampus: {campus}\n"
+        f"Accept or decline by: {expires_at.strftime('%d %b %Y, %I:%M %p')}\n\n"
+        f"Open the Applicant Portal to respond: {os.getenv('APPLICANT_PORTAL_URL', 'http://localhost:8080/?portal=applicant')}\n\n"
+        "Sign in with your application number and personal email."
+    )
+    with smtplib.SMTP(host, int(os.getenv("SMTP_PORT", "587")), timeout=10) as smtp:
+        if os.getenv("SMTP_TLS", "true").lower() == "true":
+            smtp.starttls()
+        if os.getenv("SMTP_USERNAME"):
+            smtp.login(os.getenv("SMTP_USERNAME"), os.getenv("SMTP_PASSWORD", ""))
+        smtp.send_message(message)
+    return True
 
 
 def _can(ctx, action):
@@ -43,6 +123,7 @@ def _application_payload(application):
     return {
         "id": application.id, "name": application.applicant_name, "email": application.email,
         "program": application.program_name, "program_id": application.selected_program_id, "score": application.score,
+        "cycle_id": application.cycle_id, "campus": application.campus,
         "status": application.status,  # original frontend/API contract
         "current_status": application.current_status, "status_version": application.status_version,
     }
@@ -110,6 +191,28 @@ def _validate_quota_body(s, body, tenant_id):
     return cycle
 
 
+def _sync_required_document_requirement(s, tenant_id, cycle_id, program_id, quota_code, rule_key, criteria, active):
+    """Make document eligibility rules visible to applicants as upload requirements."""
+    rule_type = str((criteria or {}).get("rule_type") or rule_key or "").upper()
+    document_type = str((criteria or {}).get("document_type") or (criteria or {}).get("value") or "").strip()
+    if rule_type != "REQUIRED_DOCUMENT" or not document_type or not active:
+        return False
+    query = s.query(D.AdmissionDocumentRequirement).filter_by(
+        tenant_id=tenant_id, cycle_id=cycle_id, document_type=document_type, active=True,
+    )
+    # A cycle-wide requirement already covers every programme in that cycle.
+    existing = query.all()
+    if any(row.program_id in (None, "", program_id) for row in existing):
+        return False
+    s.add(D.AdmissionDocumentRequirement(
+        id=uid(), tenant_id=tenant_id, cycle_id=cycle_id, program_id=program_id or None,
+        document_type=document_type, mandatory=not bool(quota_code),
+        allowed_mime_types="application/pdf,image/jpeg,image/png", max_size_bytes=10 * 1024 * 1024,
+        active=True,
+    ))
+    return True
+
+
 @router.get("/admissions/cycles")
 def list_cycles(ctx=Depends(auth), s=Depends(db)):
     _staff(s, ctx, "view_cycle")
@@ -158,7 +261,8 @@ def admission_phase5_status(ctx=Depends(auth), s=Depends(db)):
     states={"OFFER_ACCEPTED","FEE_RESOLUTION_PENDING","INVOICE_ISSUED","PAYMENT_PENDING","PAYMENT_RECORDED","ACCOUNTS_VERIFIED","FINANCE_CLEARED","FINAL_APPROVAL_PENDING","FINAL_APPROVED","READY_TO_ADMIT","ENROLLED"}
     for app in s.query(D.Application).filter(D.Application.tenant_id==ctx["tenant_id"],D.Application.current_status.in_(states)).all():
         _assert_application_scope(app,ctx);invoice=s.query(D.FeeInvoice).filter_by(application_id=app.id,invoice_type="admission_fee").first();challan=s.query(D.AdmissionChallan).filter_by(invoice_id=invoice.id).first() if invoice else None;clearance=s.query(D.AdmissionFinanceClearance).filter_by(application_id=app.id).first();conversion=s.query(D.AdmissionConversion).filter_by(application_id=app.id).first();program=s.get(D.Program,app.selected_program_id);checks=checklist(s,ctx,app.id)
-        out.append({"id":app.id,"application_no":app.application_no,"applicant_name":app.applicant_name,"program":program.name if program else app.program_name,"campus":app.campus,"status":app.current_status,"status_version":app.status_version,"invoice_id":invoice.id if invoice else None,"invoice_amount":invoice.amount if invoice else 0,"paid":invoice.paid if invoice else 0,"balance":(invoice.amount-invoice.paid) if invoice else 0,"invoice_status":invoice.status if invoice else "","challan_no":challan.challan_no if challan else "","challan_status":challan.status if challan else "","accounts_status":clearance.accounts_status if clearance else "PENDING","finance_status":clearance.finance_status if clearance else "PENDING","total_payable":clearance.total_payable if clearance else 0,"total_paid":clearance.total_paid if clearance else 0,"total_waived":clearance.total_waived if clearance else 0,"cleared_at":clearance.cleared_at.isoformat() if clearance and clearance.cleared_at else None,"checklist":checks,"conversion_status":conversion.status if conversion else "PENDING","student_identifier":conversion.student_identifier if conversion else "","converted_at":conversion.converted_at.isoformat() if conversion and conversion.converted_at else None})
+        payment=s.query(D.Payment).filter_by(invoice_id=invoice.id).order_by(D.Payment.at.desc()).first() if invoice else None
+        out.append({"id":app.id,"application_no":app.application_no,"applicant_name":app.applicant_name,"program":program.name if program else app.program_name,"campus":app.campus,"status":app.current_status,"status_version":app.status_version,"invoice_id":invoice.id if invoice else None,"invoice_amount":invoice.amount if invoice else 0,"paid":invoice.paid if invoice else 0,"balance":(invoice.amount-invoice.paid) if invoice else 0,"invoice_status":invoice.status if invoice else "","challan_id":challan.id if challan else None,"challan_no":challan.challan_no if challan else "","challan_status":challan.status if challan else "","payment_id":payment.id if payment else None,"payment_reference":payment.reference if payment else "","payment_status":payment.status if payment else "","accounts_status":clearance.accounts_status if clearance else "PENDING","finance_status":clearance.finance_status if clearance else "PENDING","total_payable":clearance.total_payable if clearance else 0,"total_paid":clearance.total_paid if clearance else 0,"total_waived":clearance.total_waived if clearance else 0,"cleared_at":clearance.cleared_at.isoformat() if clearance and clearance.cleared_at else None,"checklist":checks,"conversion_status":conversion.status if conversion else "PENDING","student_identifier":conversion.student_identifier if conversion else "","converted_at":conversion.converted_at.isoformat() if conversion and conversion.converted_at else None})
     return {"applications":out}
 
 
@@ -293,19 +397,81 @@ def start_applicant_application(body: ApplicantStartIn, s=Depends(db)):
     cycle, cycle_program = cycle_program_or_404(s, TENANT, body.cycle_program_id, True)
     program = s.get(D.Program, cycle_program.program_id)
     application = D.Application(id=uid(), tenant_id=TENANT, cycle_id=cycle.id, cycle_program_id=cycle_program.id,
-        application_no=f"APP-{now_utc().year}-{uid().upper()}", applicant_name=body.applicant_name.strip(),
+        application_no=f"APP-{now_utc().year}-{uid().upper()}", applicant_name=body.applicant_name.strip(), phone=body.phone.strip(),
         email=body.email.strip().lower(), program_id=program.id if program else None, program_name=program.name if program else "",
         selected_program_id=program.id if program else None, campus=cycle_program.campus or cycle.campus,
         status="submitted", current_status="DRAFT", status_version=0)
-    s.add(application); token = create_access_token(s, application); s.commit()
+    # Session autoflush is disabled globally. Persist the application first so
+    # PostgreSQL can satisfy ApplicantAccessToken.application_id's foreign key.
+    s.add(application)
+    s.flush()
+    token = create_access_token(s, application)
+    s.commit()
+    email_sent = False
+    try:
+        email_sent = _send_application_receipt(application.email, application.applicant_name, application.application_no)
+    except Exception:
+        pass
     write_audit(s, f"applicant:{application.id}", "Applicant", 0, "admission.application.create", f"application:{application.id}", "", "DRAFT", "Applicant draft created")
-    return {"application_id": application.id, "application_no": application.application_no, "access_token": token}
+    return {"application_id": application.id, "application_no": application.application_no,
+            "access_token": token, "email_sent": email_sent}
+
+
+@router.post("/admissions/applicant/access")
+def recover_applicant_access(body: ApplicantLookupIn, s=Depends(db)):
+    """Restore applicant portal access using the two identifiers shown on the receipt."""
+    application = (s.query(D.Application)
+                   .filter(D.Application.tenant_id == TENANT,
+                           D.Application.application_no == body.application_no.strip().upper(),
+                           D.Application.email == body.email.strip().lower())
+                   .first())
+    if not application:
+        raise HTTPException(404, "No application matches that application number and personal email")
+    token = create_access_token(s, application)
+    s.commit()
+    write_audit(s, f"applicant:{application.id}", "Applicant", 0, "admission.application.access_recovered",
+                f"application:{application.id}", "", application.current_status, "Applicant portal access restored")
+    return {"application_id": application.id, "application_no": application.application_no,
+            "access_token": token}
+
+
+@router.post("/admissions/applicant/session")
+def applicant_session(ctx=Depends(auth), s=Depends(db)):
+    """Exchange the dedicated Applicant login for its application-only token."""
+    user = s.get(User, ctx["sub"])
+    if not user or user.role != "Applicant":
+        raise HTTPException(403, "Applicant portal access required")
+    person = s.get(Person, user.person_id)
+    application = (s.query(D.Application)
+                   .filter(D.Application.tenant_id == ctx["tenant_id"],
+                           D.Application.email == (person.email or "").lower())
+                   .order_by(D.Application.created_at.desc()).first())
+    if not application:
+        raise HTTPException(404, "No admission application is linked to this applicant account")
+    token = create_access_token(s, application)
+    s.commit()
+    return {"application_id": application.id, "application_no": application.application_no,
+            "access_token": token}
 
 
 @router.get("/admissions/applicant/{application_id}")
 def applicant_detail(application_id: str, x_applicant_access_token: str = Header(default=""), s=Depends(db)):
     application, _ = _token_application(s, application_id, x_applicant_access_token)
-    return application_payload(s, application)
+    payload = application_payload(s, application)
+    conversion = s.query(D.AdmissionConversion).filter_by(application_id=application.id, status="completed").first()
+    if conversion:
+        student = s.get(D.Student, conversion.student_id)
+        enrollment = s.query(D.Enrollment).filter_by(student_id=conversion.student_id, status="enrolled").first()
+        section = s.get(D.Section, enrollment.section_id) if enrollment else None
+        hostel = s.query(D.HostelAllocation).filter_by(student_id=conversion.student_id).first()
+        transport = s.query(D.TransportRequest).filter_by(student_id=conversion.student_id).first()
+        payload["enrollment"] = {
+            "student_id": conversion.student_identifier,
+            "section": section.name if section else "Section assignment pending",
+            "hostel_status": hostel.status.title() if hostel else "Not requested",
+            "transport_status": transport.status.title() if transport else "Not requested",
+        }
+    return payload
 
 
 @router.post("/admissions/applicant/{application_id}/access/revoke")
@@ -330,6 +496,22 @@ def save_applicant_profile(application_id: str, body: ApplicantProfileIn,
         "applicant_name": body.applicant_name.strip(), "email": body.email.strip().lower(), "phone": body.phone.strip(),
         "date_of_birth": dob, "gender": body.gender.strip(), "profile_json": json.dumps(body.profile),
     }, "admission.application.update")
+    return application_payload(s, application)
+
+
+@router.put("/admissions/applicant/{application_id}/joining-preferences")
+def save_joining_preferences(application_id: str, body: JoiningPreferencesIn,
+                             x_applicant_access_token: str = Header(default=""), s=Depends(db)):
+    application, _ = _token_application(s, application_id, x_applicant_access_token)
+    if application.current_status not in {"OFFER_ACCEPTED", "FEE_RESOLUTION_PENDING", "INVOICE_ISSUED", "PAYMENT_PENDING", "PAYMENT_RECORDED", "ACCOUNTS_VERIFIED", "FINANCE_CLEARED", "FINAL_APPROVAL_PENDING", "READY_TO_ADMIT"}:
+        raise HTTPException(409, "Joining preferences can be submitted after accepting an offer")
+    assert_version(application, body.expected_status_version)
+    profile = json.loads(application.profile_json or "{}")
+    profile["joining_preferences"] = {"hostel_required": body.hostel_required, "transport_required": body.transport_required, "pickup_point": body.pickup_point.strip(), "submitted_at": now_utc().isoformat()}
+    application.profile_json = json.dumps(profile)
+    application.status_version += 1
+    s.commit()
+    write_audit(s, f"applicant:{application.id}", "Applicant", 0, "admission.joining_preferences.save", f"application:{application.id}", "", application.current_status, "Hostel and transport preferences saved")
     return application_payload(s, application)
 
 
@@ -382,6 +564,20 @@ def remove_preference(application_id: str, preference_id: str, expected_status_v
 def document_requirements(application_id: str, x_applicant_access_token: str = Header(default=""), s=Depends(db)):
     application, _ = _token_application(s, application_id, x_applicant_access_token)
     _, cycle_program = cycle_program_or_404(s, application.tenant_id, application.cycle_program_id, False)
+    # Backfill requirements for document rules created before automatic synchronisation.
+    rules = s.query(D.AdmissionEligibilityRule).filter_by(
+        tenant_id=application.tenant_id, cycle_id=application.cycle_id, active=True,
+    ).all()
+    changed = False
+    for rule in rules:
+        if rule.program_id not in (None, "", cycle_program.program_id):
+            continue
+        changed = _sync_required_document_requirement(
+            s, application.tenant_id, rule.cycle_id, rule.program_id, rule.quota_code,
+            rule.rule_key, json.loads(rule.criteria_json or "{}"), rule.active,
+        ) or changed
+    if changed:
+        s.commit()
     rows = (s.query(D.AdmissionDocumentRequirement)
             .filter(D.AdmissionDocumentRequirement.tenant_id == application.tenant_id,
                     D.AdmissionDocumentRequirement.cycle_id == application.cycle_id,
@@ -396,18 +592,30 @@ def upload_document_metadata(application_id: str, body: DocumentIn, x_applicant_
     application, token = _token_application(s, application_id, x_applicant_access_token)
     assert_editable(application); assert_version(application, body.expected_status_version)
     if not body.storage_key.strip() or not body.file_name.strip(): raise HTTPException(422, "storage_key and file_name are required")
+    storage_key = body.storage_key
+    if body.content_base64:
+        try:
+            content = base64.b64decode(body.content_base64, validate=True)
+        except (ValueError, binascii.Error):
+            raise HTTPException(422, "Document content is not valid base64")
+        if len(content) > 10 * 1024 * 1024:
+            raise HTTPException(422, "Document must be 10 MB or smaller")
+        try:
+            storage_key = document_storage.put(application.id, body.file_name, content, body.mime_type, uid())
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
     requirement = s.get(D.AdmissionDocumentRequirement, body.requirement_id) if body.requirement_id else None
     if requirement and (requirement.tenant_id != application.tenant_id or requirement.cycle_id != application.cycle_id):
         raise HTTPException(403, "Document requirement is outside this application cycle")
     existing = (s.query(D.ApplicationDocument).filter_by(application_id=application.id, requirement_id=body.requirement_id).first()
                 if body.requirement_id else None)
     if existing:
-        existing.document_type, existing.storage_key, existing.file_name = body.document_type, body.storage_key, body.file_name
+        existing.document_type, existing.storage_key, existing.file_name = body.document_type, storage_key, body.file_name
         existing.mime_type, existing.checksum, existing.verification_status = body.mime_type, body.checksum, "pending"
         event = "admission.document.replace"
     else:
         s.add(D.ApplicationDocument(id=uid(), tenant_id=application.tenant_id, application_id=application.id,
-              requirement_id=body.requirement_id, document_type=body.document_type, storage_key=body.storage_key,
+              requirement_id=body.requirement_id, document_type=body.document_type, storage_key=storage_key,
               file_name=body.file_name, mime_type=body.mime_type, checksum=body.checksum))
         event = "admission.document.upload"
     application.status_version += 1
@@ -451,6 +659,37 @@ def review_queue(cycle_id: str = "", program_id: str = "", campus: str = "", sta
     return {"applications": payload}
 
 
+@router.get("/admissions/corrections")
+def corrections_queue(ctx=Depends(auth), s=Depends(db)):
+    """Applications returned to applicants, including the reviewer's latest instruction."""
+    _staff(s, ctx, "view_application")
+    query = s.query(D.Application).filter(
+        D.Application.tenant_id == ctx["tenant_id"],
+        D.Application.current_status.in_(["CORRECTION_REQUIRED", "RESUBMITTED"]),
+    )
+    actor_campus = ctx.get("scope_ref", "")
+    if ctx.get("scope_level") == "campus" and actor_campus and not actor_campus.startswith("scope_"):
+        query = query.filter(D.Application.campus == actor_campus)
+    rows = []
+    for application in query.order_by(D.Application.created_at.desc()).all():
+        correction = (s.query(D.ApplicationStatusHistory)
+                      .filter_by(application_id=application.id, action="request_correction")
+                      .order_by(D.ApplicationStatusHistory.created_at.desc()).first())
+        program = s.get(D.Program, application.selected_program_id) if application.selected_program_id else None
+        rows.append({
+            "id": application.id,
+            "application_no": application.application_no,
+            "applicant_name": application.applicant_name,
+            "email": application.email,
+            "program": program.name if program else application.program_name,
+            "current_status": application.current_status,
+            "status_version": application.status_version,
+            "correction_reason": correction.reason if correction else "No correction instruction recorded.",
+            "requested_at": correction.created_at.isoformat() if correction and correction.created_at else None,
+        })
+    return {"applications": rows}
+
+
 @router.get("/admissions/{application_id}/detail")
 def staff_application_detail(application_id: str, ctx=Depends(auth), s=Depends(db)):
     _staff(s, ctx, "view_application")
@@ -465,6 +704,29 @@ def staff_application_detail(application_id: str, ctx=Depends(auth), s=Depends(d
         "complete_document_verification": "complete_document_verification", "evaluate_eligibility": "evaluate_eligibility"}.items()}
     return result
 
+
+@router.get("/admissions/{application_id}/documents/{document_id}/content")
+def view_application_document(application_id: str, document_id: str, ctx=Depends(auth), s=Depends(db)):
+    """Stream a private uploaded document to an authorised reviewer."""
+    _staff(s, ctx, "view_application")
+    application = s.get(D.Application, application_id)
+    if not application or application.tenant_id != ctx["tenant_id"]:
+        raise HTTPException(404, "Application not found")
+    _assert_application_scope(application, ctx)
+    document = s.query(D.ApplicationDocument).filter_by(id=document_id, application_id=application_id).first()
+    if not document:
+        raise HTTPException(404, "Document not found")
+    try:
+        content, stored_mime_type = document_storage.read(document.storage_key)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "The uploaded document is not available") from exc
+    filename = Path(document.file_name or "document").name.replace('"', "")
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type=document.mime_type or stored_mime_type or "application/octet-stream",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
 @router.get("/admissions/eligibility/rules")
 def eligibility_rules(cycle_id: str = "", ctx=Depends(auth), s=Depends(db)):
     _staff(s,ctx,"view_eligibility"); q=s.query(D.AdmissionEligibilityRule).filter_by(tenant_id=ctx["tenant_id"])
@@ -475,7 +737,10 @@ def eligibility_rules(cycle_id: str = "", ctx=Depends(auth), s=Depends(db)):
 def create_eligibility_rule(body: EligibilityRuleIn,ctx=Depends(auth),s=Depends(db)):
     _staff(s,ctx,"manage_eligibility_rules"); _validate_rule_body(s, body, ctx["tenant_id"])
     r=D.AdmissionEligibilityRule(id=uid(),tenant_id=ctx["tenant_id"],cycle_id=body.cycle_id,program_id=body.program_id,quota_code=body.quota_code,rule_key=body.rule_key,criteria_json=json.dumps(body.criteria),active=body.active)
-    s.add(r);s.commit();write_audit(s,ctx["sub"],ctx["sub"],ctx["office_n"],"admission.eligibility_rule.create",f"eligibility_rule:{r.id}","","active",r.rule_key);return {"id":r.id}
+    s.add(r)
+    _sync_required_document_requirement(s, ctx["tenant_id"], body.cycle_id, body.program_id,
+                                        body.quota_code, body.rule_key, body.criteria, body.active)
+    s.commit();write_audit(s,ctx["sub"],ctx["sub"],ctx["office_n"],"admission.eligibility_rule.create",f"eligibility_rule:{r.id}","","active",r.rule_key);return {"id":r.id}
 
 @router.put("/admissions/eligibility/rules/{rule_id}")
 def update_eligibility_rule(rule_id:str,body:EligibilityRuleIn,ctx=Depends(auth),s=Depends(db)):
@@ -483,6 +748,8 @@ def update_eligibility_rule(rule_id:str,body:EligibilityRuleIn,ctx=Depends(auth)
     if not r or r.tenant_id!=ctx["tenant_id"]:raise HTTPException(404,"Rule not found")
     _validate_rule_body(s, body, ctx["tenant_id"])
     r.cycle_id,r.program_id,r.quota_code,r.rule_key,r.criteria_json,r.active=body.cycle_id,body.program_id,body.quota_code,body.rule_key,json.dumps(body.criteria),body.active;r.version+=1
+    _sync_required_document_requirement(s, ctx["tenant_id"], body.cycle_id, body.program_id,
+                                        body.quota_code, body.rule_key, body.criteria, body.active)
     s.commit();write_audit(s,ctx["sub"],ctx["sub"],ctx["office_n"],"admission.eligibility_rule.update",f"eligibility_rule:{r.id}","","active" if r.active else "inactive",r.rule_key);return {"id":r.id,"version":r.version}
 
 @router.get("/admissions/eligibility/quotas")
@@ -528,15 +795,35 @@ def eligibility_detail(application_id:str,ctx=Depends(auth),s=Depends(db)):
     rules={r.id:r for r in s.query(D.AdmissionEligibilityRule).filter_by(tenant_id=ctx["tenant_id"]).all()}
     quotas={q.id:q for q in s.query(D.AdmissionQuota).filter_by(tenant_id=ctx["tenant_id"]).all()}
     cycle=s.get(D.AdmissionCycle, app.cycle_id); program=s.get(D.Program, app.selected_program_id)
+    preferences = (s.query(D.ApplicationPreference).filter_by(application_id=app.id)
+                   .order_by(D.ApplicationPreference.preference_rank).all())
+    preference_programs = {row.id: row for row in s.query(D.Program)
+                           .filter(D.Program.id.in_([item.program_id for item in preferences])).all()} if preferences else {}
+    documents = s.query(D.ApplicationDocument).filter_by(application_id=app.id).all()
+    binding = s.get(D.AdmissionCycleProgram, app.cycle_program_id) if app.cycle_program_id else None
+    settings = json.loads(binding.settings_json or "{}") if binding else {}
+    if app.current_status == "ELIGIBLE":
+        if settings.get("entrance_required"):
+            next_step = {"title": "Start entrance assessment", "description": "Record and verify the applicant's entrance assessment before merit and seat allocation.", "destination": "Assessment, Merit & Seats"}
+        elif settings.get("counselling_required"):
+            next_step = {"title": "Schedule counselling", "description": "Record counselling outcome before the applicant can enter seat allocation.", "destination": "Counselling & Waitlist"}
+        else:
+            next_step = {"title": "Calculate merit and allocate a seat", "description": "No assessment or counselling is required by this programme policy. Advance the applicant to allocation.", "destination": "Assessment, Merit & Seats"}
+    elif app.current_status == "INELIGIBLE":
+        next_step = {"title": "No further admission action", "description": "Review the failed checks. The applicant may be reconsidered only after policy or application data changes.", "destination": "Eligibility & Quotas"}
+    else:
+        next_step = {"title": "Run eligibility evaluation", "description": "All required documents must be verified before a final eligibility decision can be made.", "destination": "Eligibility & Quotas"}
     return {"application":{"id":app.id,"application_no":app.application_no,"applicant_name":app.applicant_name,
         "cycle":cycle.name if cycle else "","program":program.name if program else app.program_name,"campus":app.campus,
-        "status":app.current_status,"status_version":app.status_version},"runs":[{"id":r.id,"outcome":r.outcome,
+        "status":app.current_status,"status_version":app.status_version,"profile":json.loads(app.profile_json or "{}"),
+        "preferences":[{"rank": item.preference_rank,"program":preference_programs[item.program_id].name if item.program_id in preference_programs else item.program_id} for item in preferences],
+        "documents":[{"type":item.document_type,"file_name":item.file_name,"status":item.verification_status} for item in documents]},"runs":[{"id":r.id,"outcome":r.outcome,
         "started_at":r.started_at.isoformat() if r.started_at else None,"completed_at":r.completed_at.isoformat() if r.completed_at else None,
         "actor_id":r.initiated_by_user_id,"context":json.loads(r.context_json or "{}")}for r in runs],"checks":[{"run_id":c.evaluation_run_id,"rule_id":c.rule_id,
         "rule":rules[c.rule_id].rule_key if c.rule_id in rules else c.check_type,"rule_version":c.rule_version,"quota_id":c.quota_id,
         "quota":{"id":quotas[c.quota_id].id,"code":quotas[c.quota_id].code,"name":quotas[c.quota_id].name} if c.quota_id in quotas else None,
         "type":c.check_type,"outcome":c.outcome,"reason":c.reason,"values":json.loads(c.evaluated_values_json or '{}'),
-        "evaluated_at":c.evaluated_at.isoformat() if c.evaluated_at else None}for c in checks]}
+        "evaluated_at":c.evaluated_at.isoformat() if c.evaluated_at else None}for c in checks],"next_step":next_step}
 
 @router.get("/admissions/eligibility/queue")
 def eligibility_queue(cycle_id: str = "", program_id: str = "", campus: str = "", status: str = "", quota_code: str = "", search: str = "", ctx=Depends(auth),s=Depends(db)):
@@ -577,7 +864,23 @@ def phase4_advance(application_id: str, body: EligibilityEvaluateIn, ctx=Depends
 def assessment_queue(ctx=Depends(auth), s=Depends(db)):
     _staff(s, ctx, "view_assessment")
     rows=s.query(D.Application).filter(D.Application.tenant_id==ctx["tenant_id"], D.Application.current_status.in_(["ELIGIBLE","ASSESSMENT_PENDING","ASSESSMENT_QUALIFIED","COUNSELLING_PENDING","ALLOCATION_PENDING"])).all()
-    return {"applications":[_application_payload(a) for a in rows if not (ctx.get("scope_level")=="campus" and ctx.get("scope_ref") and not ctx["scope_ref"].startswith("scope_") and a.campus != ctx["scope_ref"])]}
+    payload = []
+    for application in rows:
+        if ctx.get("scope_level") == "campus" and ctx.get("scope_ref") and not ctx["scope_ref"].startswith("scope_") and application.campus != ctx["scope_ref"]:
+            continue
+        merit = (s.query(D.ApplicationAssessment)
+                 .filter_by(application_id=application.id, assessment_type="ACADEMIC_MERIT")
+                 .order_by(D.ApplicationAssessment.verified_at.desc()).first())
+        item = _application_payload(application)
+        item["merit_score"] = merit.merit_score if merit else None
+        item["merit_rank"] = merit.rank if merit else None
+        item["qualified_quota_ids"] = [
+            row.quota_id for row in s.query(D.ApplicationEligibilityCheck).filter_by(
+                application_id=application.id, outcome="PASS"
+            ).all() if row.quota_id
+        ]
+        payload.append(item)
+    return {"applications": payload}
 
 
 @router.post("/admissions/{application_id}/assessments")
@@ -638,7 +941,8 @@ def seat_pools(cycle_id: str = "", ctx=Depends(auth), s=Depends(db)):
     out=[]
     for x in q.all():
         used=s.query(D.AdmissionSeatAllocation).filter(D.AdmissionSeatAllocation.seat_pool_id==x.id,D.AdmissionSeatAllocation.status.in_(["RESERVED","ALLOCATED"])).count();wait=s.query(D.AdmissionSeatAllocation).filter_by(seat_pool_id=x.id,status="WAITLISTED").count()
-        out.append({"id":x.id,"cycle_id":x.cycle_id,"campus":x.campus,"program_id":x.program_id,"quota_id":x.quota_id,"capacity":x.capacity,"used":used,"available":max(0,x.capacity-used),"waitlisted":wait,"status":x.status})
+        quota=s.get(D.AdmissionQuota,x.quota_id) if x.quota_id else None
+        out.append({"id":x.id,"cycle_id":x.cycle_id,"campus":x.campus,"program_id":x.program_id,"quota_id":x.quota_id,"quota_name":quota.name if quota else "General","capacity":x.capacity,"used":used,"available":max(0,x.capacity-used),"waitlisted":wait,"status":x.status})
     return {"seat_pools":out}
 
 
@@ -646,6 +950,12 @@ def seat_pools(cycle_id: str = "", ctx=Depends(auth), s=Depends(db)):
 def configure_seat_pool(body: SeatPoolIn, ctx=Depends(auth), s=Depends(db)):
     _staff(s,ctx,"manage_seat_pool"); cycle=s.get(D.AdmissionCycle,body.cycle_id);program=s.get(D.Program,body.program_id)
     if not cycle or not program or cycle.tenant_id != ctx["tenant_id"] or program.tenant_id != ctx["tenant_id"]:raise HTTPException(404,"Cycle or programme not found")
+    if not s.query(D.AdmissionCycleProgram).filter_by(tenant_id=ctx["tenant_id"], cycle_id=cycle.id, program_id=program.id, active=True).first():
+        raise HTTPException(422, "Programme must be bound and active in this admission cycle before creating a seat pool")
+    if body.quota_id:
+        quota=s.get(D.AdmissionQuota, body.quota_id)
+        if not quota or quota.tenant_id != ctx["tenant_id"] or quota.cycle_id != cycle.id:
+            raise HTTPException(422, "Selected quota does not belong to this admission cycle")
     row=s.query(D.AdmissionSeatPool).filter_by(tenant_id=ctx["tenant_id"],cycle_id=body.cycle_id,campus=body.campus,program_id=body.program_id,quota_id=body.quota_id,category_code=body.category_code,intake_key=body.intake_key).first()
     if not row: row=D.AdmissionSeatPool(id=uid(),tenant_id=ctx["tenant_id"],cycle_id=body.cycle_id,campus=body.campus,program_id=body.program_id,quota_id=body.quota_id,category_code=body.category_code,intake_key=body.intake_key);s.add(row)
     used=s.query(D.AdmissionSeatAllocation).filter(D.AdmissionSeatAllocation.seat_pool_id==row.id,D.AdmissionSeatAllocation.status.in_(["RESERVED","ALLOCATED"])).count()
@@ -660,7 +970,15 @@ def allocate_application(application_id: str, body: AllocationIn, ctx=Depends(au
 
 @router.post("/admissions/{application_id}/offer/recommend")
 def recommend_application_offer(application_id: str, body: OfferActionIn, ctx=Depends(auth), s=Depends(db)):
-    _staff(s,ctx,"recommend_offer");app,wf=recommend_offer(s,ctx,application_id,body.expected_status_version);return {"application":_application_payload(app),"workflow_id":wf.id}
+    _staff(s,ctx,"recommend_offer");app,offer=recommend_offer(s,ctx,application_id,body.expected_status_version)
+    email_sent = False
+    try:
+        email_sent = _send_offer_issued_receipt(app.email, app.applicant_name, offer.offer_no,
+                                                app.program_name, app.campus, offer.expires_at)
+    except Exception:
+        pass
+    return {"application":_application_payload(app),"offer_no":offer.offer_no,
+            "expires_at":offer.expires_at.isoformat(),"email_sent":email_sent}
 
 
 @router.post("/admissions/{application_id}/offer/issue")
@@ -678,12 +996,13 @@ def waitlist_queue(ctx=Depends(auth),s=Depends(db)):
 
 @router.get("/admissions/offers")
 def offers_queue(status: str = "", ctx=Depends(auth),s=Depends(db)):
-    _staff(s,ctx,"view_assessment"); q=s.query(D.Application).filter(D.Application.tenant_id==ctx["tenant_id"],D.Application.current_status.in_(["OFFER_RECOMMENDATION_PENDING","OFFER_APPROVAL_PENDING","OFFERED","OFFER_ACCEPTED","OFFER_DECLINED","OFFER_EXPIRED"]))
+    _staff(s,ctx,"view_assessment"); q=s.query(D.Application).filter(D.Application.tenant_id==ctx["tenant_id"],D.Application.current_status.in_(["ALLOCATED","OFFER_RECOMMENDATION_PENDING","OFFER_APPROVAL_PENDING","OFFERED","OFFER_ACCEPTED","OFFER_DECLINED","OFFER_EXPIRED"]))
     if status:q=q.filter(D.Application.current_status==status)
     out=[]
     for app in q.all():
         offer=s.query(D.AdmissionOffer).filter_by(application_id=app.id).order_by(D.AdmissionOffer.issued_at.desc()).first();link=s.query(D.AdmissionWorkflowLink).filter_by(application_id=app.id,purpose="admission_offer",status="active").first();wf=s.get(WorkflowInstance,link.workflow_id) if link else None
-        out.append({**_application_payload(app),"offer_no":offer.offer_no if offer else None,"offer_status":offer.status if offer else None,"expires_at":offer.expires_at.isoformat() if offer and offer.expires_at else None,"workflow_id":link.workflow_id if link else None,"workflow_state":wf.state if wf else None,"can_recommend":_can(ctx,"recommend_offer") and app.current_status=="ALLOCATED","can_issue":_can(ctx,"issue_offer") and app.current_status=="OFFER_APPROVAL_PENDING"})
+        joining = json.loads(app.profile_json or "{}").get("joining_preferences", {})
+        out.append({**_application_payload(app),"offer_no":offer.offer_no if offer else None,"offer_status":offer.status if offer else None,"expires_at":offer.expires_at.isoformat() if offer and offer.expires_at else None,"workflow_id":link.workflow_id if link else None,"workflow_state":wf.state if wf else None,"joining_preferences":joining,"can_recommend":_can(ctx,"recommend_offer") and app.current_status in {"ALLOCATED","OFFER_RECOMMENDATION_PENDING","OFFER_APPROVAL_PENDING"},"can_issue":False})
     return {"offers":out}
 
 @router.get("/admissions/applicant/{application_id}/offer")
@@ -703,7 +1022,14 @@ def respond_to_offer(application_id:str,response:str,body:EligibilityEvaluateIn,
     elif response == "decline":
         offer.status="DECLINED";offer.declined_at=now_utc();allocation=s.get(D.AdmissionSeatAllocation,offer.allocation_id);release_allocation(s,ctx,allocation,"Applicant declined offer");action="decline_offer"
     else:raise HTTPException(422,"Invalid offer response")
-    s.commit();app=transition_application(s,ctx,app.id,action,app.status_version,f"Applicant {response}ed offer",skip_capability=True);write_audit(s,ctx["sub"],"Applicant",0,f"admission.offer.{response}",f"application:{app.id}","OFFERED",app.current_status,offer.offer_no,"token");return {"application_status":app.current_status,"status_version":app.status_version}
+    s.commit();app=transition_application(s,ctx,app.id,action,app.status_version,f"Applicant {response}ed offer",skip_capability=True)
+    email_sent = False
+    if response == "accept":
+        try:
+            email_sent = _send_offer_acceptance_receipt(app.email, app.applicant_name, offer.offer_no, app.program_name, app.campus)
+        except Exception:
+            pass
+    write_audit(s,ctx["sub"],"Applicant",0,f"admission.offer.{response}",f"application:{app.id}","OFFERED",app.current_status,offer.offer_no,"token");return {"application_status":app.current_status,"status_version":app.status_version,"email_sent":email_sent}
 
 
 @router.post("/admissions/{application_id}/fees/resolve")
@@ -781,6 +1107,19 @@ def decide_application(body: LegacyAdmissionDecisionIn, ctx=Depends(auth), s=Dep
 
 @router.post("/admissions/{application_id}/actions")
 def apply_admission_action(application_id: str, body: AdmissionActionIn, ctx=Depends(auth), s=Depends(db)):
+    if body.action == "request_correction" and not body.reason.strip():
+        raise HTTPException(422, "Describe the corrections required before returning the application to the applicant")
+    if body.action == "complete_document_verification":
+        application = s.get(D.Application, application_id)
+        if not application or application.tenant_id != ctx["tenant_id"]:
+            raise HTTPException(404, "Application not found")
+        _assert_application_scope(application, ctx)
+        completeness = document_completeness(s, application)
+        if not completeness["complete"]:
+            raise HTTPException(409, "All mandatory documents must be uploaded before verification")
+        for document in s.query(D.ApplicationDocument).filter_by(application_id=application.id).all():
+            document.verification_status = "verified"
+        s.flush()
     application = transition_application(s, ctx, application_id, body.action,
                                          body.expected_status_version, body.reason)
     return _application_payload(application)
