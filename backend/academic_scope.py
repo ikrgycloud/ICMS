@@ -79,9 +79,15 @@ def actor_hierarchy(ctx: dict, session) -> AcademicHierarchy:
     if not school and scope_ref.startswith("school_") and session.get(D.School, scope_ref):
         school = scope_ref
     if not department:
-        ref = scope_ref.removeprefix("dept_").removeprefix("scope_")
-        if session.get(D.Department, ref):
-            department = ref
+        # ``dept_cse`` is both a conventional department ID and a possible
+        # scope prefix.  Check the persisted ID first so a valid department
+        # scope is never reduced to ``cse`` before resolution.
+        if scope_ref and session.get(D.Department, scope_ref):
+            department = scope_ref
+        else:
+            ref = scope_ref.removeprefix("dept_").removeprefix("scope_")
+            if session.get(D.Department, ref):
+                department = ref
     program = getattr(staff, "program_id", None)
     section = getattr(staff, "section_id", None)
     if department:

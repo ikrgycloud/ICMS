@@ -21,16 +21,6 @@ type Filters = { academic_year: string; semester: string; school_id: string; dep
 // dashboard even though live records exist.
 const initialFilters: Filters = { academic_year: '', semester: '', school_id: '', dept_id: '', program_id: '' }
 
-const colorMap: Record<string, string> = {
-  Approved: '#3cb179',
-  'In Review': '#4687d7',
-  Returned: '#f0b649',
-  Overdue: '#e85757',
-  Completed: '#3cb179',
-  'In Progress': '#f0b649',
-  Pending: '#8aa8d1',
-}
-
 export default function DeanAcademicsDashboard({ go }: { go: (view: string) => void }) {
   const [filters, setFilters] = useState<Filters>(initialFilters)
   const [data, setData] = useState<any>(null)
@@ -77,7 +67,17 @@ export default function DeanAcademicsDashboard({ go }: { go: (view: string) => v
   const curriculumEntries = Object.entries(data?.curriculum_status || {})
   const curriculumTotal = curriculumEntries.reduce((sum: number, [, count]) => sum + Number(count || 0), 0)
   const readiness = data?.timetable_readiness || { completed: 0, in_progress: 0, pending: 0, conflicts: 0 }
+  const curriculumSegments = valueColoredSegments(curriculumEntries.map(([label, value]) => ({ label: niceLabel(label), value: Number(value || 0) })))
+  const readinessSegments = valueColoredSegments([
+    { label: 'Completed', value: Number(readiness.completed || 0) },
+    { label: 'In Progress', value: Number(readiness.in_progress || 0) },
+    { label: 'Pending', value: Number(readiness.pending || 0) },
+  ])
+  const readinessTotal = readinessSegments.reduce((sum, segment) => sum + segment.value, 0)
   const avgWorkload = data?.faculty_workload?.avg_load ?? 0
+  const healthScorecard = data?.health_scorecard || []
+  const healthPriority = data?.health_priority
+  const healthScope = [filters.academic_year || 'All academic years', filters.semester ? `Semester ${filters.semester}` : 'All semesters'].join(' · ')
   const exceptionItems = [
     { label: 'Pending decisions', count: Number(data?.kpis?.needs_my_decision || 0), target: 'decision_inbox', tone: 'warning' },
     { label: 'Timetable conflicts', count: Number(data?.kpis?.timetable_conflicts || 0), target: 'dean_timetable', tone: 'danger' },
@@ -131,15 +131,13 @@ export default function DeanAcademicsDashboard({ go }: { go: (view: string) => v
     </div>
 
     <div className="dean-main-grid">
-      <section className="dean-panel">
-        <div className="dean-panel-head"><h3>Academic Health (Overall)</h3></div>
-        <div className="dean-health-grid">
-          <MetricTile label="Avg CGPA" value={Number(data.health.avg_cgpa || 0).toFixed(2)} trend="up" />
-          <MetricTile label="Pass Rate" value={formatPercent(data.health.pass_rate)} trend="up" />
-          <MetricTile label="Attendance" value={formatPercent(data.health.attendance)} trend="up" />
-          <MetricTile label="Active Backlogs" value={formatNumber(data.health.active_backlogs)} trend="down" />
-          <MetricTile label="At-Risk Students" value={formatNumber(data.health.at_risk_students)} trend="down" />
+      <section className="dean-panel dean-health-panel">
+        <div className="dean-panel-head"><div><h3>Academic Health (Overall)</h3><span className="dean-panel-subtitle">{healthScope}</span></div><span className="hint">Live scorecard</span></div>
+        <div className="dean-health-context">Thresholds and comparisons use records within the selected academic scope.</div>
+        <div className="dean-health-scorecard">
+          {healthScorecard.map((metric: any) => <HealthMetric key={metric.key} metric={metric} onOpen={() => go(metric.route)} />)}
         </div>
+        {healthPriority && <button className={`dean-health-priority ${healthPriority.status}`} onClick={() => go(healthPriority.route)} type="button"><span><b>Priority action · {healthPriority.metric}</b><small>{healthPriority.message}</small></span><em>Open →</em></button>}
       </section>
 
       <section className="dean-panel">
@@ -156,15 +154,15 @@ export default function DeanAcademicsDashboard({ go }: { go: (view: string) => v
       </section>
 
       <section className="dean-panel">
-        <div className="dean-panel-head"><h3>Curriculum Status</h3></div>
+        <div className="dean-panel-head"><h3>Curriculum Status</h3><span className="hint">Darker shade = larger live value</span></div>
         <div className="dean-donut-wrap dean-curriculum-chart">
-          <DonutChart segments={curriculumEntries.map(([label, value]) => ({ label: niceLabel(label), value: Number(value || 0), color: colorMap[niceLabel(label)] || '#8ab7f5' }))} />
+          <DonutChart segments={curriculumSegments} />
           <div className="dean-donut-legend">
-            {curriculumEntries.map(([label, value]) => (
-              <button key={label} className="dean-legend-item" onClick={() => go('curriculum')} type="button" aria-label={`${niceLabel(label)}: ${value}`}>
-                <span className="dot" style={{ background: colorMap[niceLabel(label)] || '#8ab7f5' }} />
-                <span>{niceLabel(label)}</span>
-                <b>{curriculumTotal ? Math.round((Number(value || 0) / curriculumTotal) * 100) : 0}%</b>
+            {curriculumSegments.map((segment) => (
+              <button key={segment.label} className="dean-legend-item" onClick={() => go('curriculum')} type="button" aria-label={`${segment.label}: ${segment.value}`}>
+                <span className="dot" style={{ background: segment.color }} />
+                <span>{segment.label}</span>
+                <b>{curriculumTotal ? Math.round((segment.value / curriculumTotal) * 100) : 0}%</b>
               </button>
             ))}
           </div>
@@ -172,21 +170,16 @@ export default function DeanAcademicsDashboard({ go }: { go: (view: string) => v
       </section>
 
       <section className="dean-panel">
-        <div className="dean-panel-head"><h3>Timetable Readiness</h3><button className="dean-panel-link" type="button" onClick={() => go('dean_timetable')}>Resolve exceptions</button></div>
+        <div className="dean-panel-head"><h3>Timetable Readiness</h3><span className="hint">Darker shade = larger live value</span><button className="dean-panel-link" type="button" onClick={() => go('dean_timetable')}>Resolve exceptions</button></div>
         <div className="dean-donut-wrap dean-curriculum-chart dean-readiness-chart">
-          <DonutChart segments={[
-            { label: 'Completed', value: Number(readiness.completed || 0), color: colorMap.Completed },
-            { label: 'In Progress', value: Number(readiness.in_progress || 0), color: colorMap['In Progress'] },
-            { label: 'Pending', value: Number(readiness.pending || 0), color: colorMap.Pending },
-          ]} />
+          <DonutChart segments={readinessSegments} />
           <div className="dean-donut-legend">
-            {[
-              ['Completed', Number(readiness.completed || 0), colorMap.Completed],
-              ['In Progress', Number(readiness.in_progress || 0), colorMap['In Progress']],
-              ['Pending', Number(readiness.pending || 0), colorMap.Pending],
-            ].map(([label, value, color]: any) => <button key={label} className="dean-legend-item" onClick={() => go('dean_timetable')} type="button"><span className="dot" style={{ background: color }} /><span>{label}</span><b>{(Number(readiness.completed || 0) + Number(readiness.in_progress || 0) + Number(readiness.pending || 0)) ? Math.round((value / (Number(readiness.completed || 0) + Number(readiness.in_progress || 0) + Number(readiness.pending || 0))) * 100) : 0}%</b></button>)}
+            {readinessSegments.map((segment) => <button key={segment.label} className="dean-legend-item" onClick={() => go('dean_timetable')} type="button"><span className="dot" style={{ background: segment.color }} /><span>{segment.label}</span><b>{readinessTotal ? Math.round((segment.value / readinessTotal) * 100) : 0}%</b></button>)}
           </div>
-          <div className="dean-conflict-stat">Critical conflicts <strong>{Number(readiness.conflicts || 0)}</strong></div>
+          <div className="dean-readiness-summary" role="status" aria-label={`${Number(readiness.conflicts || 0)} critical timetable conflicts`}>
+            <div><span>Critical conflicts</span><small>Unresolved timetable exceptions</small></div>
+            <strong>{Number(readiness.conflicts || 0)}</strong>
+          </div>
         </div>
       </section>
 
@@ -224,10 +217,10 @@ export default function DeanAcademicsDashboard({ go }: { go: (view: string) => v
       <section className="dean-panel">
         <div className="dean-panel-head"><h3>My Approvals (Needs My Decision)</h3></div>
         <div className="dean-approval-list">
-          <ApprovalRow label="Curriculum Proposals" count={Number(data.kpis?.curriculum_reviews || 0)} onClick={() => go('curriculum')} />
-          <ApprovalRow label="Program Change Requests" count={Number(data.approvals?.program || 0)} onClick={() => go('dean_programs')} />
-          <ApprovalRow label="Timetable Exceptions" count={Number(data.kpis?.timetable_conflicts || 0)} onClick={() => go('dean_timetable')} />
-          <ApprovalRow label="Faculty Allocation Exceptions" count={Number(data.approvals?.allocation || 0)} onClick={() => go('dean_allocation')} />
+          <ApprovalRow label="Curriculum Proposals" count={Number(data.kpis?.curriculum_reviews || 0)} tone="curriculum" onClick={() => go('curriculum')} />
+          <ApprovalRow label="Program Change Requests" count={Number(data.approvals?.program || 0)} tone="program" onClick={() => go('dean_programs')} />
+          <ApprovalRow label="Timetable Exceptions" count={Number(data.kpis?.timetable_conflicts || 0)} tone="timetable" onClick={() => go('dean_timetable')} />
+          <ApprovalRow label="Faculty Allocation Exceptions" count={Number(data.approvals?.allocation || 0)} tone="allocation" onClick={() => go('dean_allocation')} />
         </div>
         <button className="dean-view-all" onClick={() => go('decision_inbox')} type="button">View All</button>
       </section>
@@ -250,12 +243,21 @@ function DeanKpiIcon({ label }: { label: string }) {
   return <Icon />
 }
 
-function MetricTile({ label, value, trend }: { label: string; value: string; trend: 'up' | 'down' }) {
-  return <div className="dean-metric">
-    <div className="dean-metric-label">{label}</div>
-    <div className="dean-metric-value">{value}</div>
-    <span className={`dean-metric-trend-note ${trend}`}>{trend === 'up' ? 'Higher is better' : 'Lower is better'}</span>
-  </div>
+function HealthMetric({ metric, onOpen }: { metric: any; onOpen: () => void }) {
+  const positiveMetric = ['avg_cgpa', 'pass_rate', 'attendance'].includes(metric.key)
+  const comparison = metric.comparison
+  const change = Number(comparison?.change || 0)
+  const trend = !comparison || !change ? 'stable' : ((change > 0) === positiveMetric ? 'improving' : 'worsening')
+  const displayValue = metric.value == null ? '—' : metric.key === 'avg_cgpa' ? Number(metric.value).toFixed(2) : ['pass_rate', 'attendance'].includes(metric.key) ? `${Number(metric.value)}%` : formatNumber(metric.value)
+  const comparisonText = !comparison ? 'No comparison period' : `${change > 0 ? '+' : ''}${change}${comparison.unit === 'points' ? ' pp' : ''} ${comparison.label}`
+  const statusLabel: Record<string, string> = { on_track: 'On track', watch: 'Watch', action: 'Action required', unavailable: 'No data' }
+  return <button className={`dean-health-metric ${metric.status}`} onClick={onOpen} type="button" aria-label={`${metric.label}: ${displayValue}, ${statusLabel[metric.status] || metric.status}`}>
+    <span className="dean-health-metric-label">{metric.label}</span>
+    <strong>{displayValue}</strong>
+    <span className={`dean-health-status ${metric.status}`}>{statusLabel[metric.status] || metric.status}</span>
+    <small className={`dean-health-comparison ${trend}`}>{comparisonText}</small>
+    <small className="dean-health-target">{metric.target}</small>
+  </button>
 }
 
 function WorkloadGauge({ value, status, units }: { value: number; status?: string | null; units?: number | null }) {
@@ -278,6 +280,22 @@ function WorkloadGauge({ value, status, units }: { value: number; status?: strin
     <div className="dean-workload-inner"><strong>{clamped < 10 ? clamped.toFixed(1) : Math.round(clamped)}%</strong><span>{label}</span>{units != null && <small>{Number(units).toFixed(2)} units / 4</small>}</div>
     <div className="dean-workload-footer"><span>0%</span><span>100%</span></div>
   </div>
+}
+
+function valueColoredSegments(segments: Array<{ label: string; value: number }>) {
+  const maxValue = Math.max(1, ...segments.map((segment) => segment.value))
+  return segments.map((segment, index) => ({
+    ...segment,
+    color: valueColor(index, segments.length, segment.value / maxValue),
+  }))
+}
+
+function valueColor(index: number, total: number, relativeValue: number) {
+  // Hue separates categories; saturation and lightness are derived from the
+  // live value, so a larger value is visibly stronger rather than predefined.
+  const hue = Math.round((index / Math.max(1, total)) * 300 + 30)
+  const intensity = Math.max(0, Math.min(1, relativeValue))
+  return `hsl(${hue} ${48 + intensity * 38}% ${88 - intensity * 42}%)`
 }
 
 function DonutChart({ segments }: { segments: Array<{ label: string; value: number; color: string }> }) {
@@ -319,8 +337,8 @@ function TrendChart({ data }: { data: any[] }) {
   </div>
 }
 
-function ApprovalRow({ label, count, onClick }: { label: string; count: number; onClick: () => void }) {
-  return <button className="dean-approval-row" onClick={onClick} type="button"><span>{label}</span><b>{count}</b></button>
+function ApprovalRow({ label, count, tone, onClick }: { label: string; count: number; tone: string; onClick: () => void }) {
+  return <button className={`dean-approval-row ${tone} ${count ? 'has-count' : 'is-empty'}`} onClick={onClick} type="button"><span>{label}</span><b>{count}</b></button>
 }
 
 function niceLabel(label: string) {

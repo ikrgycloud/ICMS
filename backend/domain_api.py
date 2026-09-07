@@ -121,10 +121,11 @@ def dean_dashboard(
     reviews = scoped_academic_query(s, D.AcademicQualityReview, ctx).all()
     actions = scoped_academic_query(s, D.CorrectiveAction, ctx).all()
     exceptions = scoped_academic_query(s, D.TimetableException, ctx).all()
-    results = s.query(D.StudentSubjectResult).filter(
+    all_results = s.query(D.StudentSubjectResult).filter(
         D.StudentSubjectResult.tenant_id == ctx["tenant_id"],
         D.StudentSubjectResult.course_id.in_(course_ids) if course_ids else text("1=0"),
     ).all()
+    results = all_results
     if academic_year:
         results = [row for row in results if row.academic_year == academic_year]
     if semester is not None:
@@ -157,9 +158,10 @@ def dean_dashboard(
     passed = sum(1 for row in results if row.outcome == "passed")
     attendance_rate = round(100 * sum(1 for row in attendance if row.present) / len(attendance), 1) if attendance else None
     pass_rate = round(100 * passed / len(results), 1) if results else None
-    avg_cgpa = round(sum((row.cgpa or 0) for row in student_rows) / len(student_rows), 2) if student_rows else 0
+    cgpa_values = [row.cgpa for row in student_rows if row.cgpa is not None]
+    avg_cgpa = round(sum(cgpa_values) / len(cgpa_values), 2) if cgpa_values else None
     active_backlogs = sum(1 for row in results if row.outcome == "failed")
-    at_risk_students = sum(1 for row in student_rows if (row.cgpa or 0) < 6)
+    at_risk_students = sum(1 for row in student_rows if row.cgpa is not None and row.cgpa < 6)
     department_map = {row.id: row.name for row in department_rows}
     course_map = {row.id: row for row in course_rows}
     department_scores = {}
@@ -227,6 +229,50 @@ def dean_dashboard(
         "avg_load": round(min(100, max(0, average_workload_units / max_units * 100)), 1),
         "status": "No allocation data" if not faculty_ids or not scoped_loads else "Underloaded" if average_workload_units < 2 else "Balanced" if average_workload_units <= max_units else "Overloaded",
     }
+    def comparison(current, previous, unit, label):
+        if current is None or previous is None:
+            return None
+        return {"change": round(current - previous, 1), "unit": unit, "label": label}
+
+    result_years = sorted({row.academic_year for row in all_results if row.academic_year})
+    previous_year = result_years[result_years.index(academic_year) - 1] if academic_year in result_years and result_years.index(academic_year) else None
+    previous_results = [row for row in all_results if row.academic_year == previous_year] if previous_year else []
+    previous_pass_rate = round(100 * sum(1 for row in previous_results if row.outcome == "passed") / len(previous_results), 1) if previous_results else None
+    previous_backlogs = sum(1 for row in previous_results if row.outcome == "failed") if previous_results else None
+    recent_start, prior_start = date.today() - timedelta(days=29), date.today() - timedelta(days=59)
+    recent_attendance = [row for row in attendance if row.on_date and row.on_date >= recent_start]
+    prior_attendance = [row for row in attendance if row.on_date and prior_start <= row.on_date < recent_start]
+    recent_rate = round(100 * sum(1 for row in recent_attendance if row.present) / len(recent_attendance), 1) if recent_attendance else None
+    prior_rate = round(100 * sum(1 for row in prior_attendance if row.present) / len(prior_attendance), 1) if prior_attendance else None
+    backlog_rate = active_backlogs / max(1, len(student_rows))
+    risk_rate = at_risk_students / max(1, len(cgpa_values))
+
+    def health_status(key, value):
+        if value is None:
+            return "unavailable"
+        if key == "avg_cgpa":
+            return "on_track" if value >= 7 else "watch" if value >= 6 else "action"
+        if key in {"pass_rate", "attendance"}:
+            return "on_track" if value >= 75 else "watch" if value >= 60 else "action"
+        rate = backlog_rate if key == "active_backlogs" else risk_rate
+        return "on_track" if rate <= .03 else "watch" if rate <= .10 else "action"
+
+    health_scorecard = [
+        {"key": "avg_cgpa", "label": "Average CGPA", "value": avg_cgpa, "target": "Target ≥ 7.00", "status": health_status("avg_cgpa", avg_cgpa), "comparison": None, "route": "analytics"},
+        {"key": "pass_rate", "label": "Pass rate", "value": pass_rate, "target": "Target ≥ 75%", "status": health_status("pass_rate", pass_rate), "comparison": comparison(pass_rate, previous_pass_rate, "points", f"vs {previous_year}") if academic_year else None, "route": "analytics"},
+        {"key": "attendance", "label": "Attendance", "value": attendance_rate, "target": "Target ≥ 75%", "status": health_status("attendance", attendance_rate), "comparison": comparison(recent_rate, prior_rate, "points", "vs prior 30 days"), "route": "attendance"},
+        {"key": "active_backlogs", "label": "Active backlogs", "value": active_backlogs, "target": "Target ≤ 3% of students", "status": health_status("active_backlogs", active_backlogs), "comparison": comparison(active_backlogs, previous_backlogs, "count", f"vs {previous_year}") if academic_year else None, "route": "students"},
+        {"key": "at_risk_students", "label": "At-risk students", "value": at_risk_students, "target": "Target ≤ 3% of assessed students", "status": health_status("at_risk_students", at_risk_students), "comparison": None, "route": "students"},
+    ]
+    priority_metric = next((row for status in ("action", "watch") for row in health_scorecard if row["status"] == status), None)
+    priority_messages = {
+        "attendance": "Attendance is below the operating target. Review affected sections.",
+        "pass_rate": "Pass rate needs attention. Review result and intervention data.",
+        "avg_cgpa": "Average CGPA is below target. Review academic support actions.",
+        "active_backlogs": "Backlogs exceed the operating threshold. Open the student risk list.",
+        "at_risk_students": "At-risk student volume needs review. Open the intervention list.",
+    }
+    health_priority = {"status": priority_metric["status"], "metric": priority_metric["label"], "message": priority_messages[priority_metric["key"]], "route": priority_metric["route"]} if priority_metric else {"status": "on_track", "metric": "Academic health", "message": "All tracked academic health measures are on target.", "route": "analytics"}
     return {
         "filters": {"academic_year": academic_year, "semester": semester, "school_id": school_id, "dept_id": dept_id, "program_id": program_id},
         "options": {
@@ -252,6 +298,9 @@ def dean_dashboard(
             "active_actions": sum(1 for row in actions if row.state != "VERIFIED"),
             "risk_indicators": len(reviews),
         },
+        "health_scorecard": health_scorecard,
+        "health_priority": health_priority,
+        "data_as_of": datetime.utcnow().isoformat(),
         "department_performance": department_performance,
         "curriculum_status": curriculum_states,
         "timetable_readiness": {"completed": sum(1 for row in completions if row.status == "completed"), "in_progress": sum(1 for row in completions if row.status == "in_progress"), "pending": max(0, len(section_rows) - len(completions)), "conflicts": sum(1 for row in exceptions if row.status != "RESOLVED")},
@@ -392,7 +441,12 @@ def actor_department_id(s, ctx):
     staff = _staff_profile(s, ctx)
     if staff and staff.dept_id:
         return staff.dept_id
-    ref = (ctx.get("scope_ref") or "").removeprefix("dept_").removeprefix("scope_")
+    scope_ref = (ctx.get("scope_ref") or "").strip()
+    # Department identifiers are commonly named ``dept_*``.  Resolve the
+    # persisted identifier before treating that prefix as a scope wrapper.
+    if scope_ref and s.get(D.Department, scope_ref):
+        return scope_ref
+    ref = scope_ref.removeprefix("dept_").removeprefix("scope_")
     return ref if s.get(D.Department, ref) else None
 
 
@@ -1967,10 +2021,10 @@ def decide_allocation_proposal(proposal_id: str, decision: str, body: AcademicPr
         raise HTTPException(403, "Proposal submitter cannot approve or reject their own proposal")
     if not proposal or proposal.proposal_type != "allocation" or proposal.state != "SUBMITTED": raise HTTPException(409, "Invalid allocation proposal")
     if proposal.status_version != body.expected_status_version: raise HTTPException(409, "Proposal changed; reload before deciding")
-    claim_proposal_transition(s, proposal, body.expected_status_version, {"SUBMITTED"})
     target={"approve":"APPROVED","reject":"REJECTED","return":"RETURNED"}.get(decision.lower())
     if not target: raise HTTPException(422, "Unsupported allocation decision")
     validate_transition(s, proposal, target, body.expected_status_version, ctx, body.reason)
+    claim_proposal_transition(s, proposal, body.expected_status_version, {"SUBMITTED"})
     previous=proposal.state; proposal.state=target; proposal.status_version += 1; proposal.updated_at=datetime.utcnow()
     if target=="APPROVED":
         payload=json.loads(_proposal_version(s, proposal).payload_json); section=s.get(D.Section,payload["section_id"]); faculty=s.get(D.StaffMember,payload["faculty_person_id"])
@@ -2281,7 +2335,7 @@ def create_program_proposal(body: ProgramProposalIn, ctx=Depends(auth), s=Depend
 
 @router.post("/programs/proposals/{proposal_id}/submit")
 def submit_program_proposal(proposal_id:str,body:AcademicProposalTransitionIn,ctx=Depends(auth),s=Depends(db)):
-    p=require_academic_object(s, ctx, s.query(D.AcademicProposal).filter(D.AcademicProposal.id == proposal_id).with_for_update().first(), "approve", "Programme proposal")
+    p=require_academic_object(s, ctx, s.query(D.AcademicProposal).filter(D.AcademicProposal.id == proposal_id).with_for_update().first(), "submit", "Programme proposal")
     if not p or p.proposal_type!="program" or p.submitted_by!=ctx["sub"] or p.state!="DRAFT" or p.status_version!=body.expected_status_version: raise HTTPException(409,"Programme proposal cannot be submitted")
     p.state="SUBMITTED";p.status_version+=1;p.updated_at=datetime.utcnow();_proposal_event(s,p,ctx,"DRAFT","SUBMITTED",body.reason);write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.program.proposal.submit",f"academic_proposal:{p.id}","DRAFT","SUBMITTED",body.reason,commit=False);s.commit();return {"proposal":_proposal_payload(s,p)}
 
@@ -2292,10 +2346,10 @@ def decide_program_proposal(proposal_id:str,decision:str,body:AcademicProposalTr
     p=require_tenant(s.get(D.AcademicProposal,proposal_id), ctx, "Programme proposal")
     prevent_self_approval(p, ctx)
     if not p or p.proposal_type!="program" or p.state!="SUBMITTED" or p.status_version!=body.expected_status_version: raise HTTPException(409,"Invalid programme decision")
-    claim_proposal_transition(s, p, body.expected_status_version, {"SUBMITTED"})
     target={"approve":"APPROVED","reject":"REJECTED","return":"RETURNED","escalate":"ESCALATED"}.get(decision.lower())
     if not target: raise HTTPException(422,"Unsupported decision")
     validate_transition(s, p, target, body.expected_status_version, ctx, body.reason)
+    claim_proposal_transition(s, p, body.expected_status_version, {"SUBMITTED"})
     data=json.loads(_proposal_version(s,p).payload_json)
     if target=="APPROVED" and not data["feasibility"]["ready"]: raise HTTPException(409,"Programme lacks faculty or course readiness; escalate or revise")
     previous=p.state;p.state=target;p.status_version+=1;p.updated_at=datetime.utcnow()

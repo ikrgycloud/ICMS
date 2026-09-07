@@ -211,14 +211,17 @@ h1, h2, h3, h4 { font-weight: 600; line-height: 1.2; }
 .dean-donut-legend { width: 100%; display: flex; flex-direction: column; gap: 3px; }
 .dean-legend-item { width: 100%; display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; column-gap: 10px; align-items: center; background: transparent; font-size: 11px; color: var(--txt-soft); text-align: left; padding: 4px 0; }
 .dean-curriculum-chart .dean-legend-item b { min-width: 34px; padding-left: 12px; color: var(--navy); text-align: right; }
-.dean-readiness-chart .dean-conflict-stat { grid-column: 1 / -1; grid-row: 2; justify-self: start; margin-left: 4px; padding-top: 2px; }
 .dean-legend-item .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 .dean-legend-item > span:nth-child(2) { min-width: 0; }
 .dean-readiness-totals { display: flex; flex-wrap: wrap; grid-column: 2; grid-row: 1; gap: 6px; align-content: center; justify-content: center; }
 .dean-readiness-total { display: inline-flex; flex-direction: column; align-items: center; font-size: 11px; color: var(--txt-soft); }
 .dean-readiness-total b { font-size: 13px; color: var(--navy); }
-.dean-conflict-stat { grid-column: 1 / -1; grid-row: 2; justify-self: center; font-size: 14px; font-weight: 700; color: #d22e2e; }
-.dean-conflict-stat strong { font-size: 22px; }
+.dean-readiness-chart { grid-template-rows: auto auto; row-gap: 10px; padding-bottom: 12px; }
+.dean-readiness-summary { grid-column: 1 / -1; grid-row: 2; display: flex; align-items: center; justify-content: space-between; min-width: 0; padding: 10px 4px 0; border-top: 1px solid #e8edf5; color: #9f2430; }
+.dean-readiness-summary > div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.dean-readiness-summary span { font-size: 12px; font-weight: 700; }
+.dean-readiness-summary small { overflow: hidden; color: var(--txt-mute); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.dean-readiness-summary strong { min-width: 34px; padding-left: 12px; color: #d22e2e; font-size: 26px; line-height: 1; text-align: right; }
 .dean-workload-wrap { display: flex; justify-content: center; padding: 8px 16px 14px; }
 .dean-workload-gauge { width: min(100%, 220px); height: 174px; position: relative; }
 .dean-workload-gauge svg { display: block; width: 100%; height: 130px; overflow: visible; }
@@ -256,6 +259,11 @@ h1, h2, h3, h4 { font-weight: 600; line-height: 1.2; }
 .dean-main-grid > .dean-panel:nth-child(8):hover .dean-approval-list::-webkit-scrollbar-thumb { background: #b7c9e2; border-radius: 999px; }
 .dean-approval-row { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 10px 12px; border: 1px solid #edf2f7; border-radius: 10px; background: #f8fbff; font-size: 12px; color: var(--txt-soft); }
 .dean-approval-row b { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 22px; border-radius: 50%; background: #dfeaff; color: #1d4fa3; font-size: 11px; }
+.dean-approval-row.curriculum b { background: #eee8ff; color: #6741b9; }
+.dean-approval-row.program b { background: #e4f0ff; color: #1d5fae; }
+.dean-approval-row.timetable b { background: #ffe7ea; color: #be2940; }
+.dean-approval-row.allocation b { background: #fff0d4; color: #a26700; }
+.dean-approval-row.is-empty b { background: #f0f3f7; color: #8390a4; }
 .dean-view-all { display: block; margin: 0 16px 16px; width: calc(100% - 32px); padding: 10px 12px; border-radius: 10px; background: linear-gradient(180deg, #f7fbff, #edf4ff); border: 1px solid #d7e5fb; color: var(--navy); font-weight: 600; }
 .dean-empty { padding: 18px 16px; color: var(--txt-mute); font-size: 12px; }
 .dean-performance-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
@@ -589,8 +597,38 @@ h1, h2, h3, h4 { font-weight: 600; line-height: 1.2; }
 .dean-main-grid > .dean-panel:nth-child(4),
 .dean-main-grid > .dean-panel:nth-child(n + 5):nth-child(-n + 8) { grid-column: span 1; height: 300px; }
 .dean-panel { display: flex; flex-direction: column; min-width: 0; }
+.dean-main-grid > .dean-panel.dean-health-panel { grid-column: span 2; height: 360px; }
 .dean-panel-head { flex: 0 0 auto; gap: 12px; }
 .dean-panel-head h3 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dean-health-panel .dean-panel-head { align-items: flex-start; }
+.dean-panel-subtitle { display: block; margin-top: 3px; color: var(--txt-mute); font-size: 10px; font-weight: 500; }
+.dean-health-context { padding: 8px 16px 0; color: var(--txt-mute); font-size: 10px; line-height: 1.35; }
+.dean-health-scorecard { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; padding: 8px 14px; }
+.dean-health-metric { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 6px; min-width: 0; padding: 8px 9px; border: 1px solid #dfe8f5; border-radius: 9px; background: #fff; color: var(--navy); text-align: left; cursor: pointer; transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease; }
+.dean-health-metric:hover { transform: translateY(-1px); box-shadow: 0 4px 10px rgba(28, 58, 103, .09); }
+.dean-health-metric:focus-visible { outline: 3px solid rgba(52,120,212,.28); outline-offset: 2px; }
+.dean-health-metric.watch { border-color: #f0dfb4; background: #fffdf8; }
+.dean-health-metric.action { border-color: #efc6cd; background: #fffafb; }
+.dean-health-metric.unavailable { border-style: dashed; background: #fafcff; }
+.dean-health-metric-label { overflow: hidden; color: var(--txt-soft); font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.dean-health-metric > strong { grid-column: 1; font-size: 18px; line-height: 1.05; }
+.dean-health-status { align-self: center; justify-self: end; padding: 2px 5px; border-radius: 999px; background: #eaf7ef; color: #16734f; font-size: 8px; font-weight: 700; text-transform: uppercase; white-space: nowrap; }
+.dean-health-status.watch { background: #fff4da; color: #9a6500; }
+.dean-health-status.action { background: #fff0f2; color: #b72d3c; }
+.dean-health-status.unavailable { background: #eef2f7; color: #6b7b93; }
+.dean-health-comparison, .dean-health-target { grid-column: 1 / -1; overflow: hidden; font-size: 9px; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+.dean-health-comparison { color: var(--txt-mute); }
+.dean-health-comparison.improving { color: #16734f; }
+.dean-health-comparison.worsening { color: #b72d3c; }
+.dean-health-target { color: #7b8aa1; }
+.dean-health-priority { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: auto 14px 12px; padding: 8px 10px; border: 1px solid #d7e5fb; border-radius: 9px; background: #f7fbff; color: var(--navy); text-align: left; cursor: pointer; }
+.dean-health-priority:hover { border-color: #a9c7ee; background: #eff7ff; }
+.dean-health-priority.watch { border-color: #f0dfb4; background: #fffaf0; }
+.dean-health-priority.action { border-color: #efc6cd; background: #fff7f8; }
+.dean-health-priority span { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.dean-health-priority b { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.dean-health-priority small { overflow: hidden; color: var(--txt-soft); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.dean-health-priority em { flex: 0 0 auto; color: #2d6cdf; font-size: 10px; font-style: normal; font-weight: 700; }
 .dean-health-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 14px; flex: 1; align-content: center; padding: 18px 16px; }
 .dean-metric { padding: 12px 0; border-bottom: 1px solid #edf2f7; }
 .dean-metric:nth-last-child(-n + 2) { border-bottom: 0; }
@@ -612,6 +650,7 @@ h1, h2, h3, h4 { font-weight: 600; line-height: 1.2; }
   .dean-main-grid > .dean-panel:nth-child(3),
   .dean-main-grid > .dean-panel:nth-child(4),
   .dean-main-grid > .dean-panel:nth-child(n + 5):nth-child(-n + 8) { grid-column: span 1; height: 300px; }
+  .dean-main-grid > .dean-panel.dean-health-panel { grid-column: span 2; height: 360px; }
 }
 
 @media (max-width: 760px) {
@@ -622,7 +661,9 @@ h1, h2, h3, h4 { font-weight: 600; line-height: 1.2; }
   .dean-main-grid > .dean-panel:nth-child(3),
   .dean-main-grid > .dean-panel:nth-child(4),
   .dean-main-grid > .dean-panel:nth-child(n + 5):nth-child(-n + 8) { grid-column: span 1; height: auto; min-height: 250px; }
+  .dean-main-grid > .dean-panel.dean-health-panel { grid-column: span 1; height: auto; min-height: 0; }
   .dean-health-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dean-health-scorecard { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dean-metric:nth-last-child(-n + 2) { border-bottom: 1px solid #edf2f7; }
   .dean-metric:last-child { grid-column: 1 / -1; border-bottom: 0; }
   .dean-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }

@@ -22,6 +22,7 @@ from migrations import v0020_outcome_assessment_mapping
 from migrations import v0021_quality_effectiveness
 from migrations import v0022_job_queue
 from migrations import v0023_notification_delivery
+from migrations import v0024_governance_policy_repair
 
 MIGRATIONS = [v0001_admissions_foundation, v0002_repair_legacy_application_status,
               v0003_admission_seat_pool_identity, v0004_admissions_phase2_application_context]
@@ -44,6 +45,7 @@ MIGRATIONS.append(v0020_outcome_assessment_mapping)
 MIGRATIONS.append(v0021_quality_effectiveness)
 MIGRATIONS.append(v0022_job_queue)
 MIGRATIONS.append(v0023_notification_delivery)
+MIGRATIONS.append(v0024_governance_policy_repair)
 
 
 def upgrade(engine):

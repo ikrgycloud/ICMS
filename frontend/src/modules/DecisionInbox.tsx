@@ -59,9 +59,28 @@ export default function DecisionInbox() {
     if (!selected || !decision) return
     if (decision !== 'approve' && !reason.trim()) { setError('A reason is required for this decision.'); return }
     setSaving(true); setError('')
-    const target = decision === 'approve' ? 'APPROVED' : decision === 'return' ? 'RETURNED' : 'REJECTED'
+    const decisionReason = reason.trim() || 'Approved by Dean Academics'
     try {
-      await api.governanceTransition(selected.id, { target_state: target, expected_status_version: selected.status_version, reason: reason.trim() || 'Approved by Dean Academics' })
+      // Domain proposal routes apply the required publish/implementation side
+      // effects (course, programme, calendar entry, or allocation).  The
+      // generic governance transition intentionally cannot provide them.
+      switch (String(selected.type || '').toLowerCase()) {
+        case 'curriculum':
+          await api.decideCurriculumProposal(selected.id, decision, selected.status_version, decisionReason)
+          break
+        case 'program':
+          await api.decideProgramProposal(selected.id, decision, selected.status_version, decisionReason)
+          break
+        case 'calendar':
+          await api.decideAcademicCalendarProposal(selected.id, decision, selected.status_version, decisionReason)
+          break
+        case 'allocation':
+          await api.decideAllocationProposal(selected.id, decision, selected.status_version, decisionReason)
+          break
+        default:
+          const target = decision === 'approve' ? 'APPROVED' : decision === 'return' ? 'RETURNED' : 'REJECTED'
+          await api.governanceTransition(selected.id, { target_state: target, expected_status_version: selected.status_version, reason: decisionReason })
+      }
       setSelected(null); setDecision(''); setReason(''); window.dispatchEvent(new Event('icms:approval-updated')); await load()
     } catch (e: any) { setError(e.message || 'Approval could not be completed.') } finally { setSaving(false) }
   }
