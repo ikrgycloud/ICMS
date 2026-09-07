@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { HiOutlineAcademicCap, HiOutlineBanknotes, HiOutlineCalendarDays, HiOutlineChartBarSquare, HiOutlineCheckBadge, HiOutlineClipboardDocumentList, HiOutlineCreditCard, HiOutlineDocumentCheck, HiOutlineDocumentCurrencyRupee, HiOutlineGift, HiOutlineLifebuoy, HiOutlineQueueList, HiOutlineScale, HiOutlineSquares2X2, HiOutlineUserGroup, HiOutlineUserPlus, HiOutlineUsers } from 'react-icons/hi2'
+import { HiOutlineAcademicCap, HiOutlineBanknotes, HiOutlineBookOpen, HiOutlineCalendarDays, HiOutlineChartBarSquare, HiOutlineCheckBadge, HiOutlineClipboardDocumentList, HiOutlineClock, HiOutlineCreditCard, HiOutlineDocumentCheck, HiOutlineDocumentCurrencyRupee, HiOutlineDocumentText, HiOutlineExclamationTriangle, HiOutlineFolder, HiOutlineGift, HiOutlineHome, HiOutlineLifebuoy, HiOutlineQueueList, HiOutlineScale, HiOutlineShieldCheck, HiOutlineSquares2X2, HiOutlineUserGroup, HiOutlineUserPlus, HiOutlineUsers } from 'react-icons/hi2'
 import { api, getUser, logout, saveSession } from './api'
 import Workflows from './views/Workflows'
 import Delegations from './views/Delegations'
@@ -32,6 +32,11 @@ import Research from './modules/Research'
 import Placements from './modules/Placements'
 import Grievance from './modules/Grievance'
 import Governance from './modules/Governance'
+import DeanAcademicsDashboard from './modules/DeanAcademicsDashboard'
+import DeanAcademicWorkspaces from './modules/DeanAcademicWorkspaces'
+import DeanPrograms from './modules/DeanPrograms'
+import DecisionInbox from './modules/DecisionInbox'
+import MyRequests from './modules/MyRequests'
 import ChairmanApprovals from './modules/ChairmanApprovals'
 import ChairmanDelegation from './modules/ChairmanDelegation'
 import AdminPanel from './modules/AdminPanel'
@@ -58,6 +63,15 @@ const LEVEL_COLORS: Record<number, string> = {
 }
 
 const GROUP_ORDER = ['Workspace', 'Academics', 'Services', 'Operations', 'Platform', 'Authority', 'Reference']
+const DEAN_ACADEMICS_NAV = [
+  ['Workspace', 'Overview', 'overview'],
+  ['Academic Planning', 'Programs', 'dean_programs'], ['Academic Planning', 'Curriculum', 'curriculum'], ['Academic Planning', 'Courses', 'courses_subjects'],
+  ['Academic Operations', 'Academic Calendar', 'academic_calendar'], ['Academic Operations', 'Timetable', 'dean_timetable'], ['Academic Operations', 'Faculty Allocation', 'dean_allocation'],
+  ['Academic Quality', 'Performance & Results', 'analytics'], ['Academic Quality', 'Academic Risk', 'dean_risk'],
+  ['Authority', 'My Approvals', 'decision_inbox'], ['Authority', 'My Requests', 'workflows'],
+  ['Reports', 'Reports & Analytics', 'dean_reports'], ['Reports', 'Audit', 'audit'],
+  ['Reference', 'Directory', 'directory'],
+] as const
 const CHAIRMAN_GROUP_ORDER = ['Governance', 'Institution', 'Strategy & Insights', 'Support']
 const CHAIRMAN_DISPLAY: Record<string, { label: string; group: string }> = {
   overview: { label: 'Overview', group: 'Governance' },
@@ -165,10 +179,12 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const [view, setView] = useState('overview')
   const [sideOpen, setSideOpen] = useState(false)
   const [notifs, setNotifs] = useState<any>({ notifications: [], unread: 0 })
+  const [approvalCount, setApprovalCount] = useState(0)
   const [showNotif, setShowNotif] = useState(false)
   const [showRoles, setShowRoles] = useState(false)
   const [switching, setSwitching] = useState(false)
   const [collapsedDirectorGroups, setCollapsedDirectorGroups] = useState<Record<string, boolean>>({})
+  const [collapsedDeanGroups, setCollapsedDeanGroups] = useState<Record<string, boolean>>({})
 
   function loadWs() {
     api.workspace().then(setWs).catch(() => {})
@@ -178,20 +194,42 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     api.notifications().then(setNotifs).catch(() => {})
   }
 
+  function loadApprovalCount() {
+    if (user?.office_n === 6) api.governanceInbox().then((result: any) => setApprovalCount(Number(result.summary?.pending ?? result.count ?? 0))).catch(() => {})
+  }
+
   useEffect(() => {
     api.me().then(r => setUser(r.user)).catch(() => {})
     loadWs()
     loadNotifs()
+    loadApprovalCount()
     const timer = setInterval(loadNotifs, 20000)
-    return () => clearInterval(timer)
+    const approvalTimer = setInterval(loadApprovalCount, 20000)
+    const approvalUpdated = () => loadApprovalCount()
+    window.addEventListener('icms:approval-updated', approvalUpdated)
+    return () => { clearInterval(timer); clearInterval(approvalTimer); window.removeEventListener('icms:approval-updated', approvalUpdated) }
   }, [])
+
+  useEffect(() => {
+    const hashView = window.location.hash.replace(/^#/, '')
+    if (hashView && hashView !== view) {
+      setView(hashView)
+    }
+  }, [])
+
+  useEffect(() => {
+    const hashView = window.location.hash.replace(/^#/, '')
+    if (hashView !== view) {
+      window.location.hash = view || 'overview'
+    }
+  }, [view])
 
   useEffect(() => {
     if (!ws?.modules?.length) return
     // Faculty & Staff is a Principal-specific presentation of the authorised
     // HR module.  It has its own route so that the list/profile experience is
     // retained when opened from the dashboard KPI or the Principal sidebar.
-    const virtualModule = (user?.office_n === 4 && ['faculty_staff', 'curriculum', 'courses_subjects'].includes(view)) || view.startsWith('director_') || view.startsWith('manager_')
+    const virtualModule = (user?.office_n === 4 && ['faculty_staff', 'curriculum', 'courses_subjects'].includes(view)) || (user?.office_n === 6 && ['courses_subjects', 'decision_inbox', 'dean_programs', 'dean_timetable', 'dean_allocation', 'dean_risk', 'dean_reports', 'analytics'].includes(view)) || view.startsWith('director_') || view.startsWith('manager_')
     // Finance is a student self-service destination even though students do
     // not receive the staff Finance workspace capability from the backend.
     if (!virtualModule && !(user?.persona === 'student' && view === 'finance') && !ws.modules.some((module: any) => module.key === view)) {
@@ -238,7 +276,8 @@ export default function App({ onLogout }: { onLogout: () => void }) {
       // Finance Manager works only with fee operations and fee-approval tasks.
       // Governance matrices and generic administration screens are not part of this portal.
       .filter((module: any) => user?.office_n !== 22 || ['overview', 'finance', 'rollover', 'approvals', 'audit'].includes(module.key))
-      .map((module: any) => ({ ...module, ...displayMeta(user, module) }))
+      .filter((module: any) => module && module.key)
+      .map((module: any) => ({ ...module, actions: module.actions || {}, ...displayMeta(user, module) }))
       if (user?.persona === 'student' && !modules.some((module: any) => module.key === 'finance')) {
         modules.push({ key: 'finance', label: 'Fees & Payments', group: 'Student Services', enabled: true })
       }
@@ -254,6 +293,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const color = LEVEL_COLORS[user.level] || '#c9a24a'
   const chairmanShell = user.office_n === 1
   const principalShell = user.office_n === 4
+  const deanAcademicsShell = user.office_n === 6
   const facultyShell = user.persona === 'faculty'
   const directorAdmissionsShell = user.office_n === 15 && user.active_role === 'Director of Admissions'
   // The seeded office role is named “Admissions Manager”; accept the singular
@@ -274,6 +314,12 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     ;(out[group] = out[group] || []).push({ key, label, group, source, enabled: Boolean(source) })
     return out
   }, {})
+  const deanGroups = DEAN_ACADEMICS_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
+    const source = displayModules.find((module: any) => module.key === key) || { key, actions: {} }
+    ;(out[group] = out[group] || []).push({ key, label, group, source, enabled: true })
+    return out
+  }, {})
+  const deanGroupKeys = [...new Set(DEAN_ACADEMICS_NAV.map(([group]) => group))]
   const facultyGroups = FACULTY_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
     const source = displayModules.find((module: any) => module.key === key)
     ;(out[group] = out[group] || []).push({ key, label, group, source, enabled: Boolean(source) })
@@ -295,12 +341,14 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const managerGroupKeys = [...new Set(ADMISSION_MANAGER_NAV.map(([group]) => group))]
   const activeAdmissionsGroups = directorAdmissionsShell ? directorGroups : managerGroups
   const activeAdmissionsGroupKeys = directorAdmissionsShell ? directorGroupKeys : managerGroupKeys
-  const current = (admissionsOperationsShell
+  const current = (deanAcademicsShell
+    ? Object.values(deanGroups).flat().find((module: any) => module.key === view)
+    : admissionsOperationsShell
     ? Object.values(activeAdmissionsGroups).flat().find((module: any) => module.key === view)
     : undefined) || displayModules.find((module: any) => module.key === view) || displayModules[0]
 
   return (
-    <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''} ${facultyShell ? 'faculty-shell' : ''} ${directorAdmissionsShell ? 'director-admissions-shell' : ''} ${admissionManagerShell ? 'admission-manager-shell' : ''}`}>
+    <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''} ${facultyShell ? 'faculty-shell' : ''} ${deanAcademicsShell ? 'dean-academics-shell' : ''} ${directorAdmissionsShell ? 'director-admissions-shell' : ''} ${admissionManagerShell ? 'admission-manager-shell' : ''}`}>
       <aside className={`sidebar ${sideOpen ? 'open' : ''}`}>
         <div className="brand">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -321,26 +369,28 @@ export default function App({ onLogout }: { onLogout: () => void }) {
         </div>
 
         <nav className="side-nav">
-          {(principalShell ? Object.keys(principalGroups) : facultyShell ? Object.keys(facultyGroups) : admissionsOperationsShell ? activeAdmissionsGroupKeys : groupKeys).map(group => (
+          {(deanAcademicsShell ? deanGroupKeys : principalShell ? Object.keys(principalGroups) : facultyShell ? Object.keys(facultyGroups) : admissionsOperationsShell ? activeAdmissionsGroupKeys : groupKeys).map(group => (
             <div key={group}>
-              {admissionsOperationsShell ? <button className="side-sec director-nav-group" onClick={() => setCollapsedDirectorGroups(current => ({ ...current, [group]: !current[group] }))} type="button">{group}<span>{collapsedDirectorGroups[group] ? '+' : '−'}</span></button> : <div className="side-sec">{group}</div>}
-              {(!admissionsOperationsShell || !collapsedDirectorGroups[group]) && (principalShell ? principalGroups[group] : facultyShell ? facultyGroups[group] : admissionsOperationsShell ? activeAdmissionsGroups[group] : groups[group]).map((module: any) => (
+              {deanAcademicsShell || admissionsOperationsShell ? <button className="side-sec director-nav-group" onClick={() => deanAcademicsShell ? setCollapsedDeanGroups(current => ({ ...current, [group]: !current[group] })) : setCollapsedDirectorGroups(current => ({ ...current, [group]: !current[group] }))} type="button">{group}<span>{(deanAcademicsShell ? collapsedDeanGroups[group] : collapsedDirectorGroups[group]) ? '+' : '−'}</span></button> : <div className="side-sec">{group}</div>}
+              {((!deanAcademicsShell && !admissionsOperationsShell) || (deanAcademicsShell ? !collapsedDeanGroups[group] : !collapsedDirectorGroups[group])) && (deanAcademicsShell ? deanGroups[group] : principalShell ? principalGroups[group] : facultyShell ? facultyGroups[group] : admissionsOperationsShell ? activeAdmissionsGroups[group] : groups[group]).map((module: any) => (
                 <button
-                  key={(principalShell || facultyShell || admissionsOperationsShell) ? `${group}-${module.label}` : module.key}
-                  className={`nav-item ${(facultyShell ? FACULTY_ACTIVE_LABEL[view] === module.label : view === module.key) && (!(principalShell || facultyShell || admissionsOperationsShell) || module.enabled) ? 'on' : ''} ${(principalShell || facultyShell || admissionsOperationsShell) && !module.enabled ? 'nav-item-disabled' : ''}`}
+                  key={(deanAcademicsShell || principalShell || facultyShell || admissionsOperationsShell) ? `${group}-${module.label}` : module.key}
+                  className={`nav-item ${(facultyShell ? FACULTY_ACTIVE_LABEL[view] === module.label : view === module.key) && (!(deanAcademicsShell || principalShell || facultyShell || admissionsOperationsShell) || module.enabled) ? 'on' : ''}`}
                   onClick={() => {
-                    if ((principalShell || facultyShell || admissionsOperationsShell) && !module.enabled) return
                     setView(module.key)
                     setSideOpen(false)
                   }}
-                  title={(principalShell || facultyShell || admissionsOperationsShell) && !module.enabled ? 'This module is not available for your current role' : module.label}
+                  title={module.label}
                   type="button"
                 >
                   <span className="ico">
                     <NavGlyph moduleKey={module.backingKey || module.key} label={admissionsOperationsShell ? module.label : undefined} />
                   </span>
                   <span className="nav-label">{module.label}</span>
-                  {module.key === 'workflows' && notifs.unread > 0 && (
+                  {module.key === 'decision_inbox' && deanAcademicsShell && approvalCount > 0 && (
+                    <span className="badge">{approvalCount}</span>
+                  )}
+                  {module.key === 'workflows' && !deanAcademicsShell && notifs.unread > 0 && (
                     <span className="badge">{notifs.unread}</span>
                   )}
                 </button>
@@ -473,7 +523,12 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     if (ADMISSION_MANAGER_TAB[view]) return <Admissions caps={caps} initialTab={ADMISSION_MANAGER_TAB[view]} sidebarNavigation />
   }
   switch (view) {
+    case 'decision_inbox':
+      return <DecisionInbox />
+    case 'dean_programs':
+      return <DeanPrograms />
     case 'overview':
+      if (user.office_n === 6) return <DeanAcademicsDashboard go={go} />
       if (user.office_n === 15 && user.active_role === 'Director of Admissions') return <DirectorAdmissionsDashboard user={user} go={go} />
       if (user.persona === 'student') return <StudentHome user={user} go={go} />
       if (user.office_n === 12) return <AssociateProfessorHome go={go} />
@@ -493,13 +548,22 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'integrations':
       return <Integrations caps={caps} />
     case 'analytics':
-      return <Analytics user={user} />
+      return <Analytics user={user} go={go} />
     case 'students':
       if (user.persona === 'student') return <StudentHome user={user} go={go} />
       return <Students caps={caps} />
     case 'academics':
+      if (user.office_n === 6) return <DeanAcademicWorkspaces />
       if (user.persona === 'student') return <StudentCoursesView />
       return <Academics caps={caps} />
+    case 'dean_timetable':
+      return <DeanAcademicWorkspaces initialTab="readiness" />
+    case 'dean_allocation':
+      return <DeanAcademicWorkspaces initialTab="allocation" />
+    case 'dean_risk':
+      return <DeanAcademicWorkspaces initialTab="risk" />
+    case 'dean_reports':
+      return <DeanAcademicWorkspaces initialTab="reports" />
     case 'curriculum':
       return <Curriculum />
     case 'courses_subjects':
@@ -553,7 +617,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
         ? <ChairmanApprovals user={user} onChange={onChange} />
         : <Workflows user={user} onChange={onChange} />
     case 'workflows':
-      return <Workflows user={user} onChange={onChange} />
+      return user.office_n === 6 ? <MyRequests go={go} /> : <Workflows user={user} onChange={onChange} />
     case 'delegation':
       return user.office_n === 1 ? <ChairmanDelegation user={user} /> : <Delegations user={user} />
     case 'audit':
@@ -668,68 +732,80 @@ function NavGlyph({ moduleKey, label }: { moduleKey: string, label?: string }) {
     case 'frontdesk_calls':
     case 'frontdesk_directory':
     case 'frontdesk_delegations':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="8" r="3" /><path d="M5 21a7 7 0 0 1 14 0M4 4h16v16H4z" /></svg>
+      return <HiOutlineUserGroup />
     case 'overview':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 11.5 12 5l8 6.5V20a1 1 0 0 1-1 1h-4.5v-6h-5v6H5a1 1 0 0 1-1-1v-8.5Z" /></svg>
+      return <HiOutlineHome />
     case 'calendar':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M8 3v4M16 3v4M3 10h18" /><path d="M8 14h3M13 14h3M8 18h3" /></svg>
+      return <HiOutlineCalendarDays />
     case 'academic_calendar':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="3" y="4" width="18" height="17" rx="2" /><path d="M7 2v4M17 2v4M3 9h18" /><path d="M7 13h10M7 17h6" /></svg>
+      return <HiOutlineCalendarDays />
     case 'governance':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 4 5 7v5c0 4.2 2.9 7.9 7 8.9 4.1-1 7-4.7 7-8.9V7l-7-3Z" /><path d="M9.5 12 11 13.5l3.5-4" /></svg>
+      return <HiOutlineShieldCheck />
     case 'approvals':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M7 4h7l5 5v11a1 1 0 0 1-1 1H7a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" /><path d="M14 4v5h5M9 14l2 2 4-4" /></svg>
+      return <HiOutlineCheckBadge />
     case 'delegation':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="8" cy="8" r="3" /><circle cx="16" cy="16" r="3" /><path d="M10.5 10.5 13.5 13.5M5 18a4 4 0 0 1 6 0M13 6a4 4 0 0 1 6 0" /></svg>
+      return <HiOutlineUsers />
     case 'audit':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M11 5h8M11 9h8M11 13h5" /><path d="M6 4H4a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h2" /><path d="m8 17 2 2 4-4" /></svg>
+      return <HiOutlineShieldCheck />
     case 'directory':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 20h16" /><path d="M7 20V8l5-3 5 3v12" /><path d="M9 11h.01M15 11h.01M9 15h.01M15 15h.01" /></svg>
+      return <HiOutlineUserGroup />
     case 'finance':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M7 5h9M7 9h7M9 5c0 6 5 4 5 9 0 2-2 4-5 4" /></svg>
+      return <HiOutlineBanknotes />
     case 'analytics':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 20h16" /><path d="M7 16V9M12 16V5M17 16v-3" /></svg>
+      return <HiOutlineChartBarSquare />
     case 'hr':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="7" r="3.5" /><path d="M5 20a7 7 0 0 1 14 0" /></svg>
+      return <HiOutlineUsers />
     case 'integrations':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m9 12 3-3 3 3" /><path d="m9 16 3-3 3 3" /><path d="M5 7h4M15 17h4M4 12h4M16 12h4" /></svg>
+      return <HiOutlineSquares2X2 />
     case 'workflows':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 7h11M4 12h16M4 17h9" /><circle cx="18" cy="7" r="2" /><circle cx="9" cy="17" r="2" /></svg>
+      return <HiOutlineDocumentText />
     case 'matrices':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 4h16v16H4z" /><path d="M4 10h16M10 4v16" /></svg>
+      return <HiOutlineClipboardDocumentList />
     case 'students':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m3 8 9-4 9 4-9 4-9-4Z" /><path d="M7 10v4c0 1.7 2.2 3 5 3s5-1.3 5-3v-4" /></svg>
+      return <HiOutlineAcademicCap />
     case 'academics':
     case 'curriculum':
     case 'courses_subjects':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v18H6.5A2.5 2.5 0 0 0 4 23V5.5Z" /><path d="M12 3v18" /></svg>
+      return <HiOutlineBookOpen />
     case 'attendance':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m5 12 4 4 10-10" /></svg>
+      return <HiOutlineClipboardDocumentList />
     case 'examinations':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M7 4h10l3 3v13H7a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" /><path d="M15 4v3h3M9 13h6M9 17h4" /></svg>
+      return <HiOutlineDocumentCheck />
     case 'scores':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 20h16" /><path d="M7 16V9M12 16V5M17 16v-3" /><path d="M6 8 9 5l3 3 4-4 2 2" /></svg>
+      return <HiOutlineChartBarSquare />
     case 'admissions':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 3v18M3 12h18" /></svg>
+      return <HiOutlineUserPlus />
     case 'library':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M6 4h12v16H6z" /><path d="M9 4v16" /></svg>
+      return <HiOutlineFolder />
     case 'hostel':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 20h16M6 20V9l6-4 6 4v11M10 13h4M10 17h4" /></svg>
+      return <HiOutlineAcademicCap />
     case 'transport':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="4" y="5" width="16" height="11" rx="2" /><path d="M8 16v3M16 16v3M4 11h16" /><circle cx="8" cy="19" r="1" /><circle cx="16" cy="19" r="1" /></svg>
+      return <HiOutlineClock />
+    case 'decision_inbox':
+      return <HiOutlineCheckBadge />
+    case 'dean_programs':
+      return <HiOutlineAcademicCap />
+    case 'dean_timetable':
+      return <HiOutlineCalendarDays />
+    case 'dean_allocation':
+      return <HiOutlineUsers />
+    case 'dean_risk':
+      return <HiOutlineExclamationTriangle />
+    case 'dean_reports':
+      return <HiOutlineChartBarSquare />
     case 'grievance':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M8 20h8M12 17v3M6 5h12l-1 8H7L6 5Z" /><path d="M9 9h6" /></svg>
+      return <HiOutlineExclamationTriangle />
     case 'research':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="10" cy="10" r="5" /><path d="m14 14 6 6" /></svg>
+      return <HiOutlineBookOpen />
     case 'placements':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 20h16" /><path d="M7 16V9M12 16V5M17 16v-3" /><path d="m6 8 3-3 3 3 4-4 2 2" /></svg>
+      return <HiOutlineUserGroup />
     case 'procurement':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m4 7 8-4 8 4-8 4-8-4Z" /><path d="M4 7v10l8 4 8-4V7" /></svg>
+      return <HiOutlineDocumentCurrencyRupee />
     case 'assets':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="M8 9h8M8 13h5" /></svg>
+      return <HiOutlineFolder />
     case 'admin':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" /><path d="M19.4 15a1 1 0 0 0 .2 1.1l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V20a2 2 0 1 1-4 0v-.2a1 1 0 0 0-.6-.9 1 1 0 0 0-1.1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H4a2 2 0 1 1 0-4h.2a1 1 0 0 0 .9-.6 1 1 0 0 0-.2-1.1l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1 1 0 0 0 1.1.2 1 1 0 0 0 .6-.9V4a2 2 0 1 1 4 0v.2a1 1 0 0 0 .6.9 1 1 0 0 0 1.1-.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1 1 0 0 0-.2 1.1 1 1 0 0 0 .9.6H20a2 2 0 1 1 0 4h-.2a1 1 0 0 0-.9.6Z" /></svg>
+      return <HiOutlineShieldCheck />
     default:
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="12" r="8" /></svg>
+      return <HiOutlineSquares2X2 />
   }
 }

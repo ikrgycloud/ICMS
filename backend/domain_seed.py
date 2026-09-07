@@ -10,7 +10,7 @@ import random
 from datetime import date, datetime, timedelta
 
 from database import (SessionLocal, TENANT, engine, DEMO_USERNAMES, CAMPUS_SCOPES,
-                      slug, ensure_additive_schema, ensure_versioned_migrations)
+                      slug, ensure_versioned_migrations)
 from authority import pwhash
 from matrices import APPROVAL_MATRIX
 from models import (Base, Person, Role, User, UserRole, Delegation, DelegationPolicy, DelegationProfile,
@@ -1521,6 +1521,76 @@ def _seed_calendar_data(s):
     s.commit()
 
 
+def _seed_dean_dashboard_data(s):
+    """Seed realistic curriculum and timetable readiness records for the Dean view."""
+    sample_course = s.query(D.Course).filter(D.Course.tenant_id == TENANT).order_by(D.Course.code).first()
+    sample_payload = {
+        "course_id": "",
+        "dept_id": sample_course.dept_id if sample_course else "",
+        "code": f"{sample_course.code}-REV" if sample_course else "ACAD-REV",
+        "title": sample_course.title if sample_course else "Academic Curriculum Revision",
+        "credits": sample_course.credits if sample_course else 3,
+        "semester": sample_course.semester if sample_course else 1,
+        "regulation": sample_course.regulation if sample_course else "R2023",
+        "course_type": sample_course.course_type if sample_course else "Core",
+        "category": sample_course.category if sample_course else "Professional Core",
+        "ltp": sample_course.ltp if sample_course else "3-0-0",
+        "prerequisite": sample_course.prerequisite if sample_course else "",
+        "description": "Seeded curriculum revision for Dean approval.",
+    }
+    curriculum_specs = [
+        ("dean_curriculum_approved", "B.Tech curriculum revision approved", "APPROVED", 12),
+        ("dean_curriculum_review", "B.Sc curriculum refresh for review", "SUBMITTED", 8),
+        ("dean_curriculum_returned", "M.Tech elective basket revision", "RETURNED", -4),
+        ("dean_curriculum_overdue", "Common first-year curriculum mapping", "SUBMITTED", -18),
+    ]
+    departments = s.query(D.Department).filter(D.Department.tenant_id == TENANT).all()
+    department_id = departments[0].id if departments else None
+    now = datetime.utcnow()
+    for proposal_id, title, state, due_days in curriculum_specs:
+        proposal = s.get(D.AcademicProposal, proposal_id)
+        payload = {**sample_payload, "title": title, "seed": True}
+        if proposal is None:
+            proposal = D.AcademicProposal(
+                id=proposal_id, tenant_id=TENANT, proposal_type="curriculum", title=title,
+                scope_level="department", scope_ref=department_id or "", dept_id=department_id,
+                state=state, version_no=1, status_version=1 if state != "DRAFT" else 0,
+                submitted_by="user_academic_coordinator", submitted_office_n=10,
+                assigned_to_office_n=6, due_at=now + timedelta(days=due_days),
+                created_at=now, updated_at=now,
+            )
+            s.add(proposal)
+            s.add(D.AcademicProposalVersion(
+                id=f"{proposal_id}_v1", tenant_id=TENANT, proposal_id=proposal_id,
+                version_no=1, payload_json=json.dumps(payload),
+                rationale="Seeded Dean dashboard demonstration record.",
+                created_by="user_academic_coordinator", created_at=now,
+            ))
+        else:
+            version = s.query(D.AcademicProposalVersion).filter(
+                D.AcademicProposalVersion.proposal_id == proposal_id,
+                D.AcademicProposalVersion.version_no == proposal.version_no,
+            ).first()
+            if version and version.payload_json and '"seed": true' in version.payload_json:
+                version.payload_json = json.dumps(payload)
+
+    sections = s.query(D.Section).filter(D.Section.tenant_id == TENANT).order_by(D.Section.id).all()
+    completion_specs = [("completed", 12, 100), ("in_progress", 10, 55)]
+    completion_index = 0
+    for status, count, percentage in completion_specs:
+        for section in sections[completion_index:completion_index + count]:
+            completion_id = f"dean_completion_{section.id}"
+            if s.get(D.CourseCompletion, completion_id) is None:
+                s.add(D.CourseCompletion(
+                    id=completion_id, tenant_id=TENANT, section_id=section.id,
+                    term=section.term, completion_pct=percentage,
+                    verified_by="Dean Academics Office" if status == "completed" else "",
+                    status=status, updated_at=now,
+                ))
+        completion_index += count
+    s.commit()
+
+
 def _seed_core_domain(s):
     if s.query(D.Student).count() > 0:
         return
@@ -2683,6 +2753,24 @@ def _bind_portal_accounts(s):
                 candidate.user_id = hod_login.id
                 dep.hod_person_id = candidate.id
 
+    # Academic Coordinator is a governed academic actor, not a global bypass.
+    # Bind the seeded login to an otherwise unassigned CSE staff profile so the
+    # central hierarchy resolver can enforce its department/program scope.
+    coordinator_login = _user("academic_coordinator")
+    if coordinator_login and "CSE" in dept_ids:
+        dep = s.query(D.Department).filter(D.Department.code == "CSE").first()
+        if dep:
+            coordinator_login.scope_ref = dep.id
+            candidate = (s.query(D.StaffMember)
+                         .filter(D.StaffMember.dept_id == dep.id,
+                                 (D.StaffMember.user_id == None) | (D.StaffMember.user_id == coordinator_login.id))
+                         .order_by(D.StaffMember.date_joined).first())
+            if candidate:
+                candidate.user_id = coordinator_login.id
+                candidate.office_n = 17
+                candidate.school_id = candidate.school_id or dep.school_id
+                candidate.program_id = candidate.program_id or "prog_cse_btech"
+
     s.commit()
 
 
@@ -3596,13 +3684,13 @@ def _seed_student_portal_accounts(s):
 
 def seed_domain():
     ensure_versioned_migrations()
-    ensure_additive_schema()
     s = SessionLocal()
     try:
         _seed_core_domain(s)
         _seed_fee_setup_reference_data(s)
         _seed_reference_extensions(s)
         _seed_calendar_data(s)
+        _seed_dean_dashboard_data(s)
         _seed_chairman_workflows(s)
         _bind_portal_accounts(s)
         _seed_student_portal_demo_profile(s)

@@ -18,7 +18,7 @@ class StudentExaminationsPortalTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.db = SessionLocal()
-        cls.base_url = "http://127.0.0.1:8000"
+        cls.base_url = os.getenv("ICMS_API_URL", "http://127.0.0.1:8010")
         cls.student_token = cls._login("student")
         cls.professor_token = cls._login("professor")
 

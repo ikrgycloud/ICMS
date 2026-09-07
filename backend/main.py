@@ -12,11 +12,11 @@ import os
 import sys
 import uuid
 import time
-import threading
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
@@ -37,6 +37,7 @@ from models import (User, Person, Role, RolePermission, Delegation, WorkflowInst
                     DelegationContext)
 
 from domain_api import router as domain_router
+from governance_api import router as governance_router
 from admissions_api import router as admissions_router
 from portal_api import router as portal_router
 from integrations_api import router as integrations_router
@@ -56,7 +57,30 @@ app = FastAPI(title="ICMS — Integrated College/University Management System",
               version="1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                    allow_headers=["*"])
+
+# Defense-in-depth for routes that expose Dean academic governance.  This is
+# intentionally server-side so hidden frontend routes cannot be replayed.
+GOVERNANCE_PATHS = ("/api/academics/timetable/readiness", "/api/academics/quality/",
+                    "/api/academics/committees", "/api/academics/outcomes",
+                    "/api/academics/plans", "/api/academics/allocation/proposals",
+                    "/api/programs/proposals", "/api/curriculum/proposals",
+                    "/api/academic-calendar/proposals", "/api/academic-governance")
+
+
+@app.middleware("http")
+async def governance_route_guard(request: Request, call_next):
+    if request.url.path.startswith(GOVERNANCE_PATHS):
+        auth_header = request.headers.get("authorization", "")
+        try:
+            token = auth_header.split(" ", 1)[1]
+            actor = decode_token(token)
+            if actor.get("office_n") not in {6, 10, 17}:
+                return JSONResponse({"detail": "Academic governance access denied"}, status_code=403)
+        except Exception:
+            return JSONResponse({"detail": "Missing or invalid token"}, status_code=401)
+    return await call_next(request)
 app.include_router(domain_router)
+app.include_router(governance_router)
 app.include_router(admissions_router)
 app.include_router(portal_router)
 app.include_router(integrations_router)
@@ -75,11 +99,7 @@ def _startup():
             # for several minutes.  During that time nginx had no usable
             # upstream and returned 502 for every /api request.
             print("seed:", seed(), flush=True)
-            threading.Thread(
-                target=_seed_domain_after_startup,
-                name="icms-domain-seed",
-                daemon=True,
-            ).start()
+            _seed_domain_after_startup()
             return
         except Exception as e:
             print("waiting for db...", e, flush=True)
@@ -100,6 +120,29 @@ def _seed_domain_after_startup():
         # Keep the API available when optional demo data cannot be refreshed;
         # the concrete failure still remains visible in container logs.
         print("domain seed failed:", exc, flush=True)
+
+
+def _academic_sla_worker():
+    """Mark overdue academic work and notify escalation authority."""
+    while True:
+        session = SessionLocal()
+        try:
+            now = datetime.utcnow()
+            proposals = session.query(D.AcademicProposal).filter(D.AcademicProposal.due_at != None, D.AcademicProposal.due_at < now, D.AcademicProposal.state.in_(("SUBMITTED", "RESUBMITTED", "UNDER_REVIEW")), D.AcademicProposal.escalated_to_office_n == None).all()
+            for row in proposals:
+                row.escalated_to_office_n = 5
+                session.add(Notification(id=uuid.uuid4().hex[:12], tenant_id=TENANT, user_id="user_5", severity="critical", title="Academic proposal overdue", body=row.title))
+            reviews = session.query(D.AcademicQualityReview).filter(D.AcademicQualityReview.due_at != None, D.AcademicQualityReview.due_at < now, D.AcademicQualityReview.state.in_(("OPEN", "ACTION_ASSIGNED"))).all()
+            for row in reviews: row.state = "OVERDUE"; row.updated_at = now
+            actions = session.query(D.CorrectiveAction).filter(D.CorrectiveAction.deadline != None, D.CorrectiveAction.deadline < now, D.CorrectiveAction.state == "OPEN").all()
+            for row in actions:
+                row.state = "OVERDUE"
+                session.add(Notification(id=uuid.uuid4().hex[:12], tenant_id=TENANT, user_id=row.owner_id, severity="critical", title="Corrective action overdue", body=row.title))
+            if proposals or reviews or actions: session.commit()
+        except Exception as exc:
+            session.rollback(); print("academic SLA worker failed:", exc, flush=True)
+        finally: session.close()
+        time.sleep(60)
 
 
 def _reconcile_fee_structure_approvals():
@@ -1980,7 +2023,11 @@ def read_notification(nid: str, ctx=Depends(auth), s=Depends(db)):
 # --------------------------------------------------------------------------- #
 @app.get("/api/audit")
 def get_audit(limit: int = 60, ctx=Depends(non_front_office), s=Depends(db)):
-    rows = s.query(AuditLog).order_by(desc(AuditLog.id)).limit(limit).all()
+    rows = (s.query(AuditLog)
+            .filter(AuditLog.tenant_id == ctx.get("tenant_id", TENANT))
+            .order_by(desc(AuditLog.id))
+            .limit(limit)
+            .all())
     return {"entries": [{"id": r.id, "actor": r.actor_name or r.actor, "office_n": r.office_n,
                          "action": r.action, "entity": r.entity, "new_state": r.new_state,
                          "outcome": r.new_state, "reason": r.reason, "auth_level": r.auth_level,
@@ -1990,7 +2037,10 @@ def get_audit(limit: int = 60, ctx=Depends(non_front_office), s=Depends(db)):
 
 @app.get("/api/audit/verify")
 def verify_audit(ctx=Depends(non_front_office), s=Depends(db)):
-    rows = s.query(AuditLog).order_by(AuditLog.id).all()
+    rows = (s.query(AuditLog)
+            .filter(AuditLog.tenant_id == ctx.get("tenant_id", TENANT))
+            .order_by(AuditLog.id)
+            .all())
     prev = "0" * 64
     broken = None
     for r in rows:
@@ -2009,31 +2059,43 @@ def verify_audit(ctx=Depends(non_front_office), s=Depends(db)):
 # --------------------------------------------------------------------------- #
 @app.get("/api/dashboard")
 def dashboard(ctx=Depends(non_front_office), s=Depends(db)):
+    tenant_id = ctx.get("tenant_id", TENANT)
     o = office(ctx["office_n"])
-    mine = s.query(WorkflowInstance).filter(WorkflowInstance.initiator_id == ctx["sub"]).count()
-    inbox = s.query(WorkflowInstance).filter(
-        WorkflowInstance.office_n == ctx["office_n"],
-        WorkflowInstance.state.in_(["submitted", "under_review", "reviewed", "escalated"])).count()
-    pending = s.query(WorkflowInstance).filter(
-        WorkflowInstance.state.in_(["submitted", "under_review", "reviewed"])).count()
-    approved = s.query(WorkflowInstance).filter(WorkflowInstance.state == "approved").count()
-    escalated = s.query(WorkflowInstance).filter(WorkflowInstance.state == "escalated").count()
-    unread = s.query(Notification).filter(Notification.user_id == ctx["sub"],
-                                          Notification.read == False).count()
+    mine = (s.query(WorkflowInstance)
+            .filter(WorkflowInstance.tenant_id == tenant_id, WorkflowInstance.initiator_id == ctx["sub"]))
+    inbox = (s.query(WorkflowInstance)
+             .filter(WorkflowInstance.tenant_id == tenant_id,
+                     WorkflowInstance.office_n == ctx["office_n"],
+                     WorkflowInstance.state.in_(["submitted", "under_review", "reviewed", "escalated"])))
+    pending = (s.query(WorkflowInstance)
+               .filter(WorkflowInstance.tenant_id == tenant_id,
+                       WorkflowInstance.state.in_(["submitted", "under_review", "reviewed"])))
+    approved = (s.query(WorkflowInstance)
+                .filter(WorkflowInstance.tenant_id == tenant_id,
+                        WorkflowInstance.state == "approved"))
+    escalated = (s.query(WorkflowInstance)
+                .filter(WorkflowInstance.tenant_id == tenant_id,
+                        WorkflowInstance.state == "escalated"))
+    unread = (s.query(Notification)
+              .filter(Notification.tenant_id == tenant_id,
+                      Notification.user_id == ctx["sub"],
+                      Notification.read == False))
     # processes this office owns
     owned = [p for p in APPROVAL_MATRIX if p["office_n"] == ctx["office_n"]]
     return {
         "office": o["name"], "level": o["level"],
-        "kpis": {"my_requests": mine, "inbox": inbox, "pending_all": pending,
-                 "approved": approved, "escalated": escalated, "unread": unread},
+        "kpis": {"my_requests": mine.count(), "inbox": inbox.count(), "pending_all": pending.count(),
+                 "approved": approved.count(), "escalated": escalated.count(), "unread": unread.count()},
         "owned_processes": owned,
-        "workflows_by_state": _wf_state_counts(s),
+        "workflows_by_state": _wf_state_counts(s, tenant_id),
     }
 
 
-def _wf_state_counts(s):
-    rows = s.query(WorkflowInstance.state, func.count(WorkflowInstance.id)).group_by(
-        WorkflowInstance.state).all()
+def _wf_state_counts(s, tenant_id: str | None = None):
+    query = s.query(WorkflowInstance.state, func.count(WorkflowInstance.id)).group_by(WorkflowInstance.state)
+    if tenant_id is not None:
+        query = query.filter(WorkflowInstance.tenant_id == tenant_id)
+    rows = query.all()
     return {state: cnt for state, cnt in rows}
 
 

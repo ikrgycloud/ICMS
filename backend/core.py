@@ -8,12 +8,13 @@ Kept in one place so both routers behave identically and the audit chain stays
 single-writer-consistent.
 """
 import uuid
+from datetime import datetime
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import desc
 
 from database import SessionLocal, TENANT
-from models import AuditLog, Notification, Delegation
+from models import AuditLog, Notification, NotificationDelivery, Delegation
 from authority import decode_token, audit_hash
 
 # A named bearer scheme makes FastAPI expose one global "Authorize" control in
@@ -60,8 +61,12 @@ def write_audit(s, actor, actor_name, office_n, action, entity,
 
 
 def notify(s, user_id, title, body, severity="info"):
-    s.add(Notification(id=uid(), tenant_id=TENANT, user_id=user_id, severity=severity,
-                       title=title, body=body))
+    notification=Notification(id=uid(), tenant_id=TENANT, user_id=user_id, severity=severity,
+                       title=title, body=body)
+    s.add(notification)
+    s.flush()
+    s.add(NotificationDelivery(id=uid(), tenant_id=TENANT, notification_id=notification.id,
+                               channel="in_app", status="delivered", delivered_at=datetime.utcnow()))
     s.commit()
 
 
