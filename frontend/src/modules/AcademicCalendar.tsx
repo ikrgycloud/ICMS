@@ -34,6 +34,9 @@ export default function AcademicCalendar({
   user: any;
   caps: any;
 }) {
+});
+
+export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
   const [term, setTerm] = useState(""),
     [data, setData] = useState<any>(null),
     [loading, setLoading] = useState(true),
@@ -53,6 +56,7 @@ export default function AcademicCalendar({
     setLoading(true);
     try {
       const next = await api.academicCalendar(value, { academicYear, programId, departmentId, studentYear });
+      const next = await api.academicCalendar(value);
       setData(next);
       if (!value && next.selected_term) setTerm(next.selected_term);
     } catch (e: any) {
@@ -65,6 +69,7 @@ export default function AcademicCalendar({
     load(term);
   }, [term, academicYear, programId, departmentId, studentYear]);
   const yearOptions = data?.academic_year_options || [];
+  }, [term]);
   const campuses = useMemo<string[]>(
     () => [
       "All Campuses",
@@ -105,6 +110,8 @@ export default function AcademicCalendar({
     () =>
       (data?.entries || []).filter((x: any) =>
         String(x.status).toLowerCase().includes("pending"),
+      (data?.proposals || []).filter((x: any) =>
+        ["SUBMITTED", "RESUBMITTED"].includes(x.state),
       ),
     [data],
   );
@@ -118,6 +125,29 @@ export default function AcademicCalendar({
   const canCreate = !!(data?.permissions?.create && (caps?.create || user?.office_n === 17)),
     canEdit = !!(data?.permissions?.edit && caps?.edit),
     canDelete = !!(data?.permissions?.delete && caps?.delete);
+  const examConflicts = useMemo(() => {
+    const exams = (data?.entries || []).filter((x: any) =>
+      /exam/i.test(x.category),
+    );
+    const conflicts: any[] = [];
+    exams.forEach((a: any, i: number) =>
+      exams.slice(i + 1).forEach((b: any) => {
+        if (
+          a.campus !== b.campus &&
+          a.campus !== "All Campuses" &&
+          b.campus !== "All Campuses"
+        )
+          return;
+        if (a.start_date <= b.end_date && b.start_date <= a.end_date)
+          conflicts.push({ a, b });
+      }),
+    );
+    return conflicts;
+  }, [data]);
+  const canCreate = !!data?.workflow_permissions?.propose,
+    canDecide = !!data?.workflow_permissions?.decide,
+    canEdit = false,
+    canDelete = false;
   function open(x: any) {
     if (x.editable && canEdit) {
       setForm({
@@ -153,6 +183,67 @@ export default function AcademicCalendar({
       await load();
     } catch (e: any) {
       setError(e.message || "Could not save the event.");
+  function exportCsv() {
+    const header = [
+      "Term",
+      "Title",
+      "Category",
+      "Campus",
+      "Start date",
+      "End date",
+      "Status",
+      "Description",
+    ];
+    const esc = (v: any) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const csv = [
+      header,
+      ...entries.map((x: any) => [
+        x.term,
+        x.title,
+        x.category,
+        x.campus,
+        x.start_date,
+        x.end_date,
+        x.status,
+        x.description,
+      ]),
+    ]
+      .map((row) => row.map(esc).join(","))
+      .join("\n");
+    const url = URL.createObjectURL(
+      new Blob([csv], { type: "text/csv;charset=utf-8" }),
+    );
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `academic-calendar-${(data?.selected_term || "term").replace(/[^a-z0-9-]/gi, "_")}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+  async function save() {
+    setError("");
+    if (!form.title.trim()) {
+      setError("Event title is required.");
+      return;
+    }
+    if (!form.term.trim()) {
+      setError("Term is required.");
+      return;
+    }
+    if (form.end_date < form.start_date) {
+      setError("End date cannot be earlier than the start date.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const created = await api.createAcademicCalendarProposal(form);
+      await api.submitAcademicCalendarProposal(
+        created.proposal.id,
+        created.proposal.status_version,
+      );
+      setModal(false);
+      await load();
+    } catch (e: any) {
+      setError(e.message || "Could not submit the calendar proposal.");
     } finally {
       setSaving(false);
     }
@@ -165,6 +256,22 @@ export default function AcademicCalendar({
       await load();
     } catch (e: any) {
       setError(e.message || "Could not delete the event.");
+    return;
+  }
+  async function decide(proposal: any, decision: string) {
+    setSaving(true);
+    try {
+      await api.decideAcademicCalendarProposal(
+        proposal.id,
+        decision,
+        proposal.status_version,
+        decision === "approve" ? "" : "Decision recorded by Dean Academics",
+      );
+      setModal(false);
+      setDetail(null);
+      await load();
+    } catch (e: any) {
+      setError(e.message || "Could not record decision.");
     } finally {
       setSaving(false);
     }
@@ -202,16 +309,48 @@ export default function AcademicCalendar({
               <label>Academic year<select className="select" value={academicYear} onChange={e => setAcademicYear(e.target.value)}><option value="">All years</option>{yearOptions.map((x: string) => <option key={x}>{x}</option>)}</select></label>
               <label>Student year<select className="select" value={studentYear} onChange={e => setStudentYear(e.target.value)}><option value="">All years</option>{[1,2,3,4].map(x => <option key={x} value={x}>{x} Year</option>)}</select></label>
             </>}
+        sub="Dean Academics governance for teaching periods, examinations, registration, results, and academic milestones."
+        right={
+          <div className="calendar-head-actions academic-filter-bar">
+            <label>
+              Academic year
+              <select
+                className="select academic-term-select"
+                value={data?.selected_term || ""}
+                onChange={(e) => setTerm(e.target.value)}
+              >
+                {data?.term_options?.map((x: string) => (
+                  <option key={x}>{x}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Campus
+              <select
+                className="select"
+                value={campus}
+                onChange={(e) => setCampus(e.target.value)}
+              >
+                {campuses.map((x) => (
+                  <option key={x}>{x}</option>
+                ))}
+              </select>
+            </label>
+            <button className="btn btn-out" onClick={exportCsv} disabled={!entries.length}>
+              Export CSV
+            </button>
             {canCreate && (
               <button
                 className="btn btn-crimson"
                 onClick={() => {
                   setForm({ ...blank(data.selected_term), status: user?.office_n === 17 ? "draft" : "published" });
+                  setForm(blank(data.selected_term));
                   setDetail(null);
                   setModal(true);
                 }}
               >
                 Add Academic Event
+                Propose Academic Event
               </button>
             )}
           </div>
@@ -232,6 +371,12 @@ export default function AcademicCalendar({
             <Metric i="!" n={pending.length} t="Pending Approval" />
             <Metric i="☂" n={data.summary.breaks} t="Holidays / Breaks" />
           </div>
+          {examConflicts.length > 0 && (
+            <div className="calendar-banner warn">
+              <strong>Exam scheduling conflict{examConflicts.length > 1 ? "s" : ""} detected.</strong>{" "}
+              Review overlapping examination windows before approving or publishing changes.
+            </div>
+          )}
           <div className="acad-layout">
             <section className="card">
               <div className="academic-tabs">
@@ -334,6 +479,7 @@ export default function AcademicCalendar({
                   <div className="snap">
                     <span>Approval authority</span>
                     <b>Principal</b>
+                    <b>Dean Academics</b>
                   </div>
                   <div className="snap">
                     <span>Pending changes</span>
@@ -342,6 +488,8 @@ export default function AcademicCalendar({
                   <p>
                     Changes follow role permissions and are recorded in the
                     audit trail.
+                    Academic Office proposes changes. Dean Academics reviews,
+                    decides, publishes, and all actions are recorded in the audit trail.
                   </p>
                 </div>
               </section>
@@ -353,6 +501,7 @@ export default function AcademicCalendar({
         <Modal
           title={form.id ? "Edit Academic Event" : "Add Academic Event"}
           className="academic-calendar-event-modal"
+          title={form.id ? "Edit Academic Event" : "Propose Academic Event"}
           onClose={() => setModal(false)}
           footer={
             <>
@@ -480,6 +629,30 @@ export default function AcademicCalendar({
             <div className="snap"><span>Academic year / term</span><b>{detail.academic_year || "All years"} · {detail.term}</b></div>
             <div className="snap"><span>Target</span><b>{detail.program_id || "All programs"} · {detail.department_id || "All departments"} · {detail.student_year ? `${detail.student_year} Year` : "All student years"}</b></div>
             <div className="snap"><span>Time</span><b>{detail.start_time || "Not specified"}{detail.end_time ? ` – ${detail.end_time}` : ""}</b></div>
+          footer={
+            <>
+              <button className="btn btn-out" onClick={() => { setModal(false); setDetail(null); }}>Close</button>
+              {canDecide && ["SUBMITTED", "RESUBMITTED"].includes(detail.state) && (
+                <>
+                  <button className="btn btn-rose" disabled={saving} onClick={() => decide(detail, "reject")}>Reject</button>
+                  <button className="btn btn-crimson" disabled={saving} onClick={() => decide(detail, "approve")}>Approve</button>
+                </>
+              )}
+            </>
+          }
+        >
+          <div className="calendar-detail">
+            <Pill s={detail.state || detail.status || "published"} />
+            <h3>{detail.payload?.title || detail.title}</h3>
+            <p>{detail.payload?.description || detail.description || "No additional notes were provided."}</p>
+            <div className="snap">
+              <span>Date range</span>
+              <b>{dates(detail.payload?.start_date || detail.start_date, detail.payload?.end_date || detail.end_date)}</b>
+            </div>
+            <div className="snap">
+              <span>Campus</span>
+              <b>{detail.payload?.campus || detail.campus || "All Campuses"}</b>
+            </div>
           </div>
         </Modal>
       )}
@@ -517,6 +690,66 @@ function Side({ title, rows, empty, open, showPill }: any) {
               </span>
               {showPill && <Pill s={x.status} />}
             </button>
+            <div className="academic-side-item" key={x.id}>
+              <button className="linkish" onClick={() => open(x)} type="button">
+                <strong>{x.title}</strong>
+                <span>
+                  {dates(x.start_date, x.end_date)} · {x.category}
+                </span>
+                {showPill && <Pill s={x.status} />}
+              </button>
+              {showPill && (
+                <span className="row-actions">
+                  <button
+                    className="btn btn-sm btn-crimson"
+                    onClick={() =>
+                      api
+                        .decideAcademicCalendarProposal(
+                          x.id,
+                          "approve",
+                          x.status_version,
+                        )
+                        .then(() => window.location.reload())
+                    }
+                    type="button"
+                  >
+                    Approve
+                  </button>
+                  <button
+                    className="btn btn-sm btn-out"
+                    onClick={() =>
+                      api
+                        .decideAcademicCalendarProposal(
+                          x.id,
+                          "return",
+                          x.status_version,
+                          "Decision recorded by Dean Academics",
+                        )
+                        .then(() => window.location.reload())
+                    }
+                    type="button"
+                  >
+                    Return
+                  </button>
+                  <button
+                    className="btn btn-sm btn-out"
+                    onClick={() =>
+                      api
+                        .decideAcademicCalendarProposal(
+                          x.id,
+                          "reject",
+                          x.status_version,
+                          "Decision recorded by Dean Academics",
+                        )
+                        .then(() => window.location.reload())
+                    }
+                    type="button"
+                  >
+                    Reject
+                  </button>
+                </span>
+              )}
+            </div>
           ))
         ) : (
           <Empty icon="✓" text={empty} />

@@ -51,6 +51,21 @@ async function download(path: string) {
   URL.revokeObjectURL(url)
 }
 
+async function downloadAcademicReport(type: string, format: string) {
+  const headers: Record<string, string> = {}
+  const t = tok()
+  if (t) headers.Authorization = `Bearer ${t}`
+  const res = await fetch(`${BASE}/academics/reports/${encodeURIComponent(type)}.${encodeURIComponent(format)}`, { headers })
+  if (!res.ok) throw new Error(`Could not download ${type} report (${res.status})`)
+
+  const url = URL.createObjectURL(await res.blob())
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `ICMS-${type}.${format}`
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
 export const api = {
   frontdeskDashboard: () => req('/frontdesk/dashboard'),
   frontdeskVisitors: (status = '', q = '') => req(`/frontdesk/visitors?status=${encodeURIComponent(status)}&q=${encodeURIComponent(q)}`),
@@ -128,6 +143,34 @@ export const api = {
 
   audit: (limit = 60) => req(`/audit?limit=${limit}`),
   verifyAudit: () => req('/audit/verify'),
+  administrationDashboard: () => req('/administration/dashboard'),
+  administrationAlerts: (params: Record<string, string | boolean | number> = {}) => req(`/administration/alerts?${new URLSearchParams(Object.entries(params).map(([k,v]) => [k,String(v)])).toString()}`),
+  administrationReport: (type: string, params: Record<string, string | boolean | number> = {}) => req(`/administration/reports/${encodeURIComponent(type)}?${new URLSearchParams(Object.entries(params).map(([k,v]) => [k,String(v)])).toString()}`),
+  administrationReportExport: (type: string, params: Record<string, string | boolean | number> = {}) => req(`/administration/reports/${encodeURIComponent(type)}/export.csv?${new URLSearchParams(Object.entries(params).map(([k,v]) => [k,String(v)])).toString()}`),
+  administrativePlans: (params: Record<string, string | boolean | number> = {}) => req(`/administrative-plans?${new URLSearchParams(Object.entries(params).map(([k,v]) => [k,String(v)])).toString()}`),
+  createAdministrativePlan: (body: any) => req('/administrative-plans', { method: 'POST', body: JSON.stringify(body) }),
+  submitAdministrativePlan: (id: string, body: any) => req(`/administrative-plans/${id}/submit`, { method: 'POST', body: JSON.stringify(body) }),
+  withdrawAdministrativePlan: (id: string, body: any) => req(`/administrative-plans/${id}/withdraw`, { method: 'POST', body: JSON.stringify(body) }),
+  administrativePlan: (id: string) => req(`/administrative-plans/${id}`),
+  administrativePlanHistory: (id: string) => req(`/administrative-plans/${id}/history`),
+  administrativeRequirements: (params: Record<string, string | boolean> = {}) => req(`/administrative-requirements?${new URLSearchParams(Object.entries(params).map(([k,v]) => [k,String(v)])).toString()}`),
+  createAdministrativeRequirement: (body: any) => req('/administrative-requirements', { method: 'POST', body: JSON.stringify(body) }),
+  administrativeRequirementAction: (id: string, action: string, body: any) => req(`/administrative-requirements/${id}/${action}`, { method: 'POST', body: JSON.stringify(body) }),
+  rejectAdministrativeApproval: (id: string, body: any) => req(`/administrative-requirements/${id}/approve-reject`, { method: 'POST', body: JSON.stringify(body) }),
+  administrativeRequirement: (id: string) => req(`/administrative-requirements/${id}`),
+  administrativeRequirementEvidence: (id: string) => req(`/administrative-requirements/${id}/evidence`),
+  administrativeRequirementEvidencePolicy: (id: string) => req(`/administrative-requirements/${id}/evidence-policy`),
+  administrativeRequirementTimeline: (id: string) => req(`/administrative-requirements/${id}/timeline`),
+  specialistQueue: () => req('/specialist/queue'),
+  specialistDetail: (id: string) => req(`/specialist/${id}`),
+  financeDetail: (id: string) => req(`/administrative-requirements/${id}/finance`),
+  reserveFinance: (id: string, body: any) => req(`/administrative-requirements/${id}/finance/reserve`, { method: 'POST', body: JSON.stringify(body) }),
+  commitFinance: (id: string, body: any) => req(`/administrative-requirements/${id}/finance/commit`, { method: 'POST', body: JSON.stringify(body) }),
+  specialistAccept: (id: string, body: any) => req(`/administrative-requirements/${id}/accept`, { method: 'POST', body: JSON.stringify(body) }),
+  verifyAdministrativeEvidence: (id: string, body: any) => req(`/administrative-evidence/${id}/verify`, { method: 'POST', body: JSON.stringify(body) }),
+  rejectAdministrativeEvidence: (id: string, body: any) => req(`/administrative-evidence/${id}/reject`, { method: 'POST', body: JSON.stringify(body) }),
+  createSpecialistRecord: (id: string, body: any = {}) => req(`/specialist/${id}`, { method: 'POST', body: JSON.stringify(body) }),
+  updateSpecialistRecord: (id: string, body: any) => req(`/specialist/${id}/update`, { method: 'POST', body: JSON.stringify(body) }),
 
   // ---- role switching ----
   switchRole: (role: string) =>
@@ -173,6 +216,14 @@ export const api = {
     const qs = params.toString()
     return req(`/academic-calendar${qs ? `?${qs}` : ''}`)
   },
+  deanDashboard: (filters: Record<string, string | number> = {}) => {
+    const params = new URLSearchParams()
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value !== '' && value != null) params.set(key, String(value))
+    })
+    const qs = params.toString()
+    return req(`/academics/dean-dashboard${qs ? `?${qs}` : ''}`)
+  },
   createAcademicCalendarEntry: (body: any) =>
     req('/academic-calendar', { method: 'POST', body: JSON.stringify(body) }),
   updateAcademicCalendarEntry: (id: string, body: any) =>
@@ -180,6 +231,98 @@ export const api = {
   deleteAcademicCalendarEntry: (id: string) => req(`/academic-calendar/${id}`, { method: 'DELETE' }),
   submitAcademicCalendarEntry: (id: string) => req(`/academic-calendar/${id}/submit`, { method: 'POST' }),
   decideAcademicCalendarEntry: (id: string, body: any) => req(`/academic-calendar/${id}/decision`, { method: 'POST', body: JSON.stringify(body) }),
+  createAcademicCalendarProposal: (body: any) => req('/academic-calendar/proposals', { method: 'POST', body: JSON.stringify(body) }),
+  submitAcademicCalendarProposal: (id: string, expected_status_version: number) => req(`/academic-calendar/proposals/${id}/submit`, { method: 'POST', body: JSON.stringify({ expected_status_version }) }),
+  decideAcademicCalendarProposal: (id: string, decision: string, expected_status_version: number, reason = '') => req(`/academic-calendar/proposals/${id}/decision/${decision}`, { method: 'POST', body: JSON.stringify({ expected_status_version, reason }) }),
+  curriculumProposals: () => req('/curriculum/proposals'),
+  createCurriculumProposal: (body: any) => req('/curriculum/proposals', { method: 'POST', body: JSON.stringify(body) }),
+  submitCurriculumProposal: (id: string, expected_status_version: number) => req(`/curriculum/proposals/${id}/submit`, { method: 'POST', body: JSON.stringify({ expected_status_version }) }),
+  decideCurriculumProposal: (id: string, decision: string, expected_status_version: number, reason = '') => req(`/curriculum/proposals/${id}/decision/${decision}`, { method: 'POST', body: JSON.stringify({ expected_status_version, reason }) }),
+  programProposals: () => req('/programs/proposals'),
+  createProgramProposal: (body: any) => req('/programs/proposals', { method: 'POST', body: JSON.stringify(body) }),
+  submitProgramProposal: (id: string, expected_status_version: number) => req(`/programs/proposals/${id}/submit`, { method: 'POST', body: JSON.stringify({ expected_status_version }) }),
+  decideProgramProposal: (id: string, decision: string, expected_status_version: number, reason = '') => req(`/programs/proposals/${id}/decision/${decision}`, { method: 'POST', body: JSON.stringify({ expected_status_version, reason }) }),
+  allocationProposals: () => req('/academics/allocation/proposals'),
+  createAllocationProposal: (body: any) => req('/academics/allocation/proposals', { method: 'POST', body: JSON.stringify(body) }),
+  submitAllocationProposal: (id: string, expected_status_version: number) => req(`/academics/allocation/proposals/${id}/submit`, { method: 'POST', body: JSON.stringify({ expected_status_version }) }),
+  decideAllocationProposal: (id: string, decision: string, expected_status_version: number, reason = '') => req(`/academics/allocation/proposals/${id}/decision/${decision}`, { method: 'POST', body: JSON.stringify({ expected_status_version, reason }) }),
+  timetableReadiness: () => req('/academics/timetable/readiness'),
+  academicQualityRisks: () => req('/academics/quality/risks'),
+  qualityReviews: () => req('/academics/quality/reviews'),
+  qualityEffectiveness: (id: string) => req(`/academics/quality/reviews/${id}/effectiveness`),
+  createQualityReview: (body: any) => req('/academics/quality/reviews', { method: 'POST', body: JSON.stringify(body) }),
+  createCorrectiveAction: (reviewId: string, body: any) => req(`/academics/quality/reviews/${reviewId}/actions`, { method: 'POST', body: JSON.stringify(body) }),
+  correctiveActions: () => req('/academics/quality/actions'),
+  submitCorrectiveAction: (id: string, body: any) => req(`/academics/quality/actions/${id}/submit`, { method: 'POST', body: JSON.stringify(body) }),
+  verifyCorrectiveAction: (id: string, body: any) => req(`/academics/quality/actions/${id}/verify`, { method: 'POST', body: JSON.stringify(body) }),
+  committees: () => req('/academics/committees'),
+  createCommittee: (body: any) => req('/academics/committees', { method: 'POST', body: JSON.stringify(body) }),
+  updateCommittee: (id: string, body: any) => req(`/academics/committees/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  createCommitteeMeeting: (body: any) => req('/academics/committees/meetings', { method: 'POST', body: JSON.stringify(body) }),
+  createCommitteeResolution: (id: string, body: any) => req(`/academics/committees/meetings/${id}/resolutions`, { method: 'POST', body: JSON.stringify(body) }),
+  addCommitteeMember: (id: string, body: any) => req(`/academics/committees/${id}/members`, { method: 'POST', body: JSON.stringify(body) }),
+  committeeMembers: (id: string) => req(`/academics/committees/${id}/members`),
+  removeCommitteeMember: (committeeId: string, memberId: string) => req(`/academics/committees/${committeeId}/members/${memberId}`, { method: 'DELETE' }),
+  committeeMeetings: (id: string) => req(`/academics/committees/${id}/meetings`),
+  committeeResolutions: (id: string) => req(`/academics/committees/${id}/resolutions`),
+  committeeActionItems: () => req('/academics/committees/action-items'),
+  transitionMeeting: (id: string, body: any) => req(`/academics/committees/meetings/${id}/transition`, { method: 'POST', body: JSON.stringify(body) }),
+  transitionResolution: (id: string, body: any) => req(`/academics/committees/resolutions/${id}/transition`, { method: 'POST', body: JSON.stringify(body) }),
+  verifyCommitteeAction: (id: string, body: any) => req(`/academics/committees/action-items/${id}/verify`, { method: 'POST', body: JSON.stringify(body) }),
+  outcomes: (programId = '', courseId = '') => req(`/academics/outcomes?program_id=${programId}&course_id=${courseId}`),
+  addProgramOutcome: (body: any) => req('/academics/outcomes/program', { method: 'POST', body: JSON.stringify(body) }),
+  addCourseOutcome: (body: any) => req('/academics/outcomes/course', { method: 'POST', body: JSON.stringify(body) }),
+  mapOutcomes: (body: any) => req('/academics/outcomes/map', { method: 'POST', body: JSON.stringify(body) }),
+  attainment: (programId = '', courseId = '') => req(`/academics/attainment?program_id=${programId}&course_id=${courseId}`),
+  attainmentAlerts: (programId = '', courseId = '') => req(`/academics/attainment/alerts?program_id=${programId}&course_id=${courseId}`),
+  attainmentAggregate: (level = 'course', term = '') => req(`/academics/attainment/aggregate?level=${encodeURIComponent(level)}&term=${encodeURIComponent(term)}`),
+  attainmentValidation: (term = '') => req(`/academics/attainment/validation?term=${encodeURIComponent(term)}`),
+  linkAttainmentAlerts: () => req('/academics/attainment/alerts/link-quality-reviews', { method: 'POST' }),
+  nextSemesterPlans: () => req('/academics/next-semester-plans'),
+  compareNextSemesterPlans: (source: string, target: string) => req(`/academics/next-semester-plans/compare?source_term=${encodeURIComponent(source)}&target_term=${encodeURIComponent(target)}`),
+  enqueueJob: (body: any) => req('/jobs', { method: 'POST', body: JSON.stringify(body) }),
+  monitorJobs: () => req('/jobs'),
+  academicReport: (type: string, format = 'csv') => downloadAcademicReport(type, format),
+  createNextSemesterPlan: (body: any) => req('/academics/next-semester-plans', { method: 'POST', body: JSON.stringify(body) }),
+  transitionQualityReview: (id: string, body: any) => req(`/academics/quality/reviews/${id}/transition`, { method: 'POST', body: JSON.stringify(body) }),
+  recordQualityEffectiveness: (id: string, body: any) => req(`/academics/quality/reviews/${id}/effectiveness`, { method: 'POST', body: JSON.stringify(body) }),
+  transitionNextSemesterPlan: (id: string, body: any) => req(`/academics/next-semester-plans/${id}/transition`, { method: 'POST', body: JSON.stringify(body) }),
+  resolveTimetableException: (id: string) => req(`/academics/timetable/readiness/${id}/resolve`, { method: 'POST' }),
+  governancePolicies: () => req('/academic-governance/policies'),
+  governanceInbox: (state = '') => req(`/academic-governance/inbox${state ? `?state=${encodeURIComponent(state)}` : ''}`),
+  governanceTransition: (id: string, body: any) => req(`/academic-governance/proposals/${id}/transition`, { method: 'POST', body: JSON.stringify(body) }),
+  myRequests: () => req('/academic-governance/my-requests'),
+  transitionMyRequest: (id: string, body: any) => req(`/academic-governance/my-requests/${id}/transition`, { method: 'POST', body: JSON.stringify(body) }),
+  governanceAssignReviewer: (id: string, body: any) => req(`/academic-governance/proposals/${id}/reviewer`, { method: 'POST', body: JSON.stringify(body) }),
+  governanceDocuments: (type: string, id: string) => req(`/academic-governance/documents/${type}/${id}`),
+  governanceUploadDocument: (body: any) => req('/academic-governance/documents', { method: 'POST', body: JSON.stringify(body) }),
+  governanceNotificationOutcomes: () => req('/academic-governance/notifications/outcomes'),
+  governanceRecords: (type: string, ref: string) => req(`/academic-governance/records/${type}/${ref}`),
+  governanceExceptions: () => req('/academic-governance/exceptions'),
+  governanceExceptionTransition: (id: string, body: any) => req(`/academic-governance/exceptions/${id}/transition`, { method: 'POST', body: JSON.stringify(body) }),
+  curriculumVersions: () => req('/academic-governance/curriculum/versions'),
+  createCurriculumVersion: (body: any) => req('/academic-governance/curriculum/versions', { method: 'POST', body: JSON.stringify(body) }),
+  compareCurriculumVersions: (id: string, otherId: string) => req(`/academic-governance/curriculum/versions/${id}/compare/${otherId}`),
+  publishCurriculumVersion: (id: string) => req(`/academic-governance/curriculum/versions/${id}/publish`, { method: 'POST' }),
+  calendarVersions: () => req('/academic-governance/calendar/versions'),
+  createCalendarVersion: (body: any) => req('/academic-governance/calendar/versions', { method: 'POST', body: JSON.stringify(body) }),
+  publishCalendarVersion: (id: string) => req(`/academic-governance/calendar/versions/${id}/publish`, { method: 'POST' }),
+  acknowledgeCalendarImpact: (id: string, downstream: string, reason = '') => req(`/academic-governance/calendar/versions/${id}/acknowledge/${encodeURIComponent(downstream)}?reason=${encodeURIComponent(reason)}`, { method: 'POST' }),
+  assessProgram: (body: any) => req('/academic-governance/program/assessments', { method: 'POST', body: JSON.stringify(body) }),
+  programAssessment: (proposalId: string) => req(`/academic-governance/program/assessments/${proposalId}`),
+  setFacultyAvailability: (body: any) => req('/academic-governance/faculty/availability', { method: 'POST', body: JSON.stringify(body) }),
+  setWorkloadRule: (body: any) => req('/academic-governance/faculty/workload-rules', { method: 'POST', body: JSON.stringify(body) }),
+  facultyWorkload: (term = '') => req(`/academic-governance/faculty/workload${term ? `/${encodeURIComponent(term)}` : ''}`),
+  facultyConflicts: () => req('/academic-governance/faculty/conflicts'),
+  createFacultyConflict: (body: any) => req('/academic-governance/faculty/conflicts', { method: 'POST', body: JSON.stringify(body) }),
+  approveFacultyConflict: (id: string, reason = '') => req(`/academic-governance/faculty/conflicts/${id}/approve?reason=${encodeURIComponent(reason)}`, { method: 'POST' }),
+  timetableConflicts: (term = '') => req(`/academic-governance/timetable/conflicts${term ? `?term=${encodeURIComponent(term)}` : ''}`),
+  createTeachingPlan: (body: any) => req('/academic-governance/delivery/plans', { method: 'POST', body: JSON.stringify(body) }),
+  addSyllabusProgress: (id: string, body: any) => req(`/academic-governance/delivery/plans/${id}/progress`, { method: 'POST', body: JSON.stringify(body) }),
+  createAcademicMilestone: (body: any) => req('/academic-governance/delivery/milestones', { method: 'POST', body: JSON.stringify(body) }),
+  updateCourseCompletion: (body: any) => req('/academic-governance/delivery/completions', { method: 'POST', body: JSON.stringify(body) }),
+  createDeliveryException: (body: any) => req('/academic-governance/delivery/exceptions', { method: 'POST', body: JSON.stringify(body) }),
+  deliveryMonitoring: (term = '') => req(`/academic-governance/delivery/monitoring${term ? `?term=${encodeURIComponent(term)}` : ''}`),
 
   // ---- students ----
   students: (q = '', dept = '', page = 1, pageSize = 25, filters: any = {}) => {
@@ -217,6 +360,13 @@ export const api = {
   createCourse: (b: any) => req('/academics/courses', { method: 'POST', body: JSON.stringify(b) }),
   sections: () => req('/academics/sections'),
   createSection: (b: any) => req('/academics/sections', { method: 'POST', body: JSON.stringify(b) }),
+  teachingAllocations: (facultyId = '') =>
+    req(`/academics/teaching-allocations${facultyId ? `?faculty_id=${encodeURIComponent(facultyId)}` : ''}`),
+  teachingAllocationCandidates: () => req('/academics/teaching-allocation-candidates'),
+  createTeachingAllocation: (b: any) => req('/academics/teaching-allocations', { method: 'POST', body: JSON.stringify(b) }),
+  updateTeachingAllocation: (id: string, b: any) => req(`/academics/teaching-allocations/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+  activateTeachingAllocation: (id: string) => req(`/academics/teaching-allocations/${id}/activate`, { method: 'POST' }),
+  endTeachingAllocation: (id: string) => req(`/academics/teaching-allocations/${id}/end`, { method: 'POST' }),
   sectionTimetable: (sectionId: string) => req(`/academics/section/${sectionId}/timetable`),
   createTimetableEntry: (sectionId: string, b: any) =>
     req(`/academics/section/${sectionId}/timetable`, { method: 'POST', body: JSON.stringify(b) }),
@@ -248,6 +398,11 @@ export const api = {
     req(`/academics/section/${sectionId}/assignments`, { method: 'POST', body: JSON.stringify(b) }),
   updateAssignment: (assignmentId: string, b: any) =>
     req(`/academics/assignments/${assignmentId}`, { method: 'PUT', body: JSON.stringify(b) }),
+  facultyAssignments: () => req('/faculty/assignments'),
+  createFacultyAssignment: (body: any) => req('/faculty/assignments', { method: 'POST', body: JSON.stringify(body) }),
+  updateFacultyAssignment: (id: string, body: any) => req(`/faculty/assignments/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  facultyAssignmentSubmissions: (id: string) => req(`/faculty/assignments/${id}/submissions`),
+  evaluateAssignmentSubmission: (id: string, body: any) => req(`/faculty/assignment-submissions/${id}/evaluate`, { method: 'POST', body: JSON.stringify(body) }),
   publishAnnouncement: (b: any) => req('/academics/announcements', { method: 'POST', body: JSON.stringify(b) }),
   academicAnnouncements: () => req('/academics/announcements'),
 
@@ -255,6 +410,15 @@ export const api = {
   attendanceSections: () => req('/attendance/sections'),
   attendanceRoster: (sid: string) => req(`/attendance/roster/${sid}`),
   markAttendance: (b: any) => req('/attendance/mark', { method: 'POST', body: JSON.stringify(b) }),
+  createAttendanceCorrection: (b: any) => req('/attendance/corrections', { method: 'POST', body: JSON.stringify(b) }),
+  attendanceCorrections: (scope = 'mine') => req(`/attendance/corrections?scope=${encodeURIComponent(scope)}`),
+  updateAttendanceCorrection: (id: string, b: any) => req(`/attendance/corrections/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+  resubmitAttendanceCorrection: (id: string) => req(`/attendance/corrections/${id}/resubmit`, { method: 'POST' }),
+  decideAttendanceCorrection: (id: string, b: any) => req(`/attendance/corrections/${id}/decide`, { method: 'POST', body: JSON.stringify(b) }),
+  facultyClassSessions: (onDate = '') => req(`/faculty/class-sessions${onDate ? `?on_date=${encodeURIComponent(onDate)}` : ''}`),
+  checkInClassSession: (id: string) => req(`/faculty/class-sessions/${id}/check-in`, { method: 'POST' }),
+  finalizeClassSessionAttendance: (id: string) => req(`/faculty/class-sessions/${id}/finalize-attendance`, { method: 'POST' }),
+
   // ---- exams ----
   examSections: () => req('/exams/sections'),
   examAssessments: (sid: string) => req(`/exams/assessments/${sid}`),
@@ -266,6 +430,9 @@ export const api = {
   updateExamTimetable: (scheduleId: string, b: any) =>
     req(`/exams/timetable/${scheduleId}`, { method: 'PUT', body: JSON.stringify(b) }),
   enterMarks: (b: any) => req('/exams/marks', { method: 'POST', body: JSON.stringify(b) }),
+  submitMarksForReview: (assessment_id: string) => req('/exams/marks/submit', { method: 'POST', body: JSON.stringify({ assessment_id }) }),
+  marksSubmissions: (scope = 'mine') => req(`/exams/marks/submissions?scope=${encodeURIComponent(scope)}`),
+  decideMarksSubmission: (assessmentId: string, body: any) => req(`/exams/marks/submissions/${assessmentId}/decide`, { method: 'POST', body: JSON.stringify(body) }),
   publishMarks: (assessment_id: string) => req('/exams/marks/publish', { method: 'POST', body: JSON.stringify({ assessment_id }) }),
   publishResult: (section_id: string) => req('/exams/publish', { method: 'POST', body: JSON.stringify({ section_id }) }),
 
@@ -374,6 +541,11 @@ export const api = {
   jobs: () => req('/hr/jobs'),
   decideLeave: (leave_id: string, action: string) =>
     req('/hr/leave/decide', { method: 'POST', body: JSON.stringify({ leave_id, action }) }),
+  facultyLeaveRequests: (scope = 'mine') => req(`/faculty/leave-requests?scope=${encodeURIComponent(scope)}`),
+  createFacultyLeave: (body: any) => req('/faculty/leave-requests', { method: 'POST', body: JSON.stringify(body) }),
+  updateFacultyLeave: (id: string, body: any) => req(`/faculty/leave-requests/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  cancelFacultyLeave: (id: string) => req(`/faculty/leave-requests/${id}/cancel`, { method: 'POST' }),
+  decideFacultyLeave: (id: string, body: any) => req(`/faculty/leave-requests/${id}/decide`, { method: 'POST', body: JSON.stringify(body) }),
 
   // ---- ops ----
   assets: () => req('/assets'),
@@ -411,6 +583,19 @@ export const api = {
   sendTransportLocation: (b: any) => req('/transport/locations', { method: 'POST', body: JSON.stringify(b) }),
   liveTransportLocation: (id: string) => req(`/transport/live-location/${id}`),
   research: () => req('/research'),
+  facultyResearchProjects: () => req('/faculty/research/projects'),
+  facultyResearchProject: (id: string) => req(`/faculty/research/projects/${id}`),
+  createResearchProject: (body: any) => req('/faculty/research/projects', { method: 'POST', body: JSON.stringify(body) }),
+  updateResearchProject: (id: string, body: any) => req(`/faculty/research/projects/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  startResearchProject: (id: string) => req(`/faculty/research/projects/${id}/start`, { method: 'POST' }),
+  addResearchProgress: (id: string, body: any) => req(`/faculty/research/projects/${id}/progress`, { method: 'POST', body: JSON.stringify(body) }),
+  addResearchMilestone: (id: string, body: any) => req(`/faculty/research/projects/${id}/milestones`, { method: 'POST', body: JSON.stringify(body) }),
+  completeResearchMilestone: (id: string, milestoneId: string) => req(`/faculty/research/projects/${id}/milestones/${milestoneId}/complete`, { method: 'POST' }),
+  completeResearchProject: (id: string, action: 'complete' | 'close') => req(`/faculty/research/projects/${id}/complete?action=${action}`, { method: 'POST' }),
+  facultyResearchPublications: () => req('/faculty/research/publications'),
+  createResearchPublication: (body: any) => req('/faculty/research/publications', { method: 'POST', body: JSON.stringify(body) }),
+  updateResearchPublication: (id: string, body: any) => req(`/faculty/research/publications/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  publishResearchPublication: (id: string) => req(`/faculty/research/publications/${id}/publish`, { method: 'POST' }),
   placements: () => req('/placements'),
 
   // ---- grievance ----
@@ -465,6 +650,7 @@ export const api = {
   verifyRazorpayPayment: (body: any) => req('/portal/student/fees/razorpay/verify', { method: 'POST', body: JSON.stringify(body) }),
   downloadStudentReceipt: (invoice_id: string, payment_id = '') => download(`/portal/student/fees/invoices/${invoice_id}/receipt.pdf${payment_id ? `?payment_id=${encodeURIComponent(payment_id)}` : ''}`),
   studentDigitalId: () => req('/portal/student/digital-id'),
+  facultyDigitalId: () => req('/portal/faculty/digital-id'),
   studentCalendar: (start = '') => {
     const params = new URLSearchParams()
     if (start) params.set('start', start)
@@ -479,12 +665,36 @@ export const api = {
     req(`/portal/student/calendar/personal/${id}`, { method: 'DELETE' }),
   studentTodayClasses: () => req('/portal/student/today-classes'),
   studentTasks: () => req('/portal/student/tasks'),
+  studentAssignments: () => req('/portal/student/assignments'),
+  studentAssignment: (id: string) => req(`/portal/student/assignments/${id}`),
+  submitStudentAssignment: (id: string, body: any) => req(`/portal/student/assignments/${id}/submit`, { method: 'POST', body: JSON.stringify(body) }),
   studentUpcomingAssessments: () => req('/portal/student/upcoming-assessments'),
   studentAnnouncements: () => req('/portal/student/announcements'),
   studentLibraryLoans: () => req('/portal/student/library-loans'),
   facultyHome: () => req('/portal/faculty/home'),
+  facultyCourseCoordination: () => req('/portal/faculty/course-coordination'),
+  facultyAcademicRisk: () => req('/portal/faculty/academic-risk'),
+  facultyCourseRegistrations: () => req('/portal/faculty/course-registrations'),
+  facultyAnnouncements: () => req('/portal/faculty/announcements'),
+  facultySelfCheckIn: () => req('/portal/faculty/self-check-in'),
+  checkInFaculty: (body: any = {}) => req('/portal/faculty/self-check-in', { method: 'POST', body: JSON.stringify(body) }),
   facultySchedule: () => req('/portal/faculty/schedule'),
   facultySections: () => req('/portal/faculty/sections'),
+  facultyMentees: () => req('/portal/faculty/mentees'),
+  facultyMentee: (id: string) => req(`/portal/faculty/mentees/${id}`),
+  mentoringCases: (scope = 'mine') => req(`/portal/faculty/mentoring-cases?scope=${scope}`),
+  mentoringCase: (id: string) => req(`/portal/faculty/mentoring-cases/${id}`),
+  createMentoringCase: (studentId: string, body: any) => req(`/portal/faculty/mentees/${studentId}/mentoring-cases`, { method: 'POST', body: JSON.stringify(body) }),
+  updateMentoringCase: (id: string, body: any) => req(`/portal/faculty/mentoring-cases/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  addMentoringNote: (id: string, body: any) => req(`/portal/faculty/mentoring-cases/${id}/notes`, { method: 'POST', body: JSON.stringify(body) }),
+  scheduleMentoringFollowUp: (id: string, body: any) => req(`/portal/faculty/mentoring-cases/${id}/follow-ups`, { method: 'POST', body: JSON.stringify(body) }),
+  completeMentoringFollowUp: (id: string, followUpId: string, body: any) => req(`/portal/faculty/mentoring-cases/${id}/follow-ups/${followUpId}/complete`, { method: 'POST', body: JSON.stringify(body) }),
+  referMentoringCase: (id: string, body: any) => req(`/portal/faculty/mentoring-cases/${id}/refer`, { method: 'POST', body: JSON.stringify(body) }),
+  closeMentoringCase: (id: string, action: 'resolve' | 'close') => req(`/portal/faculty/mentoring-cases/${id}/close?action=${action}`, { method: 'POST' }),
+  facultyMaterials: () => req('/portal/faculty/materials'),
+  facultyAssessmentMarks: (id: string) => req(`/portal/faculty/assessment/${id}/marks`),
+  createFacultyMaterial: (body: any) => req('/portal/faculty/materials', { method: 'POST', body: JSON.stringify(body) }),
+  studentMaterials: () => req('/portal/student/materials'),
   facultySectionStudents: (id: string) => req(`/portal/faculty/section/${id}/students`),
   parentHome: () => req('/portal/parent/home'),
   createParentRazorpayOrder: (invoice_id: string, amount?: number) => req('/portal/parent/fees/razorpay/order', { method: 'POST', body: JSON.stringify({ invoice_id, ...(amount !== undefined ? { amount } : {}) }) }),

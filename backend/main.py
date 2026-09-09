@@ -12,11 +12,11 @@ import os
 import sys
 import uuid
 import time
-import threading
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
@@ -30,18 +30,24 @@ import matrices as M
 from matrices import (APPROVAL_MATRIX, WF_VALID, WF_STATES, approval_limit_for,
                       APPROVAL_LIMITS, rbac_for, scope_for)
 from database import (SessionLocal, seed, CATALOG, OFFICES, LEVELS, office,
-                      DEMO_USERNAMES, TENANT, slug)
+                      DEMO_USERNAMES, TENANT, slug, ensure_versioned_migrations,
+                      demo_data_enabled)
 from models import (User, Person, Role, RolePermission, Delegation, WorkflowInstance,
                     WorkflowProfile, Approval, Notification, AuditLog, ApprovalLimit,
                     DelegationPolicy, DelegationProfile, DelegationOption,
                     DelegationContext)
 
 from domain_api import router as domain_router
+from governance_api import router as governance_router
+from faculty_api import router as faculty_router
+from faculty_portal_api import router as faculty_portal_router
 from admissions_api import router as admissions_router
 from portal_api import router as portal_router
 from integrations_api import router as integrations_router
 from sms_api import router as sms_router
 from frontdesk_api import router as frontdesk_router, seed_frontdesk
+from administration_api import router as administration_router
+from specialist_api import router as specialist_router
 from domain_seed import seed_domain
 import frontdesk_models  # register Front Office tables before create_all
 
@@ -54,14 +60,61 @@ bearer_scheme = HTTPBearer(scheme_name="BearerAuth", auto_error=False)
 
 app = FastAPI(title="ICMS — Integrated College/University Management System",
               version="1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
-                   allow_headers=["*"])
+_environment = os.environ.get("ICMS_ENVIRONMENT", "development").lower()
+_cors_origins = [origin.strip() for origin in os.environ.get("CORS_ALLOW_ORIGINS", "").split(",") if origin.strip()]
+if _environment in {"production", "prod"} and not _cors_origins:
+    raise RuntimeError("CORS_ALLOW_ORIGINS must be configured in production")
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins or ["http://localhost:5173", "http://localhost:8080"], allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+                   allow_headers=["Authorization", "Content-Type"])
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    if _environment in {"production", "prod"}:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
+
+# Defense-in-depth for routes that expose Dean academic governance.  This is
+# intentionally server-side so hidden frontend routes cannot be replayed.
+GOVERNANCE_PATHS = ("/api/academics/timetable/readiness", "/api/academics/quality/",
+                    "/api/academics/committees", "/api/academics/outcomes",
+                    "/api/academics/plans", "/api/academics/allocation/proposals",
+                    "/api/programs/proposals", "/api/curriculum/proposals",
+                    "/api/academic-calendar/proposals", "/api/academic-governance")
+# These are the actual source and review offices for academic governance.
+# Keep this transport-level guard aligned with domain_api's authorization
+# policy; otherwise an authorized source office can see a form but every
+# mutation is rejected before its endpoint executes.
+GOVERNANCE_ROUTE_OFFICES = {6, 10, 17, 41, 42, 43}
+
+
+@app.middleware("http")
+async def governance_route_guard(request: Request, call_next):
+    if request.url.path.startswith(GOVERNANCE_PATHS):
+        auth_header = request.headers.get("authorization", "")
+        try:
+            token = auth_header.split(" ", 1)[1]
+            actor = decode_token(token)
+            if actor.get("office_n") not in GOVERNANCE_ROUTE_OFFICES:
+                return JSONResponse({"detail": "Academic governance access denied"}, status_code=403)
+        except Exception:
+            return JSONResponse({"detail": "Missing or invalid token"}, status_code=401)
+    return await call_next(request)
 app.include_router(domain_router)
+app.include_router(governance_router)
+app.include_router(faculty_router)
+app.include_router(faculty_portal_router)
 app.include_router(admissions_router)
 app.include_router(portal_router)
 app.include_router(integrations_router)
 app.include_router(sms_router)
 app.include_router(frontdesk_router)
+app.include_router(administration_router)
+app.include_router(specialist_router)
 
 
 @app.on_event("startup")
@@ -74,12 +127,15 @@ def _startup():
             # development rows and previously kept Uvicorn in its startup state
             # for several minutes.  During that time nginx had no usable
             # upstream and returned 502 for every /api request.
-            print("seed:", seed(), flush=True)
-            threading.Thread(
-                target=_seed_domain_after_startup,
-                name="icms-domain-seed",
-                daemon=True,
-            ).start()
+            if demo_data_enabled():
+                print("seed:", seed(), flush=True)
+                _seed_domain_after_startup()
+            else:
+                # Production tenants are provisioned through controlled admin
+                # workflows/migrations.  Never create identities or academic
+                # operational records as a side effect of starting the API.
+                ensure_versioned_migrations()
+                print("production startup: demo operational seeding disabled", flush=True)
             return
         except Exception as e:
             print("waiting for db...", e, flush=True)
@@ -100,6 +156,29 @@ def _seed_domain_after_startup():
         # Keep the API available when optional demo data cannot be refreshed;
         # the concrete failure still remains visible in container logs.
         print("domain seed failed:", exc, flush=True)
+
+
+def _academic_sla_worker():
+    """Mark overdue academic work and notify escalation authority."""
+    while True:
+        session = SessionLocal()
+        try:
+            now = datetime.utcnow()
+            proposals = session.query(D.AcademicProposal).filter(D.AcademicProposal.due_at != None, D.AcademicProposal.due_at < now, D.AcademicProposal.state.in_(("SUBMITTED", "RESUBMITTED", "UNDER_REVIEW")), D.AcademicProposal.escalated_to_office_n == None).all()
+            for row in proposals:
+                row.escalated_to_office_n = 5
+                session.add(Notification(id=uuid.uuid4().hex[:12], tenant_id=TENANT, user_id="user_5", severity="critical", title="Academic proposal overdue", body=row.title))
+            reviews = session.query(D.AcademicQualityReview).filter(D.AcademicQualityReview.due_at != None, D.AcademicQualityReview.due_at < now, D.AcademicQualityReview.state.in_(("OPEN", "ACTION_ASSIGNED"))).all()
+            for row in reviews: row.state = "OVERDUE"; row.updated_at = now
+            actions = session.query(D.CorrectiveAction).filter(D.CorrectiveAction.deadline != None, D.CorrectiveAction.deadline < now, D.CorrectiveAction.state == "OPEN").all()
+            for row in actions:
+                row.state = "OVERDUE"
+                session.add(Notification(id=uuid.uuid4().hex[:12], tenant_id=TENANT, user_id=row.owner_id, severity="critical", title="Corrective action overdue", body=row.title))
+            if proposals or reviews or actions: session.commit()
+        except Exception as exc:
+            session.rollback(); print("academic SLA worker failed:", exc, flush=True)
+        finally: session.close()
+        time.sleep(60)
 
 
 def _reconcile_fee_structure_approvals():
@@ -133,12 +212,22 @@ def _ensure_payment_status_columns():
     from sqlalchemy import inspect, text
     s = SessionLocal()
     try:
-        if not inspect(s.bind).has_table("payments"):
+        inspector = inspect(s.bind)
+        if not inspector.has_table("payments"):
             return
         columns = {c["name"] for c in inspect(s.bind).get_columns("payments")}
         for name, ddl in (("status", "VARCHAR DEFAULT 'success'"), ("cleared_at", "TIMESTAMP"), ("cleared_by", "VARCHAR DEFAULT ''")):
             if name not in columns:
                 s.execute(text(f"ALTER TABLE payments ADD COLUMN {name} {ddl}"))
+        existing = {column["name"] for column in inspector.get_columns("payments")}
+        additions = {
+            "status": "VARCHAR DEFAULT 'success'",
+            "cleared_at": "TIMESTAMP",
+            "cleared_by": "VARCHAR DEFAULT ''",
+        }
+        for column_name, ddl in additions.items():
+            if column_name not in existing:
+                s.execute(text(f"ALTER TABLE payments ADD COLUMN {column_name} {ddl}"))
         s.execute(text("UPDATE payments SET status = 'success' WHERE status IS NULL"))
         s.commit()
     finally:
@@ -553,6 +642,7 @@ def _delegation_recipient_options(s):
 class LoginIn(BaseModel):
     username: str
     password: str
+    demo_context: str | None = None
 
 
 @app.post("/api/auth/login")
@@ -560,9 +650,24 @@ def login(body: LoginIn, s=Depends(db)):
     # IDs and email-style usernames should be convenient to type.  Preserve the
     # stored username but compare case-insensitively at authentication time.
     username = (body.username or "").strip().lower()
+    if username == "student" and demo_data_enabled():
+        # Use the explicitly provisioned portal account rather than a legacy
+        # identity row whose password depends on optional domain seeding.
+        # This keeps the documented development login usable even when an
+        # unrelated seed extension cannot complete.
+        username = "24cse014"
     u = s.query(User).filter(func.lower(User.username) == username).first()
     if not u or u.password_hash != pwhash(body.password):
         raise HTTPException(401, "Invalid credentials")
+    if username == "professor" and demo_data_enabled():
+        professor = s.query(User).filter(
+            User.username == "aarav_kulkarni", User.status == "active"
+        ).first()
+        if not professor:
+            raise HTTPException(503, "Professor demo account is unavailable")
+        u = professor
+    elif body.demo_context:
+        raise HTTPException(422, "Invalid demo login context")
     o = office(u.office_n)
     tok = issue_token(u.id, u.tenant_id, u.office_n, u.role, u.scope_level,
                       u.scope_ref, "mfa" if u.mfa_enabled else "password")
@@ -607,6 +712,7 @@ def _user_payload(u, p, o, active_role=None, active_delegations=None):
         "role": u.role, "active_role": active_role or u.role,
         "persona": _persona_for(u.office_n),
         "scope_level": u.scope_level, "mfa": u.mfa_enabled,
+            "scope_ref": u.scope_ref,
         "modules": o["modules"], "functionalities": o["functionalities"],
         "workflows": o["workflows"], "purpose": o["purpose"],
         "reports_to": o["reports_to"], "internal_roles": o["internal_roles"],
@@ -825,6 +931,41 @@ def _workflow_process(process_key: str):
     return next((p for p in APPROVAL_MATRIX if p["key"] == process_key), None)
 
 
+def _approval_limit_from_db(s, ctx, process_key):
+    """Approval thresholds are policy data, not a runtime constant."""
+    row = (s.query(ApprovalLimit)
+           .filter(ApprovalLimit.tenant_id == ctx.get("tenant_id", TENANT),
+                   ApprovalLimit.scope_level == ctx.get("scope_level", "campus"),
+                   ApprovalLimit.process == process_key)
+           .first())
+    return row.threshold if row else None
+
+
+def _workflow_stage_offices(proc, stage):
+    """Resolve named legacy matrix stages to offices; unknown labels fail closed."""
+    if not proc or stage >= len(proc.get("chain", [])):
+        return set()
+    label = proc["chain"][stage].lower()
+    mapping = (("campus head", {3}), ("principal", {4}), ("vice principal", {5}),
+               ("dean", {6, 7, 8, 9}), ("finance", {22}), ("accounts", {23}),
+               ("hr", {24, 25}), ("purchase", {32}), ("procurement", {32}),
+               ("maintenance", {29}), ("system admin", {28}), ("security admin", {28}),
+               ("store", {33}), ("warden", {30}), ("transport", {31}),
+               ("admissions", {15}), ("exam", {16}), ("hod", {10}), ("chairman", {1}))
+    for token, offices in mapping:
+        if token in label:
+            return offices
+    return set()
+
+
+def _workflow_visible_to(wf, proc, ctx):
+    if wf.tenant_id != ctx.get("tenant_id", TENANT):
+        return False
+    if wf.initiator_id == ctx["sub"] or wf.office_n == ctx["office_n"]:
+        return True
+    return ctx["office_n"] in _workflow_stage_offices(proc, wf.current_stage)
+
+
 def _semester_meta_for_date(dt_value: datetime | None):
     current = dt_value or datetime.utcnow()
     year = current.year
@@ -902,7 +1043,7 @@ def _ensure_workflow_profile(
 ):
     profile = s.query(WorkflowProfile).filter(WorkflowProfile.workflow_id == wf.id).first()
     if profile is None:
-        profile = WorkflowProfile(id=f"profile_{wf.id}", tenant_id=TENANT, workflow_id=wf.id)
+        profile = WorkflowProfile(id=f"profile_{wf.id}", tenant_id=wf.tenant_id, workflow_id=wf.id)
         s.add(profile)
     fallback = _semester_meta_for_date(wf.created_at)
     semester_meta = _semester_meta_from_key(semester_key, wf.created_at) if semester_key else fallback
@@ -940,7 +1081,7 @@ def _start_workflow_record(
         # Students can still initiate their own requests (create=Limited).
         pass
     wf = WorkflowInstance(
-        id=uid(), tenant_id=TENANT, process_key=proc["key"], label=proc["label"],
+        id=uid(), tenant_id=ctx.get("tenant_id", TENANT), process_key=proc["key"], label=proc["label"],
         office_n=proc["office_n"], title=clean_title, state="submitted",
         amount=amount, initiator_id=u.id, initiator_name=p.name if p else u.username,
         current_stage=1, scope_level=ctx.get("scope_level", "campus"))
@@ -1030,9 +1171,12 @@ class DecideWF(BaseModel):
 @app.post("/api/workflows/decide")
 def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)):
     wf = s.query(WorkflowInstance).get(body.workflow_id)
-    if not wf:
+    if not wf or wf.tenant_id != ctx.get("tenant_id", TENANT):
         raise HTTPException(404, "Workflow not found")
     proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
+    stage_offices = _workflow_stage_offices(proc, wf.current_stage)
+    if ctx["office_n"] != wf.office_n and ctx["office_n"] not in stage_offices:
+        raise HTTPException(403, "Only the current workflow stage owner may act")
     u = s.query(User).get(ctx["sub"])
     p = s.query(Person).get(u.person_id)
     o = office(ctx["office_n"])
@@ -1044,8 +1188,7 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
     rbac = rbac_for(ctx["office_n"], o["level"], verb if verb in VERBS else "approve")
 
     # Approval limit for this process & the actor's scope.
-    limit = approval_limit_for(ctx.get("scope_level", "campus"), wf.process_key) \
-        if proc and proc.get("amount") else None
+    limit = _approval_limit_from_db(s, ctx, wf.process_key) if proc and proc.get("amount") else None
 
     # Run the authority gate (Document §7 steps 8-13).
     dec = authorize(
@@ -1130,12 +1273,22 @@ def _wf_payload(s, wf, proc):
     approvals = (s.query(Approval).filter(Approval.workflow_id == wf.id)
                  .order_by(Approval.created_at).all())
     profile = s.query(WorkflowProfile).filter(WorkflowProfile.workflow_id == wf.id).first()
+    request_student = ""
+    correction_id = ""
+    if wf.process_key == "attendance_correction":
+        correction = (s.query(D.AttendanceCorrectionRequest)
+                      .filter(D.AttendanceCorrectionRequest.workflow_instance_id == wf.id).first())
+        if correction:
+            student = s.query(D.Student).get(correction.student_id)
+            request_student = student.name if student else correction.student_id
+            correction_id = correction.id
     return {
         "id": wf.id, "process_key": wf.process_key, "label": wf.label,
         "office_n": wf.office_n, "title": wf.title, "state": wf.state,
         "amount": wf.amount, "initiator": wf.initiator_name,
         "current_stage": wf.current_stage, "escalated": wf.escalated,
         "scope_level": wf.scope_level,
+        "request_student": request_student, "correction_id": correction_id,
         "chain": proc["chain"] if proc else [],
         "escalation": proc["escalation"] if proc else "",
         "created_at": wf.created_at.isoformat(),
@@ -1236,11 +1389,13 @@ def _visible_page_numbers(page: int, total_pages: int):
 
 @app.get("/api/workflows")
 def list_workflows(scope: str = "all", ctx=Depends(non_front_office), s=Depends(db)):
-    q = s.query(WorkflowInstance)
+    q = s.query(WorkflowInstance).filter(WorkflowInstance.tenant_id == ctx.get("tenant_id", TENANT))
     pending_states = ["submitted", "under_review", "reviewed", "escalated"]
     if scope == "mine":
         q = q.filter(WorkflowInstance.initiator_id == ctx["sub"])
         rows = q.order_by(desc(WorkflowInstance.updated_at)).limit(100).all()
+        rows = (q.filter(WorkflowInstance.initiator_id == ctx["sub"])
+                .order_by(desc(WorkflowInstance.updated_at)).limit(100).all())
     elif scope == "inbox":
         own_rows = (q.filter(WorkflowInstance.office_n == ctx["office_n"],
                              WorkflowInstance.state.in_(pending_states))
@@ -1267,7 +1422,8 @@ def list_workflows(scope: str = "all", ctx=Depends(non_front_office), s=Depends(
                     seen.add(wf.id)
             rows = sorted(rows, key=lambda item: item.updated_at or item.created_at, reverse=True)[:100]
     else:
-        rows = q.order_by(desc(WorkflowInstance.updated_at)).limit(100).all()
+        candidates = q.order_by(desc(WorkflowInstance.updated_at)).limit(250).all()
+        rows = [row for row in candidates if _workflow_visible_to(row, _workflow_process(row.process_key), ctx)][:100]
     out = []
     for wf in rows:
         proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
@@ -1278,9 +1434,11 @@ def list_workflows(scope: str = "all", ctx=Depends(non_front_office), s=Depends(
 @app.get("/api/workflows/{wid}")
 def get_workflow(wid: str, ctx=Depends(non_front_office), s=Depends(db)):
     wf = s.query(WorkflowInstance).get(wid)
-    if not wf:
+    if not wf or wf.tenant_id != ctx.get("tenant_id", TENANT):
         raise HTTPException(404, "Not found")
     proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
+    if not _workflow_visible_to(wf, proc, ctx):
+        raise HTTPException(403, "Workflow is outside your scope")
     return _wf_payload(s, wf, proc)
 
 
@@ -1982,7 +2140,11 @@ def read_notification(nid: str, ctx=Depends(auth), s=Depends(db)):
 # --------------------------------------------------------------------------- #
 @app.get("/api/audit")
 def get_audit(limit: int = 60, ctx=Depends(non_front_office), s=Depends(db)):
-    rows = s.query(AuditLog).order_by(desc(AuditLog.id)).limit(limit).all()
+    rows = (s.query(AuditLog)
+            .filter(AuditLog.tenant_id == ctx.get("tenant_id", TENANT))
+            .order_by(desc(AuditLog.id))
+            .limit(limit)
+            .all())
     return {"entries": [{"id": r.id, "actor": r.actor_name or r.actor, "office_n": r.office_n,
                          "action": r.action, "entity": r.entity, "new_state": r.new_state,
                          "outcome": r.new_state, "reason": r.reason, "auth_level": r.auth_level,
@@ -1992,7 +2154,10 @@ def get_audit(limit: int = 60, ctx=Depends(non_front_office), s=Depends(db)):
 
 @app.get("/api/audit/verify")
 def verify_audit(ctx=Depends(non_front_office), s=Depends(db)):
-    rows = s.query(AuditLog).order_by(AuditLog.id).all()
+    rows = (s.query(AuditLog)
+            .filter(AuditLog.tenant_id == ctx.get("tenant_id", TENANT))
+            .order_by(AuditLog.id)
+            .all())
     prev = "0" * 64
     broken = None
     for r in rows:
@@ -2011,31 +2176,43 @@ def verify_audit(ctx=Depends(non_front_office), s=Depends(db)):
 # --------------------------------------------------------------------------- #
 @app.get("/api/dashboard")
 def dashboard(ctx=Depends(non_front_office), s=Depends(db)):
+    tenant_id = ctx.get("tenant_id", TENANT)
     o = office(ctx["office_n"])
-    mine = s.query(WorkflowInstance).filter(WorkflowInstance.initiator_id == ctx["sub"]).count()
-    inbox = s.query(WorkflowInstance).filter(
-        WorkflowInstance.office_n == ctx["office_n"],
-        WorkflowInstance.state.in_(["submitted", "under_review", "reviewed", "escalated"])).count()
-    pending = s.query(WorkflowInstance).filter(
-        WorkflowInstance.state.in_(["submitted", "under_review", "reviewed"])).count()
-    approved = s.query(WorkflowInstance).filter(WorkflowInstance.state == "approved").count()
-    escalated = s.query(WorkflowInstance).filter(WorkflowInstance.state == "escalated").count()
-    unread = s.query(Notification).filter(Notification.user_id == ctx["sub"],
-                                          Notification.read == False).count()
+    mine = (s.query(WorkflowInstance)
+            .filter(WorkflowInstance.tenant_id == tenant_id, WorkflowInstance.initiator_id == ctx["sub"]))
+    inbox = (s.query(WorkflowInstance)
+             .filter(WorkflowInstance.tenant_id == tenant_id,
+                     WorkflowInstance.office_n == ctx["office_n"],
+                     WorkflowInstance.state.in_(["submitted", "under_review", "reviewed", "escalated"])))
+    pending = (s.query(WorkflowInstance)
+               .filter(WorkflowInstance.tenant_id == tenant_id,
+                       WorkflowInstance.state.in_(["submitted", "under_review", "reviewed"])))
+    approved = (s.query(WorkflowInstance)
+                .filter(WorkflowInstance.tenant_id == tenant_id,
+                        WorkflowInstance.state == "approved"))
+    escalated = (s.query(WorkflowInstance)
+                .filter(WorkflowInstance.tenant_id == tenant_id,
+                        WorkflowInstance.state == "escalated"))
+    unread = (s.query(Notification)
+              .filter(Notification.tenant_id == tenant_id,
+                      Notification.user_id == ctx["sub"],
+                      Notification.read == False))
     # processes this office owns
     owned = [p for p in APPROVAL_MATRIX if p["office_n"] == ctx["office_n"]]
     return {
         "office": o["name"], "level": o["level"],
-        "kpis": {"my_requests": mine, "inbox": inbox, "pending_all": pending,
-                 "approved": approved, "escalated": escalated, "unread": unread},
+        "kpis": {"my_requests": mine.count(), "inbox": inbox.count(), "pending_all": pending.count(),
+                 "approved": approved.count(), "escalated": escalated.count(), "unread": unread.count()},
         "owned_processes": owned,
-        "workflows_by_state": _wf_state_counts(s),
+        "workflows_by_state": _wf_state_counts(s, tenant_id),
     }
 
 
-def _wf_state_counts(s):
-    rows = s.query(WorkflowInstance.state, func.count(WorkflowInstance.id)).group_by(
-        WorkflowInstance.state).all()
+def _wf_state_counts(s, tenant_id: str | None = None):
+    query = s.query(WorkflowInstance.state, func.count(WorkflowInstance.id)).group_by(WorkflowInstance.state)
+    if tenant_id is not None:
+        query = query.filter(WorkflowInstance.tenant_id == tenant_id)
+    rows = query.all()
     return {state: cnt for state, cnt in rows}
 
 

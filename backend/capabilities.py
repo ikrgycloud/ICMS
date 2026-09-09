@@ -18,6 +18,16 @@ through authorize() in authority.py. This map only decides what is *offered*.
 
 # App module keys and their display metadata (icon is a glyph used by the UI).
 MODULES = {
+    "messages": {"label": "Messages", "icon": "Msg", "group": "Workspace"},
+    "announcements": {"label": "Announcements", "icon": "Ann", "group": "Workspace"},
+    "assignments": {"label": "Assignments", "icon": "Asn", "group": "Academics"},
+    "assessments": {"label": "Assessments", "icon": "Asm", "group": "Academics"},
+    "marks_entry": {"label": "Marks Entry", "icon": "Mrk", "group": "Academics"},
+    "course_materials": {"label": "Course Materials", "icon": "Mat", "group": "Academics"},
+    "mentoring": {"label": "Mentoring", "icon": "Mtr", "group": "Academics"},
+    "payroll": {"label": "Payroll", "icon": "Pay", "group": "Operations"},
+    "leave": {"label": "Leave Requests", "icon": "Lve", "group": "Operations"},
+    "digital_id": {"label": "Digital ID", "icon": "ID", "group": "Reference"},
     "frontdesk_dashboard": {"label": "Dashboard", "icon": "◆", "group": "Front Desk"},
     "frontdesk_visitors": {"label": "Visitor Management", "icon": "◉", "group": "Front Desk"},
     "frontdesk_appointments": {"label": "Appointments", "icon": "◷", "group": "Front Desk"},
@@ -27,6 +37,7 @@ MODULES = {
     "frontdesk_delegations": {"label": "Delegations", "icon": "⤳", "group": "Front Desk"},
     "frontdesk_verify": {"label": "Verify / Scan", "icon": "⌗", "group": "Front Desk"},
     "curriculum":   {"label": "Curriculum", "icon": "Curr", "group": "Academics"},
+    "program_proposals": {"label": "Programme Requests", "icon": "Curr", "group": "Academics"},
     "rollover":     {"label": "Academic Rollover", "icon": "Rollover", "group": "Academics"},
     "overview":     {"label": "Overview",      "icon": "◆", "group": "Workspace"},
     "my_schedule":  {"label": "My Schedule",   "icon": "📅", "group": "Workspace"},
@@ -77,10 +88,10 @@ OFFICE_MODULES = {
     8:  ["students", "grievance", "hostel", "approvals"],                          # Dean Student Affairs
     9:  ["research", "analytics", "approvals"],                                    # Dean R&D / IQAC
     10: ["academics", "students", "attendance", "examinations", "hr", "approvals"],# HOD
-    11: ["my_schedule", "academics", "attendance", "examinations", "research"], # Professor
-    12: ["my_schedule", "academics", "attendance", "examinations", "research"], # Associate Professor
-    13: ["my_schedule", "academics", "attendance", "examinations"],              # Assistant Professor
-    14: ["my_schedule", "academics", "attendance", "examinations"],              # Lecturer
+    11: ["my_schedule", "messages", "announcements", "academics", "attendance", "assignments", "assessments", "marks_entry", "examinations", "course_materials", "mentoring", "research", "leave", "payroll", "digital_id"], # Professor
+    12: ["my_schedule", "messages", "announcements", "academics", "attendance", "assignments", "assessments", "marks_entry", "examinations", "course_materials", "mentoring", "research", "leave", "payroll", "digital_id"], # Associate Professor
+    13: ["my_schedule", "messages", "announcements", "academics", "attendance", "assignments", "assessments", "marks_entry", "examinations", "course_materials", "mentoring", "leave", "payroll", "digital_id"], # Assistant Professor
+    14: ["my_schedule", "messages", "announcements", "academics", "attendance", "assignments", "assessments", "marks_entry", "examinations", "course_materials", "leave", "payroll", "digital_id"], # Lecturer
     15: ["admissions", "students", "approvals"],                                   # Admission Office
     16: ["examinations", "students", "approvals"],                                 # Exam Controller
     17: ["academics", "attendance", "rollover", "approvals"],                                  # Academic Coordinator
@@ -108,6 +119,9 @@ OFFICE_MODULES = {
     38: ["placements", "analytics"],                                               # Alumni
     39: ["finance", "audit", "analytics"],                                         # External Auditor
     40: ["governance", "analytics", "finance", "hr", "approvals"],                 # Governing Body
+    41: ["program_proposals", "curriculum", "approvals"],                              # Program Coordinator
+    42: ["academic_calendar", "academics", "approvals"],                              # Academic Office
+    43: ["academics", "approvals"],                                                     # Timetable Coordinator
 }
 
 # Which verb (from the RBAC matrix) a module's key actions require. The UI uses
@@ -117,7 +131,8 @@ MODULE_ACTIONS = {
     "calendar":     {"view": "view", "create": "create", "edit": "edit",
                      "delete": "delete"},
     "academic_calendar": {"view": "view", "create": "create", "edit": "edit",
-                          "delete": "delete"},
+                          "delete": "delete", "approve_proposal": "approve",
+                          "reject_proposal": "reject"},
     "students":     {"view": "view", "add": "create", "edit": "edit"},
 
     "academics":    {"view": "view", "create_section": "create", "create_course": "create", "edit": "edit",
@@ -127,7 +142,10 @@ MODULE_ACTIONS = {
                      "assign_faculty": "assign", "manage_timetable": "edit",
                      "create_task": "create", "edit_task": "edit",
                      "publish_task": "publish", "close_task": "edit",
-                     "publish_announcement": "publish"},
+                     "publish_announcement": "publish", "approve_proposal": "approve",
+                     "reject_proposal": "reject", "resolve_exception": "verify",
+                     "manage_quality": "create", "manage_committee": "create",
+                     "manage_outcomes": "create", "manage_planning": "create"},
     "attendance":   {"view": "view", "mark": "create", "correct": "edit"},
     "examinations": {"view": "view", "enter_marks": "create", "moderate": "verify",
                      "publish_result": "publish", "lock": "lock",
@@ -182,17 +200,29 @@ ACTION_OFFICE_ALLOW = {
     ("academic_calendar", "create"): {1, 2, 4, 5, 17},
     ("academic_calendar", "edit"): {1, 2, 4, 5, 17},
     ("academic_calendar", "delete"): {1, 2, 4, 5, 17},
+    ("academic_calendar", "create"): {42},
+    ("academic_calendar", "edit"): {42},
+    ("academic_calendar", "delete"): {42},
+    ("academic_calendar", "approve_proposal"): {6},
+    ("academic_calendar", "reject_proposal"): {6},
     ("students", "add"): {15},                        # Admissions owns student creation
     ("students", "edit"): {10, 15},                   # HOD and Admissions maintain records
     ("academics", "create_section"): {6, 10, 17},     # Dean Acad, HOD, Acad Coordinator
     ("academics", "create_course"): {6, 10, 17},      # Curriculum owners
     ("academics", "assign_faculty"): {6, 10, 17},
-    ("academics", "manage_timetable"): {6, 10, 17},
+    ("academics", "manage_timetable"): {43},
     ("academics", "create_task"): {10, 11, 12, 13, 14, 17},
     ("academics", "edit_task"): {10, 11, 12, 13, 14, 17},
     ("academics", "publish_task"): {10, 11, 12, 13, 14, 17},
     ("academics", "close_task"): {10, 11, 12, 13, 14, 17},
     ("academics", "publish_announcement"): {6, 8, 10, 17},
+    ("academics", "approve_proposal"): {6},
+    ("academics", "reject_proposal"): {6},
+    ("academics", "resolve_exception"): {6},
+    ("academics", "manage_quality"): {6, 10, 17},
+    ("academics", "manage_committee"): {6, 9, 17},
+    ("academics", "manage_outcomes"): {6, 9, 17},
+    ("academics", "manage_planning"): {6, 17},
     ("attendance", "mark"): {10, 11, 12, 13, 14, 17},  # HOD + faculty + coordinator
     ("attendance", "correct"): {10, 17},
     ("examinations", "enter_marks"): {11, 12, 13, 14, 16},  # faculty + exam cell
@@ -280,7 +310,7 @@ def modules_for_office(n: int) -> list:
     if n == 35:
         return list(OFFICE_MODULES[35])
     mods = list(OFFICE_MODULES.get(n, []))
-    if n in {4, 5, 6, 10, 17}:
+    if n in {4, 5, 6, 10, 17, 41}:
         mods.append("curriculum")
     # base modules always available, appended after the office-specific ones
     ordered = []

@@ -21,16 +21,42 @@ services:
     environment:
       DATABASE_URL: postgresql://icms:icms_secret@db:5432/icms
       JWT_SECRET: change-me-in-production
+      # Local development/demo profile. Production deployments must override
+      # this to production and inject a non-placeholder JWT_SECRET.
+      ICMS_ENVIRONMENT: development
+      DEMO_DATA_ENABLED: "true"
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/docs', timeout=2)\""]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
     ports:
-      - "8000:8000"
+      - "${ICMS_BACKEND_PORT:-8010}:8000"
+
+  worker:
+    build: ./backend
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL: postgresql://icms:icms_secret@db:5432/icms
+      JWT_SECRET: change-me-in-production
+      ICMS_ENVIRONMENT: development
+      DEMO_DATA_ENABLED: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    command: python worker.py
 
   frontend:
     build: ./frontend
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     ports:
       - "8080:80"
 

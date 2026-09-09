@@ -50,7 +50,7 @@ class FrontOfficeCleanupTests(unittest.TestCase):
     def test_all_front_office_roles_receive_only_dashboard_shell(self):
         for role in FRONT_OFFICE_ROLES:
             with self.subTest(role=role):
-                self.assertEqual(modules_for_office(35), ["frontdesk_dashboard", "frontdesk_visitors", "frontdesk_appointments", "frontdesk_helpdesk", "frontdesk_calls", "frontdesk_directory", "frontdesk_delegations"])
+                self.assertEqual(modules_for_office(35), ["frontdesk_dashboard", "frontdesk_visitors", "frontdesk_verify", "frontdesk_appointments", "frontdesk_helpdesk", "frontdesk_calls", "frontdesk_directory", "frontdesk_delegations"])
 
     def test_removed_domain_modules_are_denied_for_every_front_office_role(self):
         removed = ["students", "calendar", "academic_calendar"]

@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 import unittest
 from urllib import error, request
 
@@ -11,12 +12,20 @@ if BACKEND_DIR not in sys.path:
 from database import SessionLocal
 import domain_models as D
 
+API_BASE = os.getenv("ICMS_API_URL", "http://127.0.0.1:8010")
+
 
 class FeeSetupTests(unittest.TestCase):
-    code = "TEST-FEE-SETUP-2026-S1-V1"
+    code = "TEST-FEE-SETUP"
+    version = 1
 
     @classmethod
     def setUpClass(cls):
+        # The Docker database is intentionally persistent between local runs.
+        # Use an isolated context/version so reruns cannot collide with a
+        # fixture left by an interrupted earlier run.
+        cls.version = int(time.time())
+        cls.code = f"TEST-FEE-SETUP-{cls.version}"
         cls.db = SessionLocal()
         cls.finance_token = cls._login("finance_manager")
         cls.student_token = cls._login("student")
@@ -37,7 +46,7 @@ class FeeSetupTests(unittest.TestCase):
             headers["Authorization"] = f"Bearer {token}"
         raw = json.dumps(body).encode() if body is not None else None
         try:
-            with request.urlopen(request.Request(f"http://127.0.0.1:8000{path}", data=raw, headers=headers, method=method), timeout=15) as response:
+            with request.urlopen(request.Request(f"{API_BASE}{path}", data=raw, headers=headers, method=method), timeout=15) as response:
                 return response.status, json.loads(response.read().decode() or "{}")
         except error.HTTPError as exc:
             return exc.code, json.loads(exc.read().decode() or "{}")
@@ -47,7 +56,7 @@ class FeeSetupTests(unittest.TestCase):
         headers = {}
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        with request.urlopen(request.Request(f"http://127.0.0.1:8000{path}", headers=headers, method="GET"), timeout=15) as response:
+        with request.urlopen(request.Request(f"{API_BASE}{path}", headers=headers, method="GET"), timeout=15) as response:
             return response.status, response.headers.get_content_type(), response.read()
 
     @classmethod
@@ -61,7 +70,7 @@ class FeeSetupTests(unittest.TestCase):
         return {"name": "Fee setup test", "code": self.code,
                 "academic_year_id": "academic_year_2026_27", "semester_id": "semester_2026_27_1",
                 "campus_id": "campus_main_campus", "program_id": "prog_cse_btech", "batch_id": "batch_2026",
-                "student_type_id": "student_type_regular", "version": 99,
+                "student_type_id": "student_type_regular", "version": self.version,
                 "lines": [{"fee_head_id": "fee_head_tuition", "amount": 25000, "installment_no": 1},
                           {"fee_head_id": "fee_head_tuition", "amount": 25000, "installment_no": 2},
                           {"fee_head_id": "fee_head_exam", "amount": 5000, "installment_no": 1},
