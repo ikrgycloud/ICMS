@@ -14,6 +14,6 @@ COPY . .
 
 EXPOSE 8000
 
-# Seeding runs automatically on startup (main.py lifespan handler,
-# with a retry loop that waits for Postgres to accept connections).
+# main.py applies additive migrations at startup. Development fixture seeding is
+# explicitly gated by DEMO_DATA_ENABLED and is disabled by docker-compose.
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

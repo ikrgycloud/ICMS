@@ -8,7 +8,7 @@ export default function Procurement({ caps }: { caps: any }) {
   if (!data) return <Spinner />
   return (
     <div className="fade-in">
-      <PageHead title="Procurement" sub="Requisitions, purchase orders and the assets they create. Approvals route by amount to the CFO." />
+      <PageHead title="Procurement" sub="Asset master reference only. Procurement requisitions and purchase orders are not represented by this legacy screen." />
       <div className="card">
         <div className="card-h"><h3>Recently procured assets</h3><span className="hint">purchase → PO → asset</span></div>
         <div className="tbl-scroll">

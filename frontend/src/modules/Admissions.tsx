@@ -6,7 +6,18 @@ const fresh = { name: '', academic_year: '', campus: '', application_open_date: 
 const emptyRule = { cycle_id: '', program_id: '', quota_code: '', rule_key: 'FIELD_COMPARISON', field: '', operator: '>=', value: '', document_type: '', active: true }
 const emptyQuota = { cycle_id: '', program_id: '', code: '', name: '', category_code: '', description: '', priority: 0, active: true }
 
-export default function Admissions({ caps, initialTab, sidebarNavigation = false, directorMode = false }: { caps: any, initialTab?: string, sidebarNavigation?: boolean, directorMode?: boolean }) {
+type PermissionCaps = {
+  view_eligibility?: boolean
+  manage_cycle?: boolean
+  verify?: boolean
+  manage_eligibility_rules?: boolean
+  [capability: string]: boolean | undefined
+}
+
+export default function Admissions({ caps: capsProp, initialTab, sidebarNavigation = false, directorMode = false }: { caps?: PermissionCaps | null, initialTab?: string, sidebarNavigation?: boolean, directorMode?: boolean }) {
+  // Some workspace payloads historically returned `actions: null`. Normalize
+  // that value before rendering capability-gated tabs (e.g. view_eligibility).
+  const caps = capsProp || {}
   const [apps, setApps] = useState<any>(null), [tab, setTab] = useState('applications')
   const [cycles, setCycles] = useState<any[]>([]), [programmes, setProgrammes] = useState<any[]>([]), [queue, setQueue] = useState<any[]>([])
   const [notice, setNotice] = useState<any>(null), [cycle, setCycle] = useState<any>(null), [detail, setDetail] = useState<any>(null)
@@ -21,7 +32,17 @@ export default function Admissions({ caps, initialTab, sidebarNavigation = false
   const [seatPool, setSeatPool] = useState<any>(null)
   useEffect(() => { if (initialTab) setTab(initialTab) }, [initialTab])
   const manage = !!caps.manage_cycle
-  const loadApps = () => api.applications().then(setApps).catch(e => setNotice({ outcome: 'DENY', reason: e.message }))
+  const loadApps = () => api.applications().then((payload: any) => {
+    // Keep the screen compatible with both the legacy object response and
+    // newer API responses that return the application array directly.
+    const rows = Array.isArray(payload) ? payload : (payload?.applications || [])
+    setApps({ ...(Array.isArray(payload) ? {} : payload), applications: rows.map((row: any) => ({
+      ...row,
+      current_status: row.current_status || row.status,
+      name: row.name || row.applicant_name,
+      program: row.program || row.program_name,
+    })) })
+  }).catch(e => setNotice({ outcome: 'DENY', reason: e.message }))
   const loadCycles = () => { api.admissionCycles().then((x: any) => setCycles(x.cycles || [])); api.admissionProgrammes().then((x: any) => setProgrammes(x.programmes || [])) }
   const loadQueue = () => api.admissionReviewQueue(search ? { search } : {}).then((x: any) => setQueue(x.applications || [])).catch(e => setNotice({ outcome: 'DENY', reason: e.message }))
   const loadEligibility = () => api.eligibilityQueue(filters).then((x: any) => setEligibility(x.applications || [])).catch(e => setNotice({ outcome: 'DENY', reason: e.message }))
@@ -36,7 +57,13 @@ export default function Admissions({ caps, initialTab, sidebarNavigation = false
   const loadPhase5Status = () => api.admissionPhase5Status().then((x: any) => setPhase5Status(x.applications || [])).catch(e => setNotice({ outcome: 'DENY', reason: e.message }))
   const loadFinalApprovals = () => api.admissionFinalApprovals().then((x: any) => setFinalApprovals(x.final_approvals || [])).catch(e => setNotice({ outcome: 'DENY', reason: e.message }))
   const loadDirectorData = () => api.admissionDirectorMonitoring().then((x: any) => { const states: any = { ISSUED: 'OFFERED', ACCEPTED: 'OFFER_ACCEPTED', DECLINED: 'OFFER_DECLINED', EXPIRED: 'OFFER_EXPIRED' }; setDirectorData({ offers: (x.offers || []).map((offer: any) => ({ ...offer, current_status: states[offer.status] || offer.status })), pools: (x.seat_pools || []).map((pool: any) => ({ ...pool, used: pool.active, program_name: pool.program, quota_name: pool.quota })), counselling: x.counselling || [] }) }).catch(e => setNotice({ outcome: 'DENY', reason: e.message }))
-  useEffect(() => { void loadApps() }, [])
+  useEffect(() => {
+    void loadApps()
+    // Applications can be submitted from the public portal while this
+    // workspace is open; refresh the live queue without requiring navigation.
+    const timer = window.setInterval(() => { void loadApps() }, 15000)
+    return () => window.clearInterval(timer)
+  }, [])
   useEffect(() => { if (tab === 'cycles') loadCycles(); if (tab === 'review') loadQueue(); if (tab === 'program_intake') loadProgramIntake(); if (tab === 'document_status') loadDocumentStatus(); if (tab === 'final_approval') loadFinalApprovals(); if (tab.startsWith('director_')) loadDirectorData(); if (['finance_status','invoices_challans','payment_status','accounts_verification','clearance_status','ready_to_admit','enrollment_queue','student_conversion','enrollment_status','reports'].includes(tab)) loadPhase5Status(); if (['recommendations','issued_offers'].includes(tab)) loadOffers(); if (['eligibility', 'rules', 'quotas', 'decisions', 'counselling', 'seatpools', 'waitlist', 'offers'].includes(tab)) { loadCycles(); if (tab === 'eligibility') loadEligibility(); if (tab === 'rules') { loadRules(); loadQuotas() } if (tab === 'quotas') loadQuotas(); if (tab === 'decisions') loadPhase4(); if (tab === 'counselling') loadCounselling(); if (tab === 'seatpools') loadPhase4(); if (tab === 'waitlist') loadWaitlist(); if (tab === 'offers') loadOffers() } }, [tab])
   const act = async (fn: () => Promise<any>, reload: () => void = loadApps) => { try { const r = await fn(); setNotice(r.decision || { outcome: 'ALLOW', reason: 'Saved successfully' }); reload() } catch (e: any) { setNotice({ outcome: 'DENY', reason: e.message }) } }
   const saveCycle = () => act(async () => { const body = { ...cycle, application_open_date: cycle.application_open_date ? new Date(cycle.application_open_date).toISOString() : null, application_close_date: cycle.application_close_date ? new Date(cycle.application_close_date).toISOString() : null }; const r = cycle.id ? await api.updateAdmissionCycle(cycle.id, body) : await api.createAdmissionCycle(body); setCycle(null); return r }, loadCycles)
