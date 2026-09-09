@@ -213,7 +213,11 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   }
 
   useEffect(() => {
-    api.me().then(r => setUser(r.user)).catch(() => {})
+    api.me().then(r => {
+      setUser(r.user)
+      if (r.user?.office_n === 31) setView('transport')
+      else if (r.user?.office_n === 23) setView('finance')
+    }).catch(() => {})
     loadWs()
     loadNotifs()
     const timer = setInterval(loadNotifs, 20000)
