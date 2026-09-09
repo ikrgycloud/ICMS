@@ -347,6 +347,75 @@ class Application(Base):
 # --------------------------------------------------------------------------- #
 #  Finance
 # --------------------------------------------------------------------------- #
+<<<<<<< Updated upstream
+=======
+class FeeInvoice(Base):
+    __tablename__ = "fee_invoices"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    student_id = Column(String, ForeignKey("students.id"))
+    application_id = Column(String, ForeignKey("applications.id"), nullable=True, index=True)
+    term = Column(String)
+    invoice_type = Column(String, default="student_fee")
+    challan_no = Column(String, default="")
+    issued_at = Column(DateTime, nullable=True)
+    issued_by_user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    invoice_number = Column(String, default="")
+    academic_year_id = Column(String, nullable=True, index=True)
+    semester_id = Column(String, nullable=True, index=True)
+    fee_assignment_id = Column(String, default="")
+    fee_structure_id = Column(String, ForeignKey("fee_structures.id"), nullable=True, index=True)
+    fee_head_id = Column(String, ForeignKey("fee_heads.id"), nullable=True, index=True)
+    gross_amount = Column(Float, default=0)
+    scholarship_amount = Column(Float, default=0)
+    waiver_amount = Column(Float, default=0)
+    net_amount = Column(Float, default=0)
+    amount = Column(Float, default=0)
+    paid = Column(Float, default=0)
+    status = Column(String, default="due")    # due/partial/paid/waived
+    due_date = Column(Date, nullable=True)
+
+
+class FeeComponent(Base):
+    __tablename__ = "fee_components"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    code = Column(String, index=True)
+    name = Column(String)
+    component_type = Column(String, default="charge")  # charge / waiver / adjustment
+    active = Column(Boolean, default=True)
+
+
+class FeeStructure(Base):
+    __tablename__ = "fee_structures"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    academic_year = Column(String, index=True)
+    campus = Column(String, default="")
+    program_id = Column(String, ForeignKey("programs.id"), nullable=True, index=True)
+    quota_id = Column(String, ForeignKey("admission_quotas.id"), nullable=True, index=True)
+    cycle_program_id = Column(String, ForeignKey("admission_cycle_programs.id"), nullable=True, index=True)
+    name = Column(String, default="Admission fees")
+    status = Column(String, default="active")
+    code = Column(String, default="", index=True)
+    academic_year_id = Column(String, nullable=True, index=True)
+    semester_id = Column(String, nullable=True, index=True)
+    campus_id = Column(String, nullable=True, index=True)
+    batch_id = Column(String, nullable=True, index=True)
+    student_type_id = Column(String, nullable=True, index=True)
+    version = Column(Integer, default=1)
+    workflow_id = Column(String, nullable=True, index=True)
+    effective_from = Column(Date, nullable=True)
+    effective_to = Column(Date, nullable=True)
+    description = Column(Text, default="")
+    notes = Column(Text, default="")
+    created_by = Column(String, default="")
+    updated_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+>>>>>>> Stashed changes
 class AcademicYear(Base):
     __tablename__ = "academic_years"
     id = Column(String, primary_key=True)

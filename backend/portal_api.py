@@ -2727,13 +2727,29 @@ def student_fees(ctx=Depends(auth), s=Depends(db)):
         .order_by(desc(D.Payment.at))
         .all()
     )
+    heads = {h.id: h for h in s.query(D.FeeHead).all()}
     invoice_data = []
     for row in invoices:
         amounts = _invoice_display_amounts(row)
-        invoice_data.append({"id": row.id, "term": row.term, "semester": semesters.get(structures[row.fee_structure_id].semester_id, row.term) if row.fee_structure_id in structures else row.term, **amounts, "status": row.status, "due_date": row.due_date.isoformat() if row.due_date else ""})
+        head = heads.get(row.fee_head_id)
+        invoice_data.append({"id": row.id, "term": row.term, "semester": semesters.get(structures[row.fee_structure_id].semester_id, row.term) if row.fee_structure_id in structures else row.term, **amounts, "status": row.status, "due_date": row.due_date.isoformat() if row.due_date else "", "fee_category_id": row.fee_head_id, "fee_category": head.name if head else "Uncategorised"})
+    categories = {}
+    for item in invoice_data:
+        key = item["fee_category_id"] or "uncategorised"
+        c = categories.setdefault(key, {"fee_category_id": item["fee_category_id"], "fee_category": item["fee_category"], "assigned": 0, "paid": 0})
+        c["assigned"] += float(item["amount"] or 0); c["paid"] += float(item["paid"] or 0)
+    for c in categories.values():
+        c["balance"] = round(max(c["assigned"] - c["paid"], 0), 2)
+        c["status"] = "Paid" if c["balance"] == 0 else ("Partially Paid" if c["paid"] else "Pending")
     return {
-        "summary": {"balance": round(sum(item["balance"] for item in invoice_data), 2)},
+        "summary": {"balance": round(sum(item["balance"] for item in invoice_data), 2), "total_assigned": round(sum(item["amount"] for item in invoice_data), 2), "total_paid": round(sum(item["paid"] for item in invoice_data), 2)},
         "invoices": invoice_data,
+        "categories": list(categories.values()),
+        # The student payment selector uses the same Fee Heads configured by
+        # Finance, even before a particular head has an invoice for this student.
+        "fee_heads": [{"id": head.id, "name": head.name, "code": head.code}
+                      for head in sorted((head for head in heads.values() if head.is_active),
+                                         key=lambda head: (head.display_order, head.name))],
         "payments": [
             {
                 "id": row.id,
@@ -2741,6 +2757,8 @@ def student_fees(ctx=Depends(auth), s=Depends(db)):
                 "amount": row.amount,
                 "method": row.method,
                 "reference": row.reference,
+                "fee_category_id": next((invoice["fee_category_id"] for invoice in invoice_data if invoice["id"] == row.invoice_id), None),
+                "fee_category": next((invoice["fee_category"] for invoice in invoice_data if invoice["id"] == row.invoice_id), "Uncategorised"),
                 "at": row.at.isoformat() if row.at else "",
             }
             for row in payments

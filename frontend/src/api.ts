@@ -223,6 +223,7 @@ export const api = {
   waiveFee: (b: any) => req('/finance/waive', { method: 'POST', body: JSON.stringify(b) }),
   feeReferenceData: () => req('/fees/reference-data'),
   feeHeads: (includeInactive = false) => req(`/fees/heads?include_inactive=${includeInactive}`),
+  feeCategories: (includeInactive = false) => req(`/fees/categories?include_inactive=${includeInactive}`),
   createFeeHead: (b: any) => req('/fees/heads', { method: 'POST', body: JSON.stringify(b) }),
   updateFeeHead: (id: string, b: any) => req(`/fees/heads/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
   setFeeHeadStatus: (id: string, is_active: boolean) => req(`/fees/heads/${id}/status`, { method: 'PATCH', body: JSON.stringify({ is_active }) }),
@@ -335,6 +336,10 @@ export const api = {
   verifyParentRazorpayPayment: (body: any) => req('/portal/parent/fees/razorpay/verify', { method: 'POST', body: JSON.stringify(body) }),
   downloadParentReceipt: (invoice_id: string) => download(`/portal/parent/fees/invoices/${invoice_id}/receipt.pdf`),
   pendingPayments: () => req('/finance/payments/pending'),
+  financeCollections: (params: Record<string, string> = {}) => {
+    const qs = new URLSearchParams(Object.entries(params).filter(([, value]) => value))
+    return req(`/finance/collections${qs.toString() ? `?${qs.toString()}` : ''}`)
+  },
   verifyOfflinePayment: (payment_id: string, action: string, remarks = '') => req(`/finance/payments/${payment_id}/clear`, { method: 'POST', body: JSON.stringify({ action, remarks }) }),
 
   // ---- integrations ----

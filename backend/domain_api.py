@@ -2645,13 +2645,14 @@ def execute_academic_rollover(rollover_id: str, ctx=Depends(auth), s=Depends(db)
 def list_invoices(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "finance", "view")[0])
     stu_map = {st.id: (st.roll_no, st.name) for st in s.query(D.Student).all()}
+    heads = {h.id: h for h in s.query(D.FeeHead).all()}
     rows = s.query(D.FeeInvoice).limit(300).all()
     out = []
     for r in rows:
         roll, name = stu_map.get(r.student_id, ("", ""))
         out.append({"id": r.id, "roll_no": roll, "name": name, "term": r.term,
                     "amount": r.amount, "paid": r.paid, "balance": r.amount - r.paid,
-                    "status": r.status})
+                    "status": r.status, "fee_category_id": r.fee_head_id, "fee_category": heads.get(r.fee_head_id).name if heads.get(r.fee_head_id) else "Uncategorised"})
     summary = {
         "total_billed": s.query(func.coalesce(func.sum(D.FeeInvoice.amount), 0)).scalar() or 0,
         "total_collected": s.query(func.coalesce(func.sum(D.FeeInvoice.paid), 0)).scalar() or 0,
@@ -2661,10 +2662,21 @@ def list_invoices(ctx=Depends(auth), s=Depends(db)):
     payment_rows = []
     for payment in payments:
         roll, name = stu_map.get(payment.student_id, ("", ""))
+        invoice = s.get(D.FeeInvoice, payment.invoice_id)
+        head = heads.get(invoice.fee_head_id) if invoice else None
         payment_rows.append({"id": payment.id, "invoice_id": payment.invoice_id, "roll_no": roll,
                              "name": name, "amount": payment.amount, "method": payment.method,
-                             "reference": payment.reference, "status": payment.status or "success", "at": payment.at.isoformat() if payment.at else ""})
-    return {"invoices": out, "payments": payment_rows, "summary": summary,
+                             "reference": payment.reference, "status": payment.status or "success",
+                             "fee_category_id": invoice.fee_head_id if invoice else None,
+                             "fee_category": head.name if head else "Uncategorised",
+                             "at": payment.at.isoformat() if payment.at else ""})
+    category_totals = {}
+    for r in rows:
+        key = r.fee_head_id or "uncategorised"; h = heads.get(r.fee_head_id)
+        c = category_totals.setdefault(key, {"fee_category_id": r.fee_head_id, "fee_category": h.name if h else "Uncategorised", "expected": 0, "collected": 0})
+        c["expected"] += float(r.amount or 0); c["collected"] += float(r.paid or 0)
+    for c in category_totals.values(): c["outstanding"] = round(c["expected"] - c["collected"], 2)
+    return {"invoices": out, "payments": payment_rows, "category_totals": list(category_totals.values()), "summary": summary,
             "can_record": can(s, ctx, "finance", "record_payment"),
             "can_waive": can(s, ctx, "finance", "waive")}
 
@@ -3162,7 +3174,8 @@ def publish_fee_structure(structure_id: str, ctx=Depends(auth), s=Depends(db)):
             s.add(D.FeeInvoice(id=uid(), tenant_id=TENANT, student_id=student.id,
                                term=f"{row.academic_year_id}:{row.semester_id}:line:{line.id}",
                                amount=float(line.amount), paid=0, status="due",
-                               due_date=line.due_date, fee_structure_id=row.id))
+                               due_date=line.due_date, fee_structure_id=row.id,
+                               fee_head_id=line.fee_head_id))
             created += 1
     row.status = "PUBLISHED"
     row.updated_by, row.updated_at = ctx["sub"], datetime.utcnow()

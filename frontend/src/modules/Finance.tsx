@@ -10,6 +10,9 @@ export default function Finance({ caps, user, onOpenApprovals }: { caps: any; us
   const [modal, setModal] = useState<{ kind: string; inv: any; method?: string; reference?: string } | null>(null)
   const [amount, setAmount] = useState('')
   const [search, setSearch] = useState('')
+  const [invoiceCategoryFilter, setInvoiceCategoryFilter] = useState('')
+  const [categoryFilter, setCategoryFilter] = useState('')
+  const [feeHeads, setFeeHeads] = useState<any[]>([])
   const [studentQuery, setStudentQuery] = useState('')
   const [students, setStudents] = useState<any[]>([])
   const [selectedStudent, setSelectedStudent] = useState<any>(null)
@@ -19,8 +22,14 @@ export default function Finance({ caps, user, onOpenApprovals }: { caps: any; us
   function load() {
     api.invoices().then(setData).catch(() => {})
   }
-  useEffect(() => { load() }, [])
-  useEffect(() => { if (tab === 'payments') api.pendingPayments().then((r:any) => setPendingPayments(r.payments || [])).catch(() => setPendingPayments([])) }, [tab])
+  useEffect(() => { load(); api.feeHeads().then((result: any) => setFeeHeads(result.heads || [])).catch(() => setFeeHeads([])) }, [])
+  useEffect(() => {
+    if (tab !== 'payments') return
+    api.pendingPayments().then((r:any) => setPendingPayments(r.payments || [])).catch(() => setPendingPayments([]))
+    // Reload Fee Heads so a category just created in Fee Setup is immediately
+    // available in this dropdown without requiring a browser refresh.
+    api.feeHeads().then((result: any) => setFeeHeads(result.heads || [])).catch(() => setFeeHeads([]))
+  }, [tab])
   async function decideOffline(payment:any, action:string) {
     const remarks = ['bounced', 'rejected'].includes(action) ? window.prompt('Reason (required):') || '' : ''
     try { await api.verifyOfflinePayment(payment.id, action, remarks); setPendingPayments(rows => rows.filter(row => row.id !== payment.id)); load() }
@@ -66,6 +75,11 @@ export default function Finance({ caps, user, onOpenApprovals }: { caps: any; us
   const selectedStudentInvoices = selectedStudent ? (data.invoices || []).filter((invoice: any) => invoice.roll_no === selectedStudent.roll_no) : []
   const availableSemesters = [...new Set(selectedStudentInvoices.map((invoice: any) => invoice.term).filter(Boolean))]
   const semesterInvoices = selectedSemester ? selectedStudentInvoices.filter((invoice: any) => invoice.term === selectedSemester) : []
+  const filteredInvoices = (data.invoices || []).filter((invoice: any) =>
+    (!search || `${invoice.roll_no} ${invoice.name}`.toLowerCase().includes(search.toLowerCase())) &&
+    (!invoiceCategoryFilter || invoice.fee_category_id === invoiceCategoryFilter)
+  )
+  const filteredPayments = (data.payments || []).filter((payment: any) => !categoryFilter || payment.fee_category_id === categoryFilter)
 
   return (
     <div className="fade-in finance-workspace">
@@ -155,15 +169,16 @@ export default function Finance({ caps, user, onOpenApprovals }: { caps: any; us
 
       {tab === 'fees' && (
         <div className="card finance-card">
-          <div className="card-h finance-card-head"><div><h3>Student invoices</h3><span className="hint">Live balances from the ICMS database</span></div><label className="finance-search"><span>Search</span><input className="inp" placeholder="Roll number or student name" value={search} onChange={e=>setSearch(e.target.value)} /></label></div>
+          <div className="card-h finance-card-head"><div><h3>Student invoices</h3><span className="hint">Live balances from the ICMS database</span></div><div className="student-fee-filter"><select className="select" aria-label="Filter student invoices by fee category" value={invoiceCategoryFilter} onChange={e => setInvoiceCategoryFilter(e.target.value)}><option value="">All fee categories</option>{feeHeads.map((head:any) => <option key={head.id} value={head.id}>{head.name} ({head.code})</option>)}</select><label className="finance-search"><span>Search</span><input className="inp" placeholder="Roll number or student name" value={search} onChange={e=>setSearch(e.target.value)} /></label></div></div>
           <div className="tbl-scroll">
             <table className="tbl">
-              <thead><tr><th>Roll No</th><th>Name</th><th>Billed</th><th>Paid</th><th>Balance</th><th>Status</th><th style={{ textAlign: 'right' }}>Actions</th></tr></thead>
+              <thead><tr><th>Roll No</th><th>Name</th><th>Fee category</th><th>Billed</th><th>Paid</th><th>Balance</th><th>Status</th><th style={{ textAlign: 'right' }}>Actions</th></tr></thead>
               <tbody>
-                {data.invoices.filter((r:any) => !search || `${r.roll_no} ${r.name}`.toLowerCase().includes(search.toLowerCase())).slice(0, 100).map((r: any) => (
+                {filteredInvoices.slice(0, 100).map((r: any) => (
                   <tr key={r.id} className={r.balance > 0 ? 'finance-row-due' : 'finance-row-paid'}>
                     <td className="mono">{r.roll_no}</td>
                     <td>{r.name}</td>
+                    <td>{r.fee_category}</td>
                     <td>{money(r.amount)}</td>
                     <td>{money(r.paid)}</td>
                     <td><b style={{ color: r.balance > 0 ? 'var(--rose)' : 'var(--teal)' }}>{money(r.balance)}</b></td>
@@ -175,6 +190,7 @@ export default function Finance({ caps, user, onOpenApprovals }: { caps: any; us
                     </td>
                   </tr>
                 ))}
+                {filteredInvoices.length === 0 && <tr><td colSpan={8}><Empty text="No student invoices match these filters." /></td></tr>}
               </tbody>
             </table>
           </div>
@@ -183,9 +199,9 @@ export default function Finance({ caps, user, onOpenApprovals }: { caps: any; us
 
       {tab === 'payments' && (
         <div className="card finance-card">
-          <div className="card-h"><div><h3>Payment records</h3><span className="hint">Confirmed payments stored in the database</span></div></div>
+          <div className="card-h"><div><h3>Payment records</h3><span className="hint">Filter payments by the Fee Heads created in Fee Setup.</span></div><select className="select" value={categoryFilter} onChange={e => setCategoryFilter(e.target.value)}><option value="">All fee categories</option>{feeHeads.map((head:any) => <option key={head.id} value={head.id}>{head.name} ({head.code})</option>)}</select></div>
           {pendingPayments.length > 0 && <div className="card-pad"><h4>Pending verification / clearance</h4><div className="tbl-scroll"><table className="tbl"><thead><tr><th>Student</th><th>Challan</th><th>Amount</th><th>Mode</th><th>Reference</th><th>Action</th></tr></thead><tbody>{pendingPayments.map((p:any) => <tr key={p.id}><td><b>{p.student}</b><small>{p.roll_no}</small></td><td className="mono">{p.challan_number || '—'}</td><td>{money(p.amount)}</td><td>{p.method}</td><td className="mono">{p.reference}</td><td><div className="row-actions">{p.status === 'pending_clearance' ? <><button className="btn btn-sm btn-brass" onClick={() => decideOffline(p, 'cleared')}>Mark cleared</button><button className="btn btn-sm btn-out" onClick={() => decideOffline(p, 'bounced')}>Bounce</button></> : <><button className="btn btn-sm btn-brass" onClick={() => decideOffline(p, 'verified')}>Verify</button><button className="btn btn-sm btn-out" onClick={() => decideOffline(p, 'rejected')}>Reject</button></>}</div></td></tr>)}</tbody></table></div></div>}
-          <div className="tbl-scroll"><table className="tbl"><thead><tr><th>Date</th><th>Roll No.</th><th>Student</th><th>Amount</th><th>Method</th><th>Payment reference</th></tr></thead><tbody>{data.payments?.length ? data.payments.map((p:any) => <tr key={p.id}><td>{p.at ? new Date(p.at).toLocaleString('en-IN') : '—'}</td><td className="mono">{p.roll_no}</td><td>{p.name}</td><td><b>{money(p.amount)}</b></td><td><span className="pill s-paid">{p.method}</span></td><td className="mono">{p.reference || '—'}</td></tr>) : <tr><td colSpan={6}><Empty text="No payment records yet." /></td></tr>}</tbody></table></div>
+          <div className="tbl-scroll"><table className="tbl"><thead><tr><th>Date</th><th>Roll No.</th><th>Student</th><th>Fee category</th><th>Amount</th><th>Method</th><th>Payment reference</th></tr></thead><tbody>{filteredPayments.length ? filteredPayments.map((p:any) => <tr key={p.id}><td>{p.at ? new Date(p.at).toLocaleString('en-IN') : '—'}</td><td className="mono">{p.roll_no}</td><td>{p.name}</td><td>{p.fee_category}</td><td><b>{money(p.amount)}</b></td><td><span className="pill s-paid">{p.method}</span></td><td className="mono">{p.reference || '—'}</td></tr>) : <tr><td colSpan={7}><Empty text="No payment records yet." /></td></tr>}</tbody></table></div>
         </div>
       )}
 

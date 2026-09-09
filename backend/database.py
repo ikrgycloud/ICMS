@@ -99,6 +99,7 @@ def ensure_additive_schema():
         ],
         "fee_invoices": [
             ("fee_structure_id", "VARCHAR"),
+            ("fee_head_id", "VARCHAR"),
             ("invoice_number", "VARCHAR DEFAULT ''"),
             ("academic_year_id", "VARCHAR DEFAULT ''"),
             ("semester_id", "VARCHAR DEFAULT ''"),

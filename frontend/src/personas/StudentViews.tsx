@@ -2587,6 +2587,7 @@ export function StudentFeesView() {
   const [data, setData] = useState<any>(null)
   const [paying, setPaying] = useState('')
   const [semester, setSemester] = useState('')
+  const [categoryId, setCategoryId] = useState('')
   const [paymentInvoice, setPaymentInvoice] = useState<any>(null)
   const [paymentAmount, setPaymentAmount] = useState('')
   const [challanInvoice, setChallanInvoice] = useState<any>(null)
@@ -2603,8 +2604,12 @@ export function StudentFeesView() {
 
   if (!data) return <Spinner />
   const semesters = [...new Set(data.invoices.map((invoice: any) => invoice.semester || invoice.term))]
-  const visibleInvoices = data.invoices.filter((invoice: any) => !semester || (invoice.semester || invoice.term) === semester)
+  const visibleInvoices = data.invoices.filter((invoice: any) =>
+    (!semester || (invoice.semester || invoice.term) === semester) &&
+    (!categoryId || invoice.fee_category_id === categoryId)
+  )
   const visibleBalance = visibleInvoices.reduce((total: number, invoice: any) => total + invoice.balance, 0)
+  const visiblePayments = data.payments.filter((payment: any) => !categoryId || payment.fee_category_id === categoryId)
 
   function openPayment(invoice: any) {
     setPaymentInvoice(invoice)
@@ -2641,9 +2646,11 @@ export function StudentFeesView() {
     <div className="fade-in student-fees-page">
       <PageHead title="Fees & Payments" sub="Review your invoices, pay securely online, and download completed payment receipts." />
       <section className={`student-fee-hero ${data.summary?.balance > 0 ? 'has-dues' : 'is-clear'}`}>
-        <div><span>{semester ? `${semester} outstanding balance` : 'Outstanding balance'}</span><strong>{money(semester ? visibleBalance : data.summary?.balance)}</strong><small>{(semester ? visibleBalance : data.summary?.balance) > 0 ? 'Pay an invoice below to update your account instantly.' : 'Your account is fully settled.'}</small></div>
+        <div><span>{semester || categoryId ? 'Filtered outstanding balance' : 'Outstanding balance'}</span><strong>{money(semester || categoryId ? visibleBalance : data.summary?.balance)}</strong><small>{(semester || categoryId ? visibleBalance : data.summary?.balance) > 0 ? 'Pay an invoice below to update your account instantly.' : 'Your account is fully settled.'}</small></div>
         <div className="student-fee-hero-mark">{data.summary?.balance > 0 ? '₹' : '✓'}</div>
       </section>
+      <section className="card" style={{ marginTop: 18 }}><div className="card-h"><h3>Fees by category</h3><span className="hint">Your assigned, paid, and outstanding amount for each fee category.</span></div><div className="tbl-scroll"><table className="tbl"><thead><tr><th>Category</th><th>Assigned</th><th>Paid</th><th>Balance</th><th>Status</th></tr></thead><tbody>{(data.categories || []).map((c:any) => <tr key={c.fee_category_id || c.fee_category}><td><b>{c.fee_category}</b></td><td>{money(c.assigned)}</td><td>{money(c.paid)}</td><td>{money(c.balance)}</td><td>{c.status}</td></tr>)}{!data.categories?.length && <tr><td colSpan={5}>No category-wise fees assigned.</td></tr>}</tbody></table></div></section>
+      <section className="card" style={{ marginTop: 18 }}><div className="card-h"><div><h3>Pay by fee category</h3><span className="hint">Select a Fee Head created by Finance to filter and pay its outstanding invoice.</span></div><select className="select" value={categoryId} onChange={e => setCategoryId(e.target.value)}><option value="">All fee categories</option>{(data.fee_heads || []).map((head:any) => <option key={head.id} value={head.id}>{head.name} ({head.code})</option>)}</select></div>{categoryId && <div className="card-pad">{visibleInvoices.some((invoice:any) => invoice.balance > 0) ? <button className="btn btn-brass" onClick={() => openPayment(visibleInvoices.find((invoice:any) => invoice.balance > 0))}>Continue to payment</button> : <span className="hint">No outstanding invoice has been assigned for this Fee Head yet.</span>}</div>}</section>
       <div className="student-fees-grid">
         <div className="card student-invoices-card">
           <div className="card-h"><div><h3>Fee invoices</h3><span className="hint">Secure payment through Razorpay</span></div><div className="student-fee-filter"><select className="select" value={semester} onChange={e => setSemester(e.target.value)}><option value="">All semesters</option>{semesters.map((item: any) => <option key={item} value={item}>{item}</option>)}</select><span className="student-fee-count">{visibleInvoices.length} invoice{visibleInvoices.length === 1 ? '' : 's'}</span></div></div>
@@ -2652,6 +2659,7 @@ export function StudentFeesView() {
               <thead>
                 <tr>
                   <th>Term</th>
+                  <th>Fee category</th>
                   <th>Fee billed</th>
                   <th>Paid</th>
                   <th>Balance</th>
@@ -2663,6 +2671,7 @@ export function StudentFeesView() {
                 {visibleInvoices.map((invoice: any, index: number) => (
                   <tr key={`${invoice.term}-${index}`} className={invoice.balance > 0 ? 'invoice-due' : 'invoice-paid'}>
                     <td><b>{invoice.semester || invoice.term}</b><small>{invoice.due_date ? `Due ${new Date(`${invoice.due_date}T00:00:00`).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}` : invoice.term}</small></td>
+                    <td>{invoice.fee_category}</td>
                     <td><b>{money(invoice.amount)}</b><small>Fee ledger amount</small></td>
                     <td>{money(invoice.paid)}</td>
                     <td><b className="invoice-balance">{money(invoice.balance)}</b></td>
@@ -2671,7 +2680,7 @@ export function StudentFeesView() {
                   </tr>
                 ))}
                 {visibleInvoices.length === 0 && (
-                  <tr><td colSpan={6}><div className="empty">No fee invoices found</div></td></tr>
+                  <tr><td colSpan={7}><div className="empty">No fee invoices found</div></td></tr>
                 )}
               </tbody>
             </table>
@@ -2681,14 +2690,14 @@ export function StudentFeesView() {
         <aside className="card student-payment-history">
           <div className="card-h"><div><h3>Payment history</h3><span className="hint">Confirmed payments</span></div></div>
           <div className="card-pad payment-history-list">
-            {data.payments.map((payment: any, index: number) => (
+            {visiblePayments.map((payment: any, index: number) => (
               <div className="snap" key={`${payment.reference}-${index}`}>
-                <span><b>{money(payment.amount)}</b><small className="mono">{payment.reference}</small></span>
+                <span><b>{money(payment.amount)}</b><small>{payment.fee_category} · <span className="mono">{payment.reference}</span></small></span>
                 <span className="payment-method">{payment.method}</span>
                 <button className="btn btn-sm btn-out" onClick={() => api.downloadStudentReceipt(payment.invoice_id, payment.id)}>Receipt PDF</button>
               </div>
             ))}
-            {data.payments.length === 0 && <Empty text="No payments yet" />}
+            {visiblePayments.length === 0 && <Empty text={categoryId ? "No payments found for this fee category" : "No payments yet"} />}
           </div>
         </aside>
       </div>
