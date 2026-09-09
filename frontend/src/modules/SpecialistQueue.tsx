@@ -5,7 +5,7 @@ import { Empty, Spinner } from '../views/ui'
 export default function SpecialistQueue({ title }: { title: string }) {
   const [data,setData]=useState<any>(null),[error,setError]=useState(''),[busy,setBusy]=useState(''),[selected,setSelected]=useState<string | null>(null)
   const load=()=>api.specialistQueue().then(setData).catch((e:any)=>setError(e.message))
-  useEffect(load,[])
+  useEffect(() => { void load() }, [])
   async function act(item:any,status:string){
     try {
       setBusy(item.requirement_id)

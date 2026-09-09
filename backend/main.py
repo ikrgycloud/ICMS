@@ -731,18 +731,7 @@ def login(body: LoginIn, s=Depends(db)):
         u = _ensure_roll_number_student_login(s, requested_username, student)
     if not u or u.password_hash != pwhash(body.password):
         raise HTTPException(401, "Invalid credentials")
-    if requested_username == "professor":
-    username = (body.username or "").strip().lower()
-    if username == "student" and demo_data_enabled():
-        # Use the explicitly provisioned portal account rather than a legacy
-        # identity row whose password depends on optional domain seeding.
-        # This keeps the documented development login usable even when an
-        # unrelated seed extension cannot complete.
-        username = "24cse014"
-    u = s.query(User).filter(func.lower(User.username) == username).first()
-    if not u or u.password_hash != pwhash(body.password):
-        raise HTTPException(401, "Invalid credentials")
-    if username == "professor" and demo_data_enabled():
+    if requested_username == "professor" and demo_data_enabled():
         professor = s.query(User).filter(
             User.username == "aarav_kulkarni", User.status == "active"
         ).first()
@@ -1026,19 +1015,22 @@ def _approval_limit_from_db(s, ctx, process_key):
 
 def _workflow_stage_offices(proc, stage):
     """Resolve named legacy matrix stages to offices; unknown labels fail closed."""
-    if not proc or stage >= len(proc.get("chain", [])):
+    if not proc or stage < 0 or stage >= len(proc.get("chain", [])):
         return set()
     label = proc["chain"][stage].lower()
-    mapping = (("campus head", {3}), ("principal", {4}), ("vice principal", {5}),
+    mapping = (("campus head", {3}), ("vice principal", {5}), ("principal", {4}),
                ("dean", {6, 7, 8, 9}), ("finance", {22}), ("accounts", {23}),
                ("hr", {24, 25}), ("purchase", {32}), ("procurement", {32}),
                ("maintenance", {29}), ("system admin", {28}), ("security admin", {28}),
                ("store", {33}), ("warden", {30}), ("transport", {31}),
                ("admissions", {15}), ("exam", {16}), ("hod", {10}), ("chairman", {1}))
-    for token, offices in mapping:
-        if token in label:
-            return offices
-    return set()
+    stage_offices = set()
+    for alternative in label.split("/"):
+        for token, offices in mapping:
+            if token in alternative:
+                stage_offices.update(offices)
+                break
+    return stage_offices
 
 
 def _workflow_visible_to(wf, proc, ctx):
