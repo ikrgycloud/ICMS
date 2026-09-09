@@ -179,9 +179,9 @@ ACTION_OFFICE_ALLOW = {
     ("calendar", "create"): set(range(1, 36)) | {40},
     ("calendar", "edit"): set(range(1, 36)) | {40},
     ("calendar", "delete"): set(range(1, 36)) | {40},
-    ("academic_calendar", "create"): {1, 2, 4, 5},
-    ("academic_calendar", "edit"): {1, 2, 4, 5},
-    ("academic_calendar", "delete"): {1, 2, 4, 5},
+    ("academic_calendar", "create"): {1, 2, 4, 5, 17},
+    ("academic_calendar", "edit"): {1, 2, 4, 5, 17},
+    ("academic_calendar", "delete"): {1, 2, 4, 5, 17},
     ("students", "add"): {15},                        # Admissions owns student creation
     ("students", "edit"): {10, 15},                   # HOD and Admissions maintain records
     ("academics", "create_section"): {6, 10, 17},     # Dean Acad, HOD, Acad Coordinator

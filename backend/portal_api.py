@@ -783,14 +783,21 @@ def _source_label(created_by: str = "", owner_office_n: int | None = None, fallb
 
 def _section_schedule_string(s, section_id: str, fallback: str = ""):
     rows = (
-        s.query(D.TimetableEntry)
+        s.query(D.TimetableEntry).join(D.TimetablePlanWorkflow, D.TimetablePlanWorkflow.timetable_entry_id == D.TimetableEntry.id)
         .filter(D.TimetableEntry.section_id == section_id, D.TimetableEntry.status == "active")
+        .filter(D.TimetablePlanWorkflow.status == "Published")
         .order_by(D.TimetableEntry.day_of_week, D.TimetableEntry.start_time)
         .all()
     )
     if not rows:
         return fallback
     return ", ".join(f"{_day_name(row.day_of_week)} {row.start_time}-{row.end_time}" for row in rows[:3])
+
+
+def _published_section_ids(s, sections):
+    ids = [x.id for x in sections]
+    if not ids: return set()
+    return {x.section_id for x in s.query(D.TimetableEntry.section_id).join(D.TimetablePlanWorkflow, D.TimetablePlanWorkflow.timetable_entry_id == D.TimetableEntry.id).filter(D.TimetableEntry.section_id.in_(ids), D.TimetableEntry.status == "active", D.TimetablePlanWorkflow.status == "Published").distinct().all()}
 
 
 def _student_course_view_row(s, st, enrollment, sections, course_map, faculty_names, pref_map):
@@ -850,11 +857,12 @@ def _student_today_classes_payload(s, st):
     section_ids = list(sections.keys())
     today = PORTAL_TODAY
     rows = (
-        s.query(D.TimetableEntry)
+        s.query(D.TimetableEntry).join(D.TimetablePlanWorkflow, D.TimetablePlanWorkflow.timetable_entry_id == D.TimetableEntry.id)
         .filter(
             D.TimetableEntry.section_id.in_(section_ids) if section_ids else False,
             D.TimetableEntry.day_of_week == today.weekday(),
             D.TimetableEntry.status == "active",
+            D.TimetablePlanWorkflow.status == "Published",
             or_(D.TimetableEntry.effective_from == None, D.TimetableEntry.effective_from <= today),
             or_(D.TimetableEntry.effective_to == None, D.TimetableEntry.effective_to >= today),
         )
@@ -3229,6 +3237,8 @@ def student_library_loans(ctx=Depends(auth), s=Depends(db)):
 def faculty_home(ctx=Depends(auth), s=Depends(db)):
     stf = _staff_or_404(s, ctx)
     sections = s.query(D.Section).filter(D.Section.faculty_person_id == stf.id).all()
+    published_ids = _published_section_ids(s, sections)
+    sections = [x for x in sections if x.id in published_ids]
     section_ids = [row.id for row in sections]
     enrolled_count = 0
     if section_ids:

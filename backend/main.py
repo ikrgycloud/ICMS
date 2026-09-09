@@ -135,9 +135,10 @@ def _ensure_payment_status_columns():
     try:
         if not inspect(s.bind).has_table("payments"):
             return
-        s.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'success'"))
-        s.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS cleared_at TIMESTAMP"))
-        s.execute(text("ALTER TABLE payments ADD COLUMN IF NOT EXISTS cleared_by VARCHAR DEFAULT ''"))
+        columns = {c["name"] for c in inspect(s.bind).get_columns("payments")}
+        for name, ddl in (("status", "VARCHAR DEFAULT 'success'"), ("cleared_at", "TIMESTAMP"), ("cleared_by", "VARCHAR DEFAULT ''")):
+            if name not in columns:
+                s.execute(text(f"ALTER TABLE payments ADD COLUMN {name} {ddl}"))
         s.execute(text("UPDATE payments SET status = 'success' WHERE status IS NULL"))
         s.commit()
     finally:
@@ -1239,6 +1240,7 @@ def list_workflows(scope: str = "all", ctx=Depends(non_front_office), s=Depends(
     pending_states = ["submitted", "under_review", "reviewed", "escalated"]
     if scope == "mine":
         q = q.filter(WorkflowInstance.initiator_id == ctx["sub"])
+        rows = q.order_by(desc(WorkflowInstance.updated_at)).limit(100).all()
     elif scope == "inbox":
         own_rows = (q.filter(WorkflowInstance.office_n == ctx["office_n"],
                              WorkflowInstance.state.in_(pending_states))

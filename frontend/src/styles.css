@@ -314,6 +314,10 @@ h1, h2, h3, h4 { font-weight: 600; line-height: 1.2; }
 .modal-b { padding: 24px; }
 .modal-f { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 24px; border-top: 1px solid var(--line-2); background: var(--mist); }
 
+.academic-calendar-event-modal { max-height: 92vh; display: flex; flex-direction: column; }
+.academic-calendar-event-modal .modal-h, .academic-calendar-event-modal .modal-f { flex: 0 0 auto; }
+.academic-calendar-event-modal .modal-b { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
+
 /* Fee setup contains a full academic context plus a variable number of lines. */
 .modal.fee-structure-modal {
   width: min(960px, 96vw);
