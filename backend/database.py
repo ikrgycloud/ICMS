@@ -8,7 +8,7 @@ import os
 import json
 import re
 from datetime import datetime, timedelta
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from models import (Base, Tenant, OrgScope, Person, User, Role, Permission,
@@ -16,6 +16,8 @@ from models import (Base, Tenant, OrgScope, Person, User, Role, Permission,
 # Register domain tables before additive schema creation.  This keeps command-line
 # bootstrap and test setup consistent with FastAPI startup.
 import domain_models  # noqa: F401
+import administration_models  # noqa: F401
+import specialist_models  # noqa: F401
 from authority import pwhash, VERBS, scope_covers
 from matrices import (rbac_for, APPROVAL_LIMITS, scope_for, APPROVAL_MATRIX)
 
@@ -41,114 +43,6 @@ engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=Tr
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
-def ensure_additive_schema():
-    """Create missing tables and add newly introduced additive columns safely."""
-    Base.metadata.create_all(engine)
-
-    additions = {
-        "students": [
-            ("blood_group", "VARCHAR DEFAULT ''"),
-            ("student_type", "VARCHAR DEFAULT 'Regular'"),
-        ],
-        "attendance_records": [
-            ("status", "VARCHAR DEFAULT 'present'"),
-            ("note", "VARCHAR DEFAULT ''"),
-            ("updated_at", "TIMESTAMP"),
-        ],
-        "assessments": [
-            ("assessment_type", "VARCHAR DEFAULT 'exam'"),
-            ("scheduled_at", "TIMESTAMP"),
-            ("end_at", "TIMESTAMP"),
-            ("published", "BOOLEAN DEFAULT FALSE"),
-            ("instructions", "TEXT DEFAULT ''"),
-            ("status", "VARCHAR DEFAULT 'draft'"),
-            ("academic_year", "VARCHAR DEFAULT ''"),
-            ("created_by", "VARCHAR DEFAULT ''"),
-            ("updated_by", "VARCHAR DEFAULT ''"),
-            ("created_at", "TIMESTAMP"),
-            ("updated_at", "TIMESTAMP"),
-            ("published_at", "TIMESTAMP"),
-            ("published_by", "VARCHAR DEFAULT ''"),
-        ],
-        "marks": [
-            ("status", "VARCHAR DEFAULT 'published'"),
-            ("published_at", "TIMESTAMP"),
-            ("published_by", "VARCHAR DEFAULT ''"),
-            ("is_valid", "BOOLEAN DEFAULT TRUE"),
-            ("updated_at", "TIMESTAMP"),
-        ],
-        "result_sheets": [
-            ("academic_year", "VARCHAR DEFAULT ''"),
-            ("semester", "INTEGER"),
-            ("updated_at", "TIMESTAMP"),
-        ],
-        "student_subject_results": [
-            ("course_id", "VARCHAR"),
-            ("section_id", "VARCHAR"),
-            ("result_sheet_id", "VARCHAR"),
-            ("credits", "FLOAT DEFAULT 0"),
-            ("grade", "VARCHAR DEFAULT ''"),
-            ("grade_point", "FLOAT"),
-            ("percentage", "FLOAT"),
-            ("total_score", "FLOAT"),
-            ("max_score", "FLOAT"),
-            ("updated_at", "TIMESTAMP"),
-        ],
-        "book_loans": [
-            ("student_id", "VARCHAR"),
-        ],
-        "fee_invoices": [
-            ("fee_structure_id", "VARCHAR"),
-            ("invoice_number", "VARCHAR DEFAULT ''"),
-            ("academic_year_id", "VARCHAR DEFAULT ''"),
-            ("semester_id", "VARCHAR DEFAULT ''"),
-            ("fee_assignment_id", "VARCHAR DEFAULT ''"),
-            ("gross_amount", "FLOAT DEFAULT 0"),
-            ("scholarship_amount", "FLOAT DEFAULT 0"),
-            ("waiver_amount", "FLOAT DEFAULT 0"),
-            ("net_amount", "FLOAT DEFAULT 0"),
-        ],
-        "payments": [
-            ("challan_id", "VARCHAR"),
-            ("cleared_at", "TIMESTAMP"),
-            ("cleared_by", "VARCHAR DEFAULT ''"),
-            ("remarks", "VARCHAR DEFAULT ''"),
-        ],
-        "academic_rollovers": [
-            ("executed_by", "VARCHAR DEFAULT ''"), ("executed_at", "TIMESTAMP"),
-            ("remarks", "TEXT DEFAULT ''"),
-        ],
-        "academic_rollover_decisions": [
-            ("academic_status", "VARCHAR DEFAULT 'PENDING'"), ("finance_status", "VARCHAR DEFAULT 'CLEAR'"),
-            ("outstanding_amount", "FLOAT DEFAULT 0"), ("carry_forward_amount", "FLOAT DEFAULT 0"),
-            ("processed_at", "TIMESTAMP"),
-        ],
-        "complaints": [("student_id", "VARCHAR")],
-        "fee_structures": [
-            ("academic_year", "VARCHAR DEFAULT ''"), ("campus", "VARCHAR DEFAULT ''"),
-            ("quota_id", "VARCHAR"), ("cycle_program_id", "VARCHAR"),
-            ("code", "VARCHAR DEFAULT ''"), ("academic_year_id", "VARCHAR"),
-            ("semester_id", "VARCHAR"), ("campus_id", "VARCHAR"), ("batch_id", "VARCHAR"),
-            ("student_type_id", "VARCHAR"), ("version", "INTEGER DEFAULT 1"),
-            ("workflow_id", "VARCHAR"), ("description", "TEXT DEFAULT ''"),
-            ("notes", "TEXT DEFAULT ''"), ("created_by", "VARCHAR DEFAULT ''"),
-            ("updated_by", "VARCHAR DEFAULT ''"), ("created_at", "TIMESTAMP"),
-            ("updated_at", "TIMESTAMP"),
-        ],
-    }
-
-    with engine.begin() as conn:
-        inspector = inspect(conn)
-        for table_name, columns in additions.items():
-            if not inspector.has_table(table_name):
-                continue
-            existing = {column["name"] for column in inspector.get_columns(table_name)}
-            for column_name, ddl in columns:
-                if column_name in existing:
-                    continue
-                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"))
-
-
 def ensure_versioned_migrations():
     """Apply Admissions schema revisions without resetting existing data."""
     from migrations.runner import upgrade
@@ -164,38 +58,6 @@ def office(n: int) -> dict:
 
 def slug(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")
-
-
-def _ensure_course_columns():
-    """Small additive migration for the course-catalog fields introduced after v1."""
-    if not inspect(engine).has_table("courses"):
-        return
-    wanted = {
-        "program_id": "VARCHAR", "regulation": "VARCHAR", "course_type": "VARCHAR",
-        "category": "VARCHAR", "ltp": "VARCHAR", "prerequisite": "VARCHAR", "status": "VARCHAR",
-    }
-    existing = {column["name"] for column in inspect(engine).get_columns("courses")}
-    with engine.begin() as connection:
-        for name, column_type in wanted.items():
-            if name not in existing:
-                connection.execute(text(f"ALTER TABLE courses ADD COLUMN {name} {column_type}"))
-        connection.execute(text("UPDATE courses SET regulation = 'R2023' WHERE regulation IS NULL OR regulation = ''"))
-        connection.execute(text("UPDATE courses SET course_type = CASE WHEN semester = 7 THEN 'Elective' ELSE 'Core' END WHERE course_type IS NULL OR course_type = ''"))
-        connection.execute(text("UPDATE courses SET category = CASE WHEN semester = 7 THEN 'Professional Elective' ELSE 'Professional Core' END WHERE category IS NULL OR category = ''"))
-        connection.execute(text("UPDATE courses SET ltp = CASE WHEN credits >= 4 THEN '3-1-0' WHEN credits = 3 THEN '3-0-0' ELSE '2-0-0' END WHERE ltp IS NULL OR ltp = ''"))
-        connection.execute(text("UPDATE courses SET status = 'Active' WHERE status IS NULL OR status = ''"))
-
-
-def _ensure_staff_contact_columns():
-    """Add optional faculty contact fields without requiring a database reset."""
-    if not inspect(engine).has_table("staff_members"):
-        return
-    wanted = {"phone": "VARCHAR", "office_hours": "VARCHAR"}
-    existing = {column["name"] for column in inspect(engine).get_columns("staff_members")}
-    with engine.begin() as connection:
-        for name, column_type in wanted.items():
-            if name not in existing:
-                connection.execute(text(f"ALTER TABLE staff_members ADD COLUMN {name} {column_type}"))
 
 
 # Demo username for each office head (matches the login screen's demo accounts).
@@ -215,10 +77,6 @@ DEMO_USERNAMES = {
 
 
 def seed():
-    Base.metadata.create_all(engine)
-    _ensure_course_columns()
-    _ensure_staff_contact_columns()
-    ensure_additive_schema()
     ensure_versioned_migrations()
     s = SessionLocal()
     try:

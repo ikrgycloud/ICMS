@@ -7,52 +7,65 @@ export default function AuditView() {
   const [loading, setLoading] = useState(true)
   const [verify, setVerify] = useState<any>(null)
   const [verifying, setVerifying] = useState(false)
+  const [query, setQuery] = useState('')
+  const [outcome, setOutcome] = useState('ALL')
 
-  function load() { api.audit().then(r => { setRows(r.entries); setLoading(false) }).catch(() => setLoading(false)) }
+  function load() { setLoading(true); api.audit().then(r => { setRows(r.entries || []); setLoading(false) }).catch(() => setLoading(false)) }
   useEffect(load, [])
 
   async function runVerify() {
     setVerifying(true)
-    const r = await api.verifyAudit()
-    setVerify(r); setVerifying(false)
+    try {
+      const r = await api.verifyAudit()
+      setVerify(r)
+    } finally {
+      setVerifying(false)
+    }
   }
 
   const outColor = (o: string) => o === 'ALLOW' ? 'var(--teal)' : o === 'DENY' ? 'var(--rose)' : o === 'ESCALATE' ? 'var(--amber)' : '#6f7fd4'
+  const normalizedQuery = query.trim().toLowerCase()
+  const filteredRows = rows.filter(e => {
+    const matchesOutcome = outcome === 'ALL' || e.outcome === outcome
+    const matchesQuery = !normalizedQuery || [e.actor, e.action, e.reason, e.outcome, e.hash].join(' ').toLowerCase().includes(normalizedQuery)
+    return matchesOutcome && matchesQuery
+  })
+  const count = (value: string) => rows.filter(e => e.outcome === value).length
 
   return (
-    <div className="fade-in">
+    <div className="fade-in audit-page">
       <div className="page-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
         <div>
-          <h1>Audit log</h1>
-          <p>Every authority decision is appended to a hash-chained ledger. Each entry seals the previous entry's hash, so any tampering breaks the chain.</p>
+          <h1>Audit & integrity</h1>
+          <p>Trace authority decisions, investigate outcomes, and verify the hash-chained ledger.</p>
         </div>
-        <button className="btn btn-brass" onClick={runVerify} disabled={verifying}>{verifying ? 'Verifying…' : '⛓ Verify chain integrity'}</button>
+        <div className="audit-head-actions"><button className="btn btn-out" onClick={load} disabled={loading}>Refresh</button><button className="btn btn-brass" onClick={runVerify} disabled={verifying}>{verifying ? 'Verifying...' : 'Verify chain integrity'}</button></div>
       </div>
 
       {verify && (
-        <div style={{ borderRadius: 12, padding: '14px 18px', marginBottom: 18, background: verify.intact ? '#e8f6f1' : '#fbe9e4', border: `1.5px solid ${verify.intact ? 'var(--teal)' : 'var(--rose)'}` }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 20 }}>{verify.intact ? '✓' : '✕'}</span>
-            <div>
-              <div style={{ fontWeight: 600, color: verify.intact ? 'var(--teal-dk)' : 'var(--rose)' }}>
-                {verify.intact ? 'Chain intact' : 'Chain broken'}
-              </div>
-              <div style={{ fontSize: 13, color: 'var(--txt-soft)' }}>
-                {verify.count} entries verified{verify.intact ? ' — no tampering detected.' : ` — break at entry ${verify.broken_at}.`}
-              </div>
-            </div>
-          </div>
+        <div className={`audit-integrity ${verify.intact ? 'intact' : 'broken'}`}>
+          <span className="audit-integrity-mark">{verify.intact ? 'OK' : '!'}</span>
+          <div><b>{verify.intact ? 'Chain intact' : 'Chain broken'}</b><span>{verify.count} entries verified{verify.intact ? ' - no tampering detected.' : ` - break at entry ${verify.broken_at}.`}</span></div>
+          <small>Checked just now</small>
         </div>
       )}
 
+      <div className="audit-summary">
+        <button className={`audit-summary-card ${outcome === 'ALL' ? 'active' : ''}`} onClick={() => setOutcome('ALL')} type="button"><span>Total events</span><b>{rows.length}</b><small>Loaded from ledger</small></button>
+        <button className={`audit-summary-card allow ${outcome === 'ALLOW' ? 'active' : ''}`} onClick={() => setOutcome('ALLOW')} type="button"><span>Allowed</span><b>{count('ALLOW')}</b><small>Successful decisions</small></button>
+        <button className={`audit-summary-card deny ${outcome === 'DENY' ? 'active' : ''}`} onClick={() => setOutcome('DENY')} type="button"><span>Denied</span><b>{count('DENY')}</b><small>Blocked decisions</small></button>
+        <button className={`audit-summary-card escalate ${outcome === 'ESCALATE' ? 'active' : ''}`} onClick={() => setOutcome('ESCALATE')} type="button"><span>Escalated</span><b>{count('ESCALATE')}</b><small>Needs higher authority</small></button>
+      </div>
+
       {loading ? <Spinner /> : (
-        <div className="card">
+        <div className="card audit-ledger">
+          <div className="audit-ledger-head"><div><h3>Decision ledger</h3><p>{filteredRows.length} of {rows.length} events shown</p></div><label className="audit-search"><span>Find in ledger</span><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Actor, action, reason, hash..." aria-label="Find in audit ledger" /></label></div>
           <div className="tbl-scroll">
-            {rows.length === 0 ? <Empty icon="⛓" text="No audit entries yet. Decisions will be recorded here as workflows run." /> : (
+            {filteredRows.length === 0 ? <Empty icon="LOG" text={rows.length ? 'No audit entries match these filters.' : 'No audit entries yet. Decisions will be recorded here as workflows run.'} /> : (
               <table className="tbl">
                 <thead><tr><th>#</th><th>When</th><th>Actor</th><th>Action</th><th>Outcome</th><th>Reason</th><th>Hash</th></tr></thead>
                 <tbody>
-                  {rows.map((e, i) => (
+                  {filteredRows.map((e, i) => (
                     <tr key={e.id}>
                       <td className="mono" style={{ color: 'var(--txt-mute)' }}>{rows.length - i}</td>
                       <td className="mono" style={{ fontSize: 11.5 }}>{new Date(e.at).toLocaleString()}</td>

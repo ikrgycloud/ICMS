@@ -54,8 +54,11 @@ RECOMMEND_OUT = "RECOMMEND"
 # ----------------------------------------------------------------------------
 # JWT-ish token (self-contained, HS256). Short-lived; carries tenant + scope.
 # ----------------------------------------------------------------------------
-_SECRET = os.environ.get(
-    "JWT_SECRET", "icms-authority-plane-secret-key-change-in-prod").encode()
+_environment = os.environ.get("ICMS_ENVIRONMENT", "development").lower()
+_configured_secret = os.environ.get("JWT_SECRET", "")
+if _environment in {"production", "prod"} and (not _configured_secret or _configured_secret == "change-me-in-production"):
+    raise RuntimeError("JWT_SECRET must be configured securely in production")
+_SECRET = (_configured_secret or "icms-development-only-secret-not-for-production").encode()
 
 
 def _b64e(raw: bytes) -> str:

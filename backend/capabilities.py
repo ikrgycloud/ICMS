@@ -127,7 +127,8 @@ MODULE_ACTIONS = {
     "calendar":     {"view": "view", "create": "create", "edit": "edit",
                      "delete": "delete"},
     "academic_calendar": {"view": "view", "create": "create", "edit": "edit",
-                          "delete": "delete"},
+                          "delete": "delete", "approve_proposal": "approve",
+                          "reject_proposal": "reject"},
     "students":     {"view": "view", "add": "create", "edit": "edit"},
 
     "academics":    {"view": "view", "create_section": "create", "create_course": "create", "edit": "edit",
@@ -137,7 +138,10 @@ MODULE_ACTIONS = {
                      "assign_faculty": "assign", "manage_timetable": "edit",
                      "create_task": "create", "edit_task": "edit",
                      "publish_task": "publish", "close_task": "edit",
-                     "publish_announcement": "publish"},
+                     "publish_announcement": "publish", "approve_proposal": "approve",
+                     "reject_proposal": "reject", "resolve_exception": "verify",
+                     "manage_quality": "create", "manage_committee": "create",
+                     "manage_outcomes": "create", "manage_planning": "create"},
     "attendance":   {"view": "view", "mark": "create", "correct": "edit"},
     "examinations": {"view": "view", "enter_marks": "create", "moderate": "verify",
                      "publish_result": "publish", "lock": "lock",
@@ -192,6 +196,8 @@ ACTION_OFFICE_ALLOW = {
     ("academic_calendar", "create"): {1, 2, 4, 5},
     ("academic_calendar", "edit"): {1, 2, 4, 5},
     ("academic_calendar", "delete"): {1, 2, 4, 5},
+    ("academic_calendar", "approve_proposal"): {6},
+    ("academic_calendar", "reject_proposal"): {6},
     ("students", "add"): {15},                        # Admissions owns student creation
     ("students", "edit"): {10, 15},                   # HOD and Admissions maintain records
     ("academics", "create_section"): {6, 10, 17},     # Dean Acad, HOD, Acad Coordinator
@@ -203,6 +209,13 @@ ACTION_OFFICE_ALLOW = {
     ("academics", "publish_task"): {10, 11, 12, 13, 14, 17},
     ("academics", "close_task"): {10, 11, 12, 13, 14, 17},
     ("academics", "publish_announcement"): {6, 8, 10, 17},
+    ("academics", "approve_proposal"): {6},
+    ("academics", "reject_proposal"): {6},
+    ("academics", "resolve_exception"): {6},
+    ("academics", "manage_quality"): {6, 10, 17},
+    ("academics", "manage_committee"): {6, 9, 17},
+    ("academics", "manage_outcomes"): {6, 9, 17},
+    ("academics", "manage_planning"): {6, 17},
     ("attendance", "mark"): {10, 11, 12, 13, 14, 17},  # HOD + faculty + coordinator
     ("attendance", "correct"): {10, 17},
     ("examinations", "enter_marks"): {11, 12, 13, 14, 16},  # faculty + exam cell

@@ -20,6 +20,7 @@ RBAC_MATRIX = {
     3:  {"view": F, "create": L, "edit": L, "delete": X, "approve": L, "reject": L, "verify": V, "publish": C, "export": F, "configure": X, "delegate": D, "audit": V},
     4:  {"view": F, "create": L, "edit": L, "delete": X, "approve": F, "reject": F, "verify": V, "publish": C, "export": F, "configure": X, "delegate": F, "audit": V},
     5:  {"view": F, "create": L, "edit": L, "delete": X, "approve": D, "reject": L, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
+    6:  {"view": F, "create": F, "edit": L, "delete": X, "approve": L, "reject": L, "verify": F, "publish": X, "export": F, "configure": X, "delegate": X, "audit": V},
     10: {"view": F, "create": F, "edit": L, "delete": X, "approve": L, "reject": L, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
     14: {"view": L, "create": L, "edit": L, "delete": X, "approve": X, "reject": X, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
     15: {"view": F, "create": F, "edit": L, "delete": X, "approve": L, "reject": L, "verify": F, "publish": X, "export": F, "configure": X, "delegate": X, "audit": V},
