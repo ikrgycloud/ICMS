@@ -23,6 +23,17 @@ const blank = (term = "") => ({
   end_date: new Date().toISOString().slice(0, 10),
   description: "",
   status: "published",
+  program_id: "", department_id: "", student_year: "",
+  start_time: "", end_time: "",
+});
+
+export default function AcademicCalendar({
+  user,
+  caps,
+}: {
+  user: any;
+  caps: any;
+}) {
 });
 
 export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
@@ -32,6 +43,11 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
     [error, setError] = useState("");
   const [category, setCategory] = useState("All"),
     [campus, setCampus] = useState("All Campuses"),
+    [academicYear, setAcademicYear] = useState(""),
+    [programId, setProgramId] = useState(""),
+    [departmentId, setDepartmentId] = useState(""),
+    [studentYear, setStudentYear] = useState(""),
+    [filtersOpen, setFiltersOpen] = useState(false),
     [form, setForm] = useState<any>(blank()),
     [detail, setDetail] = useState<any>(null),
     [modal, setModal] = useState(false),
@@ -39,6 +55,7 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
   async function load(value = term) {
     setLoading(true);
     try {
+      const next = await api.academicCalendar(value, { academicYear, programId, departmentId, studentYear });
       const next = await api.academicCalendar(value);
       setData(next);
       if (!value && next.selected_term) setTerm(next.selected_term);
@@ -50,6 +67,8 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
   }
   useEffect(() => {
     load(term);
+  }, [term, academicYear, programId, departmentId, studentYear]);
+  const yearOptions = data?.academic_year_options || [];
   }, [term]);
   const campuses = useMemo<string[]>(
     () => [
@@ -89,6 +108,8 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
   );
   const pending = useMemo(
     () =>
+      (data?.entries || []).filter((x: any) =>
+        String(x.status).toLowerCase().includes("pending"),
       (data?.proposals || []).filter((x: any) =>
         ["SUBMITTED", "RESUBMITTED"].includes(x.state),
       ),
@@ -101,6 +122,9 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
         .slice(0, 4),
     [data],
   );
+  const canCreate = !!(data?.permissions?.create && (caps?.create || user?.office_n === 17)),
+    canEdit = !!(data?.permissions?.edit && caps?.edit),
+    canDelete = !!(data?.permissions?.delete && caps?.delete);
   const examConflicts = useMemo(() => {
     const exams = (data?.entries || []).filter((x: any) =>
       /exam/i.test(x.category),
@@ -136,11 +160,29 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
         end_date: x.end_date,
         description: x.description || "",
         status: x.status || "published",
+        program_id: x.program_id || "", department_id: x.department_id || "", student_year: x.student_year || "", start_time: x.start_time || "", end_time: x.end_time || "",
       });
       setDetail(null);
     } else setDetail(x);
     setModal(true);
   }
+  async function save() {
+    setSaving(true);
+    try {
+      const payload = {
+        ...form,
+        student_year: form.student_year === "" || form.student_year == null ? null : Number(form.student_year),
+        program_id: form.program_id?.trim() || null,
+        department_id: form.department_id?.trim() || null,
+      };
+      delete payload.academic_year;
+      form.id
+        ? await api.updateAcademicCalendarEntry(form.id, payload)
+        : await api.createAcademicCalendarEntry(payload);
+      setModal(false);
+      await load();
+    } catch (e: any) {
+      setError(e.message || "Could not save the event.");
   function exportCsv() {
     const header = [
       "Term",
@@ -207,6 +249,13 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
     }
   }
   async function remove() {
+    setSaving(true);
+    try {
+      await api.deleteAcademicCalendarEntry(form.id);
+      setModal(false);
+      await load();
+    } catch (e: any) {
+      setError(e.message || "Could not delete the event.");
     return;
   }
   async function decide(proposal: any, decision: string) {
@@ -227,11 +276,39 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
       setSaving(false);
     }
   }
+  async function submitDraft() {
+    setSaving(true);
+    try { await api.submitAcademicCalendarEntry(form.id); setModal(false); await load(); }
+    catch (e: any) { setError(e.message || "Could not submit the draft."); }
+    finally { setSaving(false); }
+  }
   if (loading && !data) return <Spinner />;
   return (
     <div className="fade-in academic-calendar-ref">
       <PageHead
         title="Academic Calendar"
+        sub="Institution-wide academic dates, examinations, teaching periods, holidays, and academic milestones."
+        right={
+          <div className="calendar-head-actions academic-filter-bar">
+            <button className="btn btn-out" onClick={() => setFiltersOpen((open) => !open)}>
+              {filtersOpen ? "Hide filters" : "Filters"}
+            </button>
+            {filtersOpen && <>
+              <label>
+                Term / semester
+                <select className="select academic-term-select" value={data?.selected_term || ""} onChange={(e) => setTerm(e.target.value)}>
+                  {data?.term_options?.map((x: string) => <option key={x}>{x}</option>)}
+                </select>
+              </label>
+              <label>
+                Campus
+                <select className="select" value={campus} onChange={(e) => setCampus(e.target.value)}>
+                  {campuses.map((x) => <option key={x}>{x}</option>)}
+                </select>
+              </label>
+              <label>Academic year<select className="select" value={academicYear} onChange={e => setAcademicYear(e.target.value)}><option value="">All years</option>{yearOptions.map((x: string) => <option key={x}>{x}</option>)}</select></label>
+              <label>Student year<select className="select" value={studentYear} onChange={e => setStudentYear(e.target.value)}><option value="">All years</option>{[1,2,3,4].map(x => <option key={x} value={x}>{x} Year</option>)}</select></label>
+            </>}
         sub="Dean Academics governance for teaching periods, examinations, registration, results, and academic milestones."
         right={
           <div className="calendar-head-actions academic-filter-bar">
@@ -266,17 +343,24 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
               <button
                 className="btn btn-crimson"
                 onClick={() => {
+                  setForm({ ...blank(data.selected_term), status: user?.office_n === 17 ? "draft" : "published" });
                   setForm(blank(data.selected_term));
                   setDetail(null);
                   setModal(true);
                 }}
               >
+                Add Academic Event
                 Propose Academic Event
               </button>
             )}
           </div>
         }
       />
+      {user?.office_n === 17 && (
+        <div className="calendar-banner">
+          Academic Coordinator changes are saved as drafts and require approval before publication.
+        </div>
+      )}
       {error && <div className="calendar-banner warn">{error}</div>}
       {data && (
         <>
@@ -394,6 +478,7 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
                   </div>
                   <div className="snap">
                     <span>Approval authority</span>
+                    <b>Principal</b>
                     <b>Dean Academics</b>
                   </div>
                   <div className="snap">
@@ -401,6 +486,8 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
                     <b>{pending.length}</b>
                   </div>
                   <p>
+                    Changes follow role permissions and are recorded in the
+                    audit trail.
                     Academic Office proposes changes. Dean Academics reviews,
                     decides, publishes, and all actions are recorded in the audit trail.
                   </p>
@@ -412,6 +499,8 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
       )}
       {modal && !detail && (
         <Modal
+          title={form.id ? "Edit Academic Event" : "Add Academic Event"}
+          className="academic-calendar-event-modal"
           title={form.id ? "Edit Academic Event" : "Propose Academic Event"}
           onClose={() => setModal(false)}
           footer={
@@ -425,6 +514,7 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
                   Delete
                 </button>
               )}
+              {form.id && user?.office_n === 17 && form.status === "draft" && <button className="btn btn-out" disabled={saving} onClick={submitDraft}>Submit for review</button>}
               <button className="btn btn-out" onClick={() => setModal(false)}>
                 Cancel
               </button>
@@ -464,6 +554,17 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
                 ))}
               </select>
             </Field>
+          </div>
+          <div className="grid-2">
+            <Field label="Student year"><select className="select" value={form.student_year || ""} onChange={e => setForm({ ...form, student_year: e.target.value ? Number(e.target.value) : null })}><option value="">All years</option>{[1,2,3,4].map(x => <option key={x} value={x}>{x} Year</option>)}</select></Field>
+          </div>
+          <div className="grid-2">
+            <Field label="Program / branch ID"><input className="inp" value={form.program_id} onChange={e => setForm({ ...form, program_id: e.target.value })} /></Field>
+            <Field label="Department ID"><input className="inp" value={form.department_id} onChange={e => setForm({ ...form, department_id: e.target.value })} /></Field>
+          </div>
+          <div className="grid-2">
+            <Field label="Start time"><input className="inp" type="time" value={form.start_time} onChange={e => setForm({ ...form, start_time: e.target.value })} /></Field>
+            <Field label="End time"><input className="inp" type="time" value={form.end_time} onChange={e => setForm({ ...form, end_time: e.target.value })} /></Field>
           </div>
           <div className="grid-2">
             <Field label="Start date">
@@ -511,6 +612,23 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
             setModal(false);
             setDetail(null);
           }}
+          footer={detail.status === "pending_review" && user?.office_n !== 17 ? <><button className="btn btn-out" disabled={saving} onClick={async () => { const reason = window.prompt("Reason for returning this change:") || ""; if (!reason.trim()) return; setSaving(true); try { await api.decideAcademicCalendarEntry(detail.id, { action: "return", reason }); setModal(false); setDetail(null); await load(); } catch (e: any) { setError(e.message || "Could not return the change."); } finally { setSaving(false); } }}>Return</button><button className="btn btn-crimson" disabled={saving} onClick={async () => { setSaving(true); try { await api.decideAcademicCalendarEntry(detail.id, { action: "approve" }); setModal(false); setDetail(null); await load(); } catch (e: any) { setError(e.message || "Could not approve the change."); } finally { setSaving(false); } }}>Approve</button></> : undefined}
+        >
+          <div className="calendar-detail">
+            <Pill s={detail.status || "published"} />
+            <h3>{detail.title}</h3>
+            <p>{detail.description || "No additional notes were provided."}</p>
+            <div className="snap">
+              <span>Date range</span>
+              <b>{dates(detail.start_date, detail.end_date)}</b>
+            </div>
+            <div className="snap">
+              <span>Campus</span>
+              <b>{detail.campus}</b>
+            </div>
+            <div className="snap"><span>Academic year / term</span><b>{detail.academic_year || "All years"} · {detail.term}</b></div>
+            <div className="snap"><span>Target</span><b>{detail.program_id || "All programs"} · {detail.department_id || "All departments"} · {detail.student_year ? `${detail.student_year} Year` : "All student years"}</b></div>
+            <div className="snap"><span>Time</span><b>{detail.start_time || "Not specified"}{detail.end_time ? ` – ${detail.end_time}` : ""}</b></div>
           footer={
             <>
               <button className="btn btn-out" onClick={() => { setModal(false); setDetail(null); }}>Close</button>
@@ -561,6 +679,17 @@ function Side({ title, rows, empty, open, showPill }: any) {
       <div className="card-pad">
         {rows.length ? (
           rows.map((x: any) => (
+            <button
+              className="academic-side-item"
+              onClick={() => open(x)}
+              key={x.id}
+            >
+              <strong>{x.title}</strong>
+              <span>
+                {dates(x.start_date, x.end_date)} · {x.category}
+              </span>
+              {showPill && <Pill s={x.status} />}
+            </button>
             <div className="academic-side-item" key={x.id}>
               <button className="linkish" onClick={() => open(x)} type="button">
                 <strong>{x.title}</strong>

@@ -206,9 +206,13 @@ export const api = {
   createCalendarEvent: (body: any) => req('/calendar', { method: 'POST', body: JSON.stringify(body) }),
   updateCalendarEvent: (id: string, body: any) => req(`/calendar/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   deleteCalendarEvent: (id: string) => req(`/calendar/${id}`, { method: 'DELETE' }),
-  academicCalendar: (term = '') => {
+  academicCalendar: (term = '', filters: any = {}) => {
     const params = new URLSearchParams()
     if (term) params.set('term', term)
+    if (filters.academicYear) params.set('academic_year', filters.academicYear)
+    if (filters.programId) params.set('program_id', filters.programId)
+    if (filters.departmentId) params.set('department_id', filters.departmentId)
+    if (filters.studentYear) params.set('student_year', String(filters.studentYear))
     const qs = params.toString()
     return req(`/academic-calendar${qs ? `?${qs}` : ''}`)
   },
@@ -225,6 +229,8 @@ export const api = {
   updateAcademicCalendarEntry: (id: string, body: any) =>
     req(`/academic-calendar/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   deleteAcademicCalendarEntry: (id: string) => req(`/academic-calendar/${id}`, { method: 'DELETE' }),
+  submitAcademicCalendarEntry: (id: string) => req(`/academic-calendar/${id}/submit`, { method: 'POST' }),
+  decideAcademicCalendarEntry: (id: string, body: any) => req(`/academic-calendar/${id}/decision`, { method: 'POST', body: JSON.stringify(body) }),
   createAcademicCalendarProposal: (body: any) => req('/academic-calendar/proposals', { method: 'POST', body: JSON.stringify(body) }),
   submitAcademicCalendarProposal: (id: string, expected_status_version: number) => req(`/academic-calendar/proposals/${id}/submit`, { method: 'POST', body: JSON.stringify({ expected_status_version }) }),
   decideAcademicCalendarProposal: (id: string, decision: string, expected_status_version: number, reason = '') => req(`/academic-calendar/proposals/${id}/decision/${decision}`, { method: 'POST', body: JSON.stringify({ expected_status_version, reason }) }),
@@ -336,6 +342,21 @@ export const api = {
 
   // ---- academics ----
   courses: () => req('/academics/courses'),
+  academicPrograms: () => req('/academics/programs'),
+  courseOfferings: () => req('/academics/course-offerings'),
+  createCourseOffering: (b: any) => req('/academics/course-offerings', { method: 'POST', body: JSON.stringify(b) }),
+  updateCourseOffering: (id: string, b: any) => req(`/academics/course-offerings/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+  changeCourseOfferingStatus: (id: string, status: string) => req(`/academics/course-offerings/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) }),
+  saveHodInput: (id: string, body: any) => req(`/academics/course-offerings/${id}/hod-input`, { method: 'PUT', body: JSON.stringify(body) }),
+  submitHodInput: (id: string) => req(`/academics/course-offerings/${id}/hod-input/submit`, { method: 'POST' }),
+  facultyAllocations: (id: string) => req(`/academics/course-offerings/${id}/faculty-allocations`),
+  createFacultyAllocation: (id: string, body: any) => req(`/academics/course-offerings/${id}/faculty-allocations`, { method: 'POST', body: JSON.stringify(body) }),
+  hodInput: (id: string) => req(`/academics/course-offerings/${id}/hod-input`),
+  courseOfferingReadiness: (id: string) => req(`/academics/course-offerings/${id}/readiness`),
+  curriculumExecution: (filters: any = {}) => { const q = new URLSearchParams(); Object.entries(filters).forEach(([k, v]) => { if (v !== '' && v !== undefined && v !== null) q.set(k, String(v)); }); const qs = q.toString(); return req(`/academics/curriculum-execution${qs ? `?${qs}` : ''}`); },
+  updateCurriculumExecution: (id: string, body: any) => req(`/academics/curriculum-execution/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  curriculumExecutionIssue: (body: any) => req('/academics/curriculum-execution/issues', { method: 'POST', body: JSON.stringify(body) }),
+  updateCurriculumExecutionIssue: (id: string, body: any) => req(`/academics/curriculum-execution/issues/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   createCourse: (b: any) => req('/academics/courses', { method: 'POST', body: JSON.stringify(b) }),
   sections: () => req('/academics/sections'),
   createSection: (b: any) => req('/academics/sections', { method: 'POST', body: JSON.stringify(b) }),
@@ -352,6 +373,26 @@ export const api = {
   updateTimetableEntry: (entryId: string, b: any) =>
     req(`/academics/timetable/${entryId}`, { method: 'PUT', body: JSON.stringify(b) }),
   deactivateTimetableEntry: (entryId: string) => req(`/academics/timetable/${entryId}/deactivate`, { method: 'POST' }),
+  timetablePlans: () => req('/academics/timetable-plans'),
+  submitTimetablePlan: (body: any) => req('/academics/timetable-plans/submit', { method: 'POST', body: JSON.stringify(body) }),
+  timetableHodDecision: (id: string, action: string, reason = '') => req(`/academics/timetable-plans/${id}/hod-decision`, { method: 'POST', body: JSON.stringify({ action, reason }) }),
+  timetableVpDecision: (id: string, action: string, reason = '') => req(`/academics/timetable-plans/${id}/vp-decision`, { method: 'POST', body: JSON.stringify({ action, reason }) }),
+  publishTimetablePlan: (id: string) => req(`/academics/timetable-plans/${id}/publish`, { method: 'POST' }),
+  closeTimetablePlan: (id: string) => req(`/academics/timetable-plans/${id}/close`, { method: 'POST' }),
+  classSessions: () => req('/academics/class-sessions'),
+  classSession: (id: string) => req(`/academics/class-sessions/${id}`),
+  generateClassSession: (body: any) => req('/academics/class-sessions/generate', { method: 'POST', body: JSON.stringify(body) }),
+  transitionClassSession: (id: string, status: string) => req(`/academics/class-sessions/${id}/transition`, { method: 'POST', body: JSON.stringify({ status }) }),
+  facultyClassSessions: () => req('/portal/faculty/class-sessions'),
+  checkInClassSession: (id: string) => req(`/portal/faculty/class-sessions/${id}/check-in`, { method: 'POST' }),
+  completeClassSession: (id: string) => req(`/portal/faculty/class-sessions/${id}/complete`, { method: 'POST' }),
+  academicConflicts: (filters: any = {}) => {
+    const params = new URLSearchParams()
+    Object.entries(filters).forEach(([key, value]) => { if (value !== '' && value !== undefined && value !== null) params.set(key, String(value)) })
+    const qs = params.toString()
+    return req(`/academics/conflicts${qs ? `?${qs}` : ''}`)
+  },
+  resolveAcademicConflict: (id: string, note: string) => req(`/academics/conflicts/${id}/resolve`, { method: 'POST', body: JSON.stringify({ note }) }),
   sectionAssignments: (sectionId: string) => req(`/academics/section/${sectionId}/assignments`),
   createAssignment: (sectionId: string, b: any) =>
     req(`/academics/section/${sectionId}/assignments`, { method: 'POST', body: JSON.stringify(b) }),
@@ -363,6 +404,7 @@ export const api = {
   facultyAssignmentSubmissions: (id: string) => req(`/faculty/assignments/${id}/submissions`),
   evaluateAssignmentSubmission: (id: string, body: any) => req(`/faculty/assignment-submissions/${id}/evaluate`, { method: 'POST', body: JSON.stringify(body) }),
   publishAnnouncement: (b: any) => req('/academics/announcements', { method: 'POST', body: JSON.stringify(b) }),
+  academicAnnouncements: () => req('/academics/announcements'),
 
   // ---- attendance ----
   attendanceSections: () => req('/attendance/sections'),

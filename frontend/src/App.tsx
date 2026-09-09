@@ -17,7 +17,13 @@ import AcademicRollover from './modules/AcademicRollover'
 import Students from './modules/Students'
 import Academics from './modules/Academics'
 import AcademicCoordinatorCenter from './modules/AcademicCoordinatorCenter'
+import AcademicCoordinatorConflicts from './modules/AcademicCoordinatorConflicts'
+import AcademicCoordinatorOfferings from './modules/AcademicCoordinatorOfferings'
+import AcademicCoordinatorTimetable from './modules/AcademicCoordinatorTimetable'
 import Curriculum from './modules/Curriculum'
+import AcademicCoordinatorNotices from './modules/AcademicCoordinatorNotices'
+import AcademicCoordinatorCurriculumExecution from './modules/AcademicCoordinatorCurriculumExecution'
+import AcademicCoordinatorReports from './modules/AcademicCoordinatorReports'
 import CoursesSubjects from './modules/CoursesSubjects'
 import Attendance from './modules/Attendance'
 import Examinations from './modules/Examinations'
@@ -162,8 +168,8 @@ const COORDINATOR_NAV = [
   ['Academic planning', 'Academic Calendar', 'academic_calendar'], ['Academic planning', 'Curriculum Execution', 'curriculum'],
   ['scheduling', 'Course Offerings', 'coordinator_course_offerings'], ['scheduling', 'Sections & Timetable', 'coordinator_sections'], ['scheduling', 'Conflict Center', 'coordinator_conflicts'],
   ['coordination', 'Academic Notices', 'coordinator_notices'],
-  ['authority', 'My Reviews', 'rollover'], ['authority', 'My Requests', 'coordinator_requests'],
-  ['reports', 'Academic Operations Reports', 'coordinator_reports'], ['reports', 'Audit', 'audit'],
+  ['authority', 'My Requests', 'coordinator_requests'],
+  ['reports', 'Reports', 'coordinator_reports'], ['reports', 'Audit', 'audit'],
   ['reference', 'Directory', 'directory'],
 ] as const
 
@@ -629,7 +635,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'academic_calendar':
       return <AcademicCalendar user={user} caps={caps} />
     case 'rollover':
-      return <AcademicRollover user={user} />
+      return user.office_n === 17 ? <AcademicCoordinatorCenter onNavigate={go} /> : <AcademicRollover user={user} />
     case 'integrations':
       return <Integrations caps={caps} />
     case 'analytics':
@@ -656,21 +662,21 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'dean_reports':
       return <DeanAcademicWorkspaces initialTab="reports" />
     case 'curriculum':
-      return <Curriculum />
+      return user.office_n === 17 ? <AcademicCoordinatorCurriculumExecution /> : <Curriculum />
     case 'courses_subjects':
       return <CoursesSubjects />
     case 'coordinator_course_offerings':
-      return <CoordinatorPage title="Course Offerings" sub="Plan and monitor the courses offered in the current academic cycle." action="Create course offering" />
+      return <AcademicCoordinatorOfferings />
     case 'coordinator_sections':
-      return <Academics caps={caps} />
+      return <AcademicCoordinatorTimetable user={user} />
     case 'coordinator_conflicts':
-      return <CoordinatorPage title="Conflict Center" sub="Review scheduling conflicts and route each issue to the responsible academic office." action="Review conflicts" />
+      return <AcademicCoordinatorConflicts onNavigate={go} />
     case 'coordinator_notices':
-      return <CoordinatorPage title="Academic Notices" sub="Prepare, publish, and track notices for the academic community." action="Create notice" />
+      return Number(user.office_n) === 17 ? <AcademicCoordinatorNotices /> : <Academics caps={caps} />
     case 'coordinator_requests':
-      return <CoordinatorPage title="My Requests" sub="Track requests raised by the Academic Coordinator and their approval status." action="Create request" />
+      return <Workflows user={user} onChange={onChange} initialTab="mine" />
     case 'coordinator_reports':
-      return <CoordinatorPage title="Academic Operations Reports" sub="Review readiness, timetable coverage, curriculum execution, and delivery metrics." action="Export report" />
+      return user.office_n === 17 ? <AcademicCoordinatorReports onNavigate={go} /> : <Analytics user={user} />
     case 'attendance':
       if (user.persona === 'faculty') return <FacultyAttendance />
       if (user.persona === 'student') return <StudentAttendanceView />
@@ -795,7 +801,7 @@ function CoordinatorPage({ title, sub, action }: { title: string; sub: string; a
     <main className="page-wrap fade-in">
       <PageHead title={title} sub={sub} />
       <section className="card" style={{ marginTop: 20 }}>
-        <div className="card-h"><div><h2>{title}</h2><p>This coordinator workspace has its own route, active state, and workflow.</p></div><button className="btn btn-crimson" type="button">{action}</button></div>
+        <div className="card-h"><div><h2>{title}</h2><p>This coordinator workspace has its own route, active state, and workflow.</p></div><button className="btn btn-crimson" type="button" onClick={() => window.location.reload()}>{action}</button></div>
         <div className="empty" style={{ padding: '48px 20px' }}>No {title.toLowerCase()} items are waiting for action.</div>
       </section>
     </main>
