@@ -62,7 +62,7 @@ export default function DeanAcademicWorkspaces({
         api.curriculumVersions(),
         api.calendarVersions(),
         api.timetableConflicts(),
-        api.facultyWorkload("2026-Odd"),
+        api.facultyWorkload(),
         api.deliveryMonitoring(),
         api.monitorJobs(),
       ]);
@@ -358,12 +358,12 @@ export default function DeanAcademicWorkspaces({
           <section className="card card-pad dean-workspace-table">
           <div className="card-h">
             <div><h3>Faculty allocation proposals</h3><p className="hint">Assign sections, review workload impact, and approve changes independently.</p></div>
-            <button
+            {data.allocations.can_propose && <button
               className="btn btn-crimson"
               onClick={() => open("allocation")}
             >
               Propose allocation
-            </button>
+            </button>}
           </div>
           {filteredAllocationRows.map((p: any) => (
             <div className="dean-workspace-row" key={p.id}>

@@ -17,7 +17,7 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import and_, desc, func, or_, text
+from sqlalchemy import and_, desc, false, func, or_, text
 
 from core import db, auth, uid, write_audit, notify, active_delegation_for
 from database import office, TENANT, slug
@@ -26,7 +26,7 @@ from matrices import rbac_for, scope_for, approval_limit_for, APPROVAL_LIMITS
 from capabilities import (modules_for_office, module_meta, MODULE_ACTIONS,
                           MODULES, action_allowed_for_office)
 import domain_models as D
-from academic_scope import authorize_object, hierarchy
+from academic_scope import authorize_object, dean_scope_assignments, hierarchy
 from governance_engine import validate_transition
 from teaching import faculty_owns_section
 from models import User, Person, OrgScope, WorkflowInstance, Notification
@@ -70,6 +70,8 @@ def dean_dashboard(
         .distinct().order_by(D.Semester.sequence).all()
     ]
     courses = scoped_academic_query(s, D.Course, ctx)
+    # Archived/inactive catalogue rows are not current academic delivery.
+    courses = courses.filter(~D.Course.status.in_(["Archived", "Inactive", "Deleted"]))
     if school_id:
         courses = courses.filter(D.Course.school_id == school_id)
     if dept_id:
@@ -111,20 +113,30 @@ def dean_dashboard(
 
     proposals = s.query(D.AcademicProposal).filter(
         D.AcademicProposal.tenant_id == ctx["tenant_id"],
+        D.AcademicProposal.assigned_to_office_n == ctx["office_n"],
         D.AcademicProposal.state.in_(["SUBMITTED", "RESUBMITTED"]),
     ).all()
     scoped_proposals = [row for row in proposals if not row.dept_id or row.dept_id in department_ids]
     curriculum_proposals = s.query(D.AcademicProposal).filter(
         D.AcademicProposal.tenant_id == ctx["tenant_id"],
         D.AcademicProposal.proposal_type == "curriculum",
+        D.AcademicProposal.assigned_to_office_n == ctx["office_n"],
     ).all()
     scoped_curriculum_proposals = [row for row in curriculum_proposals if not row.dept_id or row.dept_id in department_ids]
     reviews = scoped_academic_query(s, D.AcademicQualityReview, ctx).all()
     actions = scoped_academic_query(s, D.CorrectiveAction, ctx).all()
     exceptions = scoped_academic_query(s, D.TimetableException, ctx).all()
+    # Official Dean metrics use only Exam Controller-published result sheets.
+    # Faculty draft marks and development samples are intentionally excluded.
+    published_sheet_ids = [row[0] for row in s.query(D.ResultSheet.id).filter(
+        D.ResultSheet.tenant_id == ctx["tenant_id"], D.ResultSheet.status == "published",
+    ).all()]
     all_results = s.query(D.StudentSubjectResult).filter(
         D.StudentSubjectResult.tenant_id == ctx["tenant_id"],
         D.StudentSubjectResult.course_id.in_(course_ids) if course_ids else text("1=0"),
+        D.StudentSubjectResult.source == "examination",
+        D.StudentSubjectResult.published_at != None,
+        D.StudentSubjectResult.result_sheet_id.in_(published_sheet_ids) if published_sheet_ids else text("1=0"),
     ).all()
     results = all_results
     if academic_year:
@@ -153,6 +165,7 @@ def dean_dashboard(
     ).all()
     calendar = s.query(D.AcademicCalendarEntry).filter(
         D.AcademicCalendarEntry.tenant_id == ctx["tenant_id"],
+        D.AcademicCalendarEntry.status == "published",
         D.AcademicCalendarEntry.start_date >= date.today(),
     ).order_by(D.AcademicCalendarEntry.start_date).limit(8).all()
 
@@ -420,7 +433,7 @@ MONETARY = {("finance", "waive"): ("fee_waiver", "Vice-Chancellor"),
 # --------------------------------------------------------------------------- #
 #  Authority gate for a module action                                         #
 # --------------------------------------------------------------------------- #
-ACADEMIC_GOVERNANCE_OFFICES = {6, 10, 17}  # Dean, HOD, Academic Coordinator
+ACADEMIC_GOVERNANCE_OFFICES = {6, 10, 17, 41, 42, 43}  # governance + source owners
 
 
 def academic_scope_allows(ctx, *, dept_id=None, program_id=None, section_id=None) -> bool:
@@ -455,7 +468,50 @@ def scoped_academic_query(s, model, ctx):
     """Build a database-scoped query for academic models (never frontend-filtered)."""
     q = s.query(model).filter(getattr(model, "tenant_id") == ctx.get("tenant_id", TENANT))
     if ctx.get("office_n") == 6:
-        return q
+        assignments = dean_scope_assignments(ctx, s)
+        # Development compatibility is intentionally temporary: a local legacy
+        # database without assignments remains readable.  Production has no
+        # equivalent fallback and fails closed.
+        from database import demo_data_enabled
+        if not assignments:
+            return q if demo_data_enabled() else q.filter(false())
+        clauses = []
+        for assignment in assignments:
+            filters = []
+            unsupported_narrow_scope = False
+            if assignment.school_id:
+                if hasattr(model, "school_id"):
+                    filters.append(getattr(model, "school_id") == assignment.school_id)
+                elif getattr(model, "__tablename__", "") == "departments":
+                    filters.append(or_(D.Department.school_id == assignment.school_id, D.Department.campus == assignment.school_id))
+                elif getattr(model, "__tablename__", "") == "schools":
+                    filters.append(D.School.id == assignment.school_id)
+                else:
+                    unsupported_narrow_scope = True
+            if assignment.dept_id:
+                if hasattr(model, "dept_id"):
+                    filters.append(getattr(model, "dept_id") == assignment.dept_id)
+                elif getattr(model, "__tablename__", "") == "departments":
+                    filters.append(D.Department.id == assignment.dept_id)
+                else:
+                    unsupported_narrow_scope = True
+            if assignment.program_id:
+                if hasattr(model, "program_id"):
+                    filters.append(getattr(model, "program_id") == assignment.program_id)
+                elif getattr(model, "__tablename__", "") == "programs":
+                    filters.append(D.Program.id == assignment.program_id)
+                else:
+                    unsupported_narrow_scope = True
+            if assignment.section_id:
+                if hasattr(model, "section_id"):
+                    filters.append(getattr(model, "section_id") == assignment.section_id)
+                elif getattr(model, "__tablename__", "") == "sections":
+                    filters.append(D.Section.id == assignment.section_id)
+                else:
+                    unsupported_narrow_scope = True
+            if not unsupported_narrow_scope:
+                clauses.append(and_(*filters) if filters else false())
+        return q.filter(or_(*clauses)) if clauses else q.filter(false())
     ref = (ctx.get("scope_ref") or "").strip()
     school_ref = ref if ref.startswith("school_") else None
     ref = actor_department_id(s, ctx) or ref.removeprefix("dept_").removeprefix("scope_")
@@ -531,6 +587,80 @@ def require_tenant(row, ctx, label="record"):
     return row
 
 
+class DeanScopeAssignmentIn(BaseModel):
+    dean_user_id: str
+    school_id: str = ""
+    dept_id: str = ""
+    program_id: str = ""
+    section_id: str = ""
+    effective_from: datetime | None = None
+    effective_to: datetime | None = None
+
+
+def _dean_scope_payload(row):
+    return {
+        "id": row.id, "dean_user_id": row.dean_user_id, "school_id": row.school_id,
+        "dept_id": row.dept_id, "program_id": row.program_id, "section_id": row.section_id,
+        "active": row.active, "effective_from": row.effective_from.isoformat() if row.effective_from else None,
+        "effective_to": row.effective_to.isoformat() if row.effective_to else None,
+    }
+
+
+def _validate_dean_scope(s, ctx, body: DeanScopeAssignmentIn):
+    dean = s.get(User, body.dean_user_id)
+    if not dean or dean.tenant_id != ctx["tenant_id"] or dean.office_n != 6:
+        raise HTTPException(422, "dean_user_id must identify an active Dean Academics user in this tenant")
+    school = s.get(D.School, body.school_id) if body.school_id else None
+    dept = s.get(D.Department, body.dept_id) if body.dept_id else None
+    program = s.get(D.Program, body.program_id) if body.program_id else None
+    section = s.get(D.Section, body.section_id) if body.section_id else None
+    for label, row in (("school", school), ("department", dept), ("program", program), ("section", section)):
+        if (getattr(body, f"{label}_id", "") if label != "department" else body.dept_id) and (not row or row.tenant_id != ctx["tenant_id"]):
+            raise HTTPException(422, f"{label} is not in this tenant")
+    if dept and school and dept.school_id and dept.school_id != school.id:
+        raise HTTPException(422, "Department is not in the selected school")
+    if program and dept and program.dept_id != dept.id:
+        raise HTTPException(422, "Program is not in the selected department")
+    if section and dept and section.dept_id != dept.id:
+        raise HTTPException(422, "Section is not in the selected department")
+    if section and program:
+        course = s.get(D.Course, section.course_id)
+        if not course or course.program_id != program.id:
+            raise HTTPException(422, "Section is not in the selected program")
+    if body.effective_to and body.effective_from and body.effective_to < body.effective_from:
+        raise HTTPException(422, "effective_to cannot precede effective_from")
+
+
+@router.get("/academics/dean-scope-assignments")
+def list_dean_scope_assignments(ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] not in {6, 28}:
+        raise HTTPException(403, "Only Dean Academics or System Administration may view Dean scope assignments")
+    query = s.query(D.DeanScopeAssignment).filter(D.DeanScopeAssignment.tenant_id == ctx["tenant_id"])
+    if ctx["office_n"] == 6:
+        query = query.filter(D.DeanScopeAssignment.dean_user_id == ctx["sub"])
+    return {"assignments": [_dean_scope_payload(row) for row in query.order_by(D.DeanScopeAssignment.created_at.desc()).all()]}
+
+
+@router.post("/academics/dean-scope-assignments")
+def create_dean_scope_assignment(body: DeanScopeAssignmentIn, ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] != 28:
+        raise HTTPException(403, "Only System Administration may assign Dean academic scope")
+    _validate_dean_scope(s, ctx, body)
+    now = datetime.utcnow()
+    row = D.DeanScopeAssignment(
+        id=uid(), tenant_id=ctx["tenant_id"], dean_user_id=body.dean_user_id,
+        school_id=body.school_id or None, dept_id=body.dept_id or None,
+        program_id=body.program_id or None, section_id=body.section_id or None,
+        active=True, effective_from=body.effective_from or now, effective_to=body.effective_to,
+        created_by=ctx["sub"], created_at=now, updated_at=now,
+    )
+    s.add(row)
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.dean_scope.assign",
+                f"dean_scope_assignment:{row.id}", "", "active", json.dumps(_dean_scope_payload(row)), commit=False)
+    s.commit()
+    return {"assignment": _dean_scope_payload(row)}
+
+
 def prevent_self_approval(proposal, ctx):
     if proposal.submitted_by == ctx.get("sub"):
         raise HTTPException(403, "Proposal submitter cannot approve or reject their own proposal")
@@ -597,9 +727,13 @@ def _section_faculty_names(s):
 
 def _can_manage_section_for_timetable(s, ctx, section):
     if ctx["office_n"] == 6:
-        return True
+        try:
+            authorize_object(ctx, s, section, "edit")
+            return True
+        except HTTPException:
+            return False
     staff = _staff_profile(s, ctx)
-    if ctx["office_n"] in {10, 17}:
+    if ctx["office_n"] in {43}:
         return bool(staff and staff.dept_id == section.dept_id)
     return False
 
@@ -1035,7 +1169,9 @@ def chairman_outstanding_fees(start: str = "", ctx=Depends(auth), s=Depends(db))
 # Calendar changes are governed by the Dean.  Operational staff submit proposals;
 # the legacy CRUD routes below remain readable for already-published milestones.
 CALENDAR_ACADEMIC_EDITORS = {6}
-CALENDAR_PROPOSERS = {6, 10, 17}
+# Calendar changes are operational requests. The Dean independently reviews
+# them and must never originate work that reaches their own approval queue.
+CALENDAR_PROPOSERS = {42}
 ACADEMIC_PROPOSAL_STATES = {"DRAFT", "SUBMITTED", "UNDER_REVIEW", "CLARIFICATION_REQUIRED", "RESUBMITTED", "APPROVED", "REJECTED", "RETURNED", "ESCALATED", "IMPLEMENTED", "CLOSED"}
 
 
@@ -1505,10 +1641,16 @@ class AcademicProposalTransitionIn(BaseModel):
 @router.get("/academic-calendar/proposals")
 def academic_calendar_proposals(state: str = "", ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academic_calendar", "view", governance=True)[0])
-    query = s.query(D.AcademicProposal).filter(D.AcademicProposal.tenant_id == ctx["tenant_id"], D.AcademicProposal.proposal_type == "calendar")
+    query = scoped_academic_query(s, D.AcademicProposal, ctx).filter(D.AcademicProposal.proposal_type == "calendar")
     if state:
         query = query.filter(D.AcademicProposal.state == state.upper())
-    if ctx["office_n"] != 6:
+    if ctx["office_n"] == 42:
+        # Academic Office operates at faculty/institution scope and can create
+        # a calendar proposal with no department reference.  Its own queue is
+        # therefore ownership-scoped, not artificially filtered to a missing
+        # department identifier.
+        query = query.filter(D.AcademicProposal.submitted_by == ctx["sub"])
+    elif ctx["office_n"] != 6:
         query = query.filter(D.AcademicProposal.scope_ref == (actor_department_id(s, ctx) or "__no_scope__"))
     rows = query.order_by(desc(D.AcademicProposal.updated_at)).all()
     return {"proposals": [_proposal_payload(s, row) for row in rows],
@@ -1528,7 +1670,7 @@ def academic_calendar_proposal_detail(proposal_id: str, ctx=Depends(auth), s=Dep
 def create_academic_calendar_proposal(body: AcademicCalendarProposalIn, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academic_calendar", "view", governance=True)[0])
     if ctx["office_n"] not in CALENDAR_PROPOSERS:
-        raise HTTPException(403, "Only HOD, Academic Coordinator, or Dean Academics can propose calendar changes")
+        raise HTTPException(403, "Only an authorized Academic Office or Academic Coordinator actor can propose calendar changes")
     if not body.title.strip() or not body.term.strip():
         raise HTTPException(422, "Title and term are required")
     start = date.fromisoformat(body.start_date)
@@ -1559,7 +1701,7 @@ def create_academic_calendar_proposal(body: AcademicCalendarProposalIn, ctx=Depe
 
 @router.post("/academic-calendar/proposals/{proposal_id}/submit")
 def submit_academic_calendar_proposal(proposal_id: str, body: AcademicProposalTransitionIn, ctx=Depends(auth), s=Depends(db)):
-    proposal = require_academic_object(s, ctx, s.get(D.AcademicProposal, proposal_id), "submit", "Calendar proposal")
+    proposal = require_tenant(s.get(D.AcademicProposal, proposal_id), ctx, "Calendar proposal")
     if proposal.proposal_type != "calendar": raise HTTPException(404, "Calendar proposal not found")
     if proposal.submitted_by != ctx["sub"] or proposal.state not in {"DRAFT", "RETURNED", "CLARIFICATION_REQUIRED"}: raise HTTPException(409, "Proposal cannot be submitted in its current state")
     if proposal.status_version != body.expected_status_version: raise HTTPException(409, "Proposal changed; reload before submitting")
@@ -2000,9 +2142,9 @@ class FacultyAllocationProposalIn(BaseModel):
 @router.get("/academics/allocation/proposals")
 def allocation_proposals(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view", governance=True)[0])
-    q = s.query(D.AcademicProposal).filter(D.AcademicProposal.tenant_id == ctx["tenant_id"], D.AcademicProposal.proposal_type == "allocation")
+    q = scoped_academic_query(s, D.AcademicProposal, ctx).filter(D.AcademicProposal.proposal_type == "allocation")
     if ctx["office_n"] != 6: q = q.filter(D.AcademicProposal.scope_ref == (actor_department_id(s, ctx) or "__no_scope__"))
-    return {"proposals": [_proposal_payload(s, row) for row in q.order_by(desc(D.AcademicProposal.updated_at)).all()], "can_decide": ctx["office_n"] == 6}
+    return {"proposals": [_proposal_payload(s, row) for row in q.order_by(desc(D.AcademicProposal.updated_at)).all()], "can_propose": ctx["office_n"] in {10, 17}, "can_decide": ctx["office_n"] == 6}
 
 
 @router.get("/academics/allocation/proposals/{proposal_id}")
@@ -2016,12 +2158,13 @@ def allocation_proposal_detail(proposal_id: str, ctx=Depends(auth), s=Depends(db
 @router.post("/academics/allocation/proposals")
 def create_allocation_proposal(body: FacultyAllocationProposalIn, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view", governance=True)[0])
-    if ctx["office_n"] not in {6, 10, 17}: raise HTTPException(403, "Only HOD, Academic Coordinator, or Dean Academics can propose allocations")
+    if ctx["office_n"] not in {10, 17}: raise HTTPException(403, "Only HOD or Academic Coordinator can propose allocations")
     section = require_academic_object(s, ctx, s.get(D.Section, body.section_id), "create", "Section")
     faculty = require_academic_object(s, ctx, s.get(D.StaffMember, body.faculty_person_id), "create", "Faculty member")
     if not section or not faculty: raise HTTPException(404, "Section or faculty member not found")
     payload = {"section_id": section.id, "faculty_person_id": faculty.id, "term": section.term, "course_id": section.course_id}
-    now = datetime.utcnow(); proposal = D.AcademicProposal(id=uid(), tenant_id=TENANT, proposal_type="allocation", title=f"Faculty allocation for {section.section_code}", scope_level="department", scope_ref=section.dept_id, state="DRAFT", version_no=1, submitted_by=ctx["sub"], submitted_office_n=ctx["office_n"], assigned_to_office_n=6, due_at=now + timedelta(days=5), created_at=now, updated_at=now)
+    course = s.get(D.Course, section.course_id)
+    now = datetime.utcnow(); proposal = D.AcademicProposal(id=uid(), tenant_id=TENANT, proposal_type="allocation", title=f"Faculty allocation for {section.section_code}", scope_level="department", scope_ref=section.dept_id, school_id=section.school_id, dept_id=section.dept_id, program_id=getattr(course, "program_id", None), section_id=section.id, state="DRAFT", version_no=1, submitted_by=ctx["sub"], submitted_office_n=ctx["office_n"], assigned_to_office_n=6, due_at=now + timedelta(days=5), created_at=now, updated_at=now)
     s.add(proposal); s.flush(); s.add(D.AcademicProposalVersion(id=uid(), tenant_id=TENANT, proposal_id=proposal.id, version_no=1, payload_json=json.dumps(payload), rationale=body.rationale.strip(), created_by=ctx["sub"])); _proposal_event(s, proposal, ctx, "", "DRAFT", body.rationale); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.allocation.proposal.create", f"academic_proposal:{proposal.id}", "", "DRAFT", body.rationale, commit=False); s.commit()
     return {"proposal": _proposal_payload(s, proposal)}
 
@@ -2329,8 +2472,7 @@ class ProgramProposalIn(BaseModel):
 @router.get("/programs/proposals")
 def program_proposals(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view", governance=True)[0])
-    query = s.query(D.AcademicProposal).filter(
-        D.AcademicProposal.tenant_id == ctx["tenant_id"],
+    query = scoped_academic_query(s, D.AcademicProposal, ctx).filter(
         D.AcademicProposal.proposal_type == "program",
     )
     if ctx["office_n"] != 6:
@@ -2345,6 +2487,7 @@ def program_proposals(ctx=Depends(auth), s=Depends(db)):
     ).order_by(D.AcademicYear.start_date.desc(), D.Semester.sequence).all()
     return {
         "proposals": [_proposal_payload(s, row) for row in query.order_by(desc(D.AcademicProposal.updated_at)).all()],
+        "can_propose": ctx["office_n"] in {10, 17, 41},
         "can_decide": ctx["office_n"] == 6,
         "form_options": {
             "departments": [{"id": row.id, "code": row.code, "name": row.name} for row in departments],
@@ -2364,11 +2507,11 @@ def program_proposal_detail(proposal_id: str, ctx=Depends(auth), s=Depends(db)):
 @router.post("/programs/proposals")
 def create_program_proposal(body: ProgramProposalIn, ctx=Depends(auth), s=Depends(db)):
     require(gate(s,ctx,"academics","view", governance=True)[0])
-    if ctx["office_n"] not in {6,10,17}: raise HTTPException(403,"Only HOD, Academic Coordinator, or Dean can propose programmes")
+    if ctx["office_n"] not in {10,17,41}: raise HTTPException(403,"Only HOD, Academic Coordinator, or Program Coordinator can propose programmes")
     dept=require_academic_object(s, ctx, s.query(D.Department).filter(D.Department.tenant_id == ctx["tenant_id"], D.Department.code==body.dept_code).first(), "create", "Department")
     staff=s.query(D.StaffMember).filter(D.StaffMember.dept_id==dept.id,D.StaffMember.status=="active").count(); courses=s.query(D.Course).filter(D.Course.dept_id==dept.id).count()
     payload=body.model_dump(); payload["dept_id"]=dept.id; payload["feasibility"]={"active_faculty":staff,"available_courses":courses,"ready":staff>=1 and courses>=1}
-    now=datetime.utcnow(); p=D.AcademicProposal(id=uid(),tenant_id=TENANT,proposal_type="program",title=f"Programme proposal: {body.code.upper()} — {body.name}",scope_level="department",scope_ref=dept.id,state="DRAFT",version_no=1,submitted_by=ctx["sub"],submitted_office_n=ctx["office_n"],assigned_to_office_n=6,due_at=now+timedelta(days=15),created_at=now,updated_at=now);s.add(p);s.flush();s.add(D.AcademicProposalVersion(id=uid(),tenant_id=TENANT,proposal_id=p.id,version_no=1,payload_json=json.dumps(payload),rationale=body.rationale,created_by=ctx["sub"]));_proposal_event(s,p,ctx,"","DRAFT",body.rationale);write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.program.proposal.create",f"academic_proposal:{p.id}","","DRAFT",body.rationale,commit=False);s.commit();return {"proposal":_proposal_payload(s,p)}
+    now=datetime.utcnow(); p=D.AcademicProposal(id=uid(),tenant_id=TENANT,proposal_type="program",title=f"Programme proposal: {body.code.upper()} — {body.name}",scope_level="department",scope_ref=dept.id,school_id=dept.school_id,dept_id=dept.id,state="DRAFT",version_no=1,submitted_by=ctx["sub"],submitted_office_n=ctx["office_n"],assigned_to_office_n=6,due_at=now+timedelta(days=15),created_at=now,updated_at=now);s.add(p);s.flush();s.add(D.AcademicProposalVersion(id=uid(),tenant_id=TENANT,proposal_id=p.id,version_no=1,payload_json=json.dumps(payload),rationale=body.rationale,created_by=ctx["sub"]));_proposal_event(s,p,ctx,"","DRAFT",body.rationale);write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.program.proposal.create",f"academic_proposal:{p.id}","","DRAFT",body.rationale,commit=False);s.commit();return {"proposal":_proposal_payload(s,p)}
 
 
 @router.post("/programs/proposals/{proposal_id}/submit")
@@ -2402,7 +2545,7 @@ def decide_program_proposal(proposal_id:str,decision:str,body:AcademicProposalTr
 
 @router.get("/academics/committees")
 def committees(ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","view", governance=True)[0]); return {"committees":[{"id":x.id,"name":x.name,"type":x.committee_type,"chair_id":x.chair_id,"status":x.status,"permissions":json.loads(x.permissions_json or "[]")} for x in s.query(D.AcademicCommittee).filter(D.AcademicCommittee.tenant_id == ctx["tenant_id"]).all()]}
+    require(gate(s,ctx,"academics","view", governance=True)[0]); return {"committees":[{"id":x.id,"name":x.name,"type":x.committee_type,"chair_id":x.chair_id,"status":x.status,"permissions":json.loads(x.permissions_json or "[]")} for x in scoped_academic_query(s, D.AcademicCommittee, ctx).all()]}
 
 class CommitteeIn(BaseModel): name:str; committee_type:str; chair_id:str=""; permissions:list[str]=["view","record","assign","verify"]
 class CommitteeUpdateIn(BaseModel): name:str; committee_type:str; chair_id:str=""; status:str="active"; permissions:list[str]=["view","record","assign","verify"]
@@ -2686,7 +2829,55 @@ CURRICULUM_PROPOSERS = {10, 17}
 
 
 def _curriculum_proposal_payload(s, proposal):
-    return _proposal_payload(s, proposal)
+    result = _proposal_payload(s, proposal)
+    course = s.get(D.Course, proposal.implementation_ref) if proposal.implementation_ref else None
+    # Implementation readiness is derived from the records created after the
+    # governed decision.  Do not present workflow guidance as if it were a
+    # completed CO/PO or delivery configuration.
+    if not course:
+        result["implementation_status"] = {
+            "course": {"complete": False, "detail": "Created only after approval"},
+            "outcomes": {"complete": False, "detail": "Not available until a course record is created"},
+            "delivery": {"complete": False, "detail": "Not available until a course record is created"},
+        }
+        return result
+    outcomes = s.query(D.CourseOutcome).filter(
+        D.CourseOutcome.tenant_id == course.tenant_id,
+        D.CourseOutcome.course_id == course.id,
+        D.CourseOutcome.active == True,
+    ).all()
+    outcome_ids = {row.id for row in outcomes}
+    mapped_outcome_ids = {
+        row.course_outcome_id for row in s.query(D.OutcomeMapping).filter(
+            D.OutcomeMapping.tenant_id == course.tenant_id,
+            D.OutcomeMapping.course_outcome_id.in_(outcome_ids) if outcome_ids else text("1=0"),
+        ).all()
+    }
+    sections = s.query(D.Section).filter(
+        D.Section.tenant_id == course.tenant_id, D.Section.course_id == course.id,
+    ).all()
+    section_ids = {row.id for row in sections}
+    scheduled_section_ids = {
+        row.section_id for row in s.query(D.TimetableEntry).filter(
+            D.TimetableEntry.tenant_id == course.tenant_id,
+            D.TimetableEntry.section_id.in_(section_ids) if section_ids else text("1=0"),
+            D.TimetableEntry.status == "active",
+        ).all()
+    }
+    assigned = sum(1 for row in sections if row.faculty_person_id)
+    scheduled = sum(1 for row in sections if row.id in scheduled_section_ids)
+    result["implementation_status"] = {
+        "course": {"complete": True, "detail": f"{course.code} — {course.title} ({course.id})"},
+        "outcomes": {
+            "complete": bool(outcomes) and len(mapped_outcome_ids) == len(outcome_ids),
+            "detail": f"{len(outcomes)} COs; {len(mapped_outcome_ids)}/{len(outcomes)} mapped to PO",
+        },
+        "delivery": {
+            "complete": bool(sections) and assigned == len(sections) and scheduled == len(sections),
+            "detail": f"{len(sections)} section(s); {assigned}/{len(sections)} faculty assigned; {scheduled}/{len(sections)} timetabled",
+        },
+    }
+    return result
 
 
 @router.get("/curriculum/proposals")
@@ -2732,7 +2923,7 @@ def create_curriculum_proposal(body: CurriculumProposalIn, ctx=Depends(auth), s=
     title = f"{'Revise' if existing else 'Add'} {code} — {body.title.strip()}"
     now = datetime.utcnow()
     proposal = D.AcademicProposal(id=uid(), tenant_id=TENANT, proposal_type="curriculum", title=title,
-                                  scope_level="department", scope_ref=dept.id, state="DRAFT", version_no=1, submitted_by=ctx["sub"], submitted_office_n=ctx["office_n"],
+                                  scope_level="department", scope_ref=dept.id, school_id=dept.school_id, dept_id=dept.id, program_id=getattr(existing, "program_id", None), state="DRAFT", version_no=1, submitted_by=ctx["sub"], submitted_office_n=ctx["office_n"],
                                   assigned_to_office_n=6, due_at=now + timedelta(days=10), created_at=now, updated_at=now)
     s.add(proposal); s.flush()
     s.add(D.AcademicProposalVersion(id=uid(), tenant_id=TENANT, proposal_id=proposal.id, version_no=1,

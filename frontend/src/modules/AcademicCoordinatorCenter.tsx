@@ -10,16 +10,16 @@ const execution = ['Course Offerings', 'HOD Inputs', 'Approved Faculty Allocatio
 export default function AcademicCoordinatorCenter({ onNavigate }: { onNavigate?: (view: string) => void }) {
   const [data, setData] = useState<any>(null)
   useEffect(() => {
-    Promise.all([api.sections(), api.courses(), api.academicCalendar(), api.academicRollovers(), api.attendanceSections(), api.notifications()])
-      .then(([sections, courses, calendar, rollovers, attendance, notifications]) => setData({ sections, courses, calendar, rollovers, attendance, notifications }))
-      .catch(() => setData({ sections: { sections: [] }, courses: { courses: [] }, calendar: { entries: [] }, rollovers: { rollovers: [] }, attendance: { sections: [] }, notifications: { notifications: [] } }))
+    Promise.all([api.sections(), api.courses(), api.academicCalendar(), api.academicRollovers(), api.attendanceSections(), api.notifications(), api.timetableReadiness(), api.academicQualityRisks()])
+      .then(([sections, courses, calendar, rollovers, attendance, notifications, readiness, risks]) => setData({ sections, courses, calendar, rollovers, attendance, notifications, readiness, risks }))
+      .catch(() => setData({ sections: { sections: [] }, courses: { courses: [] }, calendar: { entries: [], proposals: [] }, rollovers: { rollovers: [] }, attendance: { sections: [] }, notifications: { notifications: [] }, readiness: { exceptions: [] }, risks: { risks: [] } }))
   }, [])
   const stats = useMemo(() => {
     if (!data) return []
-    const sections = data.sections.sections || [], courses = data.courses.courses || [], cal = data.calendar.entries || [], rollovers = data.rollovers.rollovers || []
+    const sections = data.sections.sections || [], courses = data.courses.courses || [], cal = data.calendar.entries || [], calendarProposals = data.calendar.proposals || [], rollovers = data.rollovers.rollovers || [], exceptions = data.readiness.exceptions || [], risks = data.risks.risks || []
     const coverage = sections.length ? Math.round(sections.filter((x: any) => x.schedule && x.schedule !== 'TBD').length / sections.length * 100) : 0
     const current = rollovers.find((x: any) => x.status !== 'approved') || rollovers[0]
-    return [['Programs in Scope', new Set(courses.map((x: any) => x.program || x.dept)).size, 'programs'], ['Course Offerings', courses.length, 'courses'], ['Sections Planned', sections.length, 'sections'], ['Timetable Coverage', `${coverage}%`, 'scheduled'], ['Active Conflicts', 0, 'needs review'], ['Calendar Changes Pending', cal.filter((x: any) => ['draft', 'pending'].includes(String(x.status).toLowerCase())).length, 'items'], ['Curriculum Execution Issues', 0, 'open issues'], ['Needs My Action', current?.status === 'draft' ? (current.decisions || []).filter((x: any) => x.decision === 'pending').length : 0, 'reviews']]
+    return [['Programs in Scope', new Set(courses.map((x: any) => x.program || x.dept)).size, 'programs'], ['Course Offerings', courses.length, 'courses'], ['Sections Planned', sections.length, 'sections'], ['Timetable Coverage', `${coverage}%`, 'scheduled'], ['Active Conflicts', exceptions.filter((x: any) => x.status !== 'RESOLVED').length, 'needs review'], ['Calendar Changes Pending', calendarProposals.filter((x: any) => ['SUBMITTED', 'RESUBMITTED'].includes(String(x.state))).length, 'items'], ['Curriculum Execution Issues', risks.length, 'open issues'], ['Needs My Action', current?.status === 'draft' ? (current.decisions || []).filter((x: any) => x.decision === 'pending').length : 0, 'reviews']]
   }, [data])
   if (!data) return <Spinner />
   const sections = data.sections.sections || [], coverage = stats[3]?.[1] || '0%'

@@ -173,11 +173,20 @@ h1, h2, h3, h4 { font-weight: 600; line-height: 1.2; }
 .dean-panel { background: #fff; border: 1px solid #dfe8f5; border-radius: 14px; overflow: hidden; min-height: 0; }
 .dean-main-grid > .dean-panel:nth-child(-n + 4) { height: 280px; }
 .dean-main-grid > .dean-panel:nth-child(n + 5):nth-child(-n + 8) { height: 300px; }
+.dean-main-grid > .dean-panel:nth-child(9) { grid-column: span 3; height: 300px; }
 .dean-panel-head { display: flex; align-items: center; justify-content: space-between; min-height: 46px; padding: 12px 16px; border-bottom: 1px solid #edf1f7; }
 .dean-panel-head h3 { font-size: 15px; line-height: 1.2; color: var(--navy); }
 .dean-panel-link { border: 0; padding: 0; background: transparent; color: #2d6cdf; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
 .dean-panel-link:hover { color: #174eaa; text-decoration: underline; }
 .dean-panel-link:focus-visible { outline: 3px solid rgba(52,120,212,.28); outline-offset: 3px; border-radius: 3px; }
+.dean-workload-content { border: 0; width: 100%; height: calc(100% - 47px); padding: 12px 16px 14px; background: transparent; color: inherit; cursor: pointer; text-align: left; display: grid; grid-template-columns: 112px 1fr; grid-template-rows: auto 1fr; gap: 8px 14px; align-items: center; }
+.dean-workload-content:focus-visible { outline: 3px solid rgba(52,120,212,.28); outline-offset: -3px; }
+.dean-workload-gauge { width: 106px; height: 53px; overflow: hidden; position: relative; border-radius: 106px 106px 0 0; background: conic-gradient(from 270deg at 50% 100%, #e9eff7 0deg, #e9eff7 180deg, transparent 180deg); }
+.dean-workload-gauge::before { content: ''; position: absolute; inset: 0; border-radius: inherit; background: conic-gradient(from 270deg at 50% 100%, #e3b44b 0deg, #3478d4 var(--load), transparent var(--load)); }
+.dean-workload-gauge-hole { position: absolute; z-index: 1; inset: 10px 10px 0; border-radius: 90px 90px 0 0; background: #fff; display: flex; flex-direction: column; align-items: center; justify-content: end; padding-bottom: 6px; }
+.dean-workload-gauge-hole strong { color: var(--navy); font-size: 20px; line-height: 1; }.dean-workload-gauge-hole span { color: var(--txt-mute); font-size: 9px; margin-top: 3px; }
+.dean-workload-copy { display: grid; gap: 4px; }.dean-workload-copy b { color: var(--navy); font-size: 15px; }.dean-workload-copy span { color: var(--txt-mute); font-size: 11px; line-height: 1.35; }
+.dean-workload-breakdown { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 5px; color: var(--txt-mute); font-size: 10px; }.dean-workload-breakdown span { white-space: nowrap; }.dean-workload-breakdown i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 4px; }.dean-workload-breakdown i.underloaded { background: #d6a43e; }.dean-workload-breakdown i.balanced { background: #2f9b71; }.dean-workload-breakdown i.overloaded { background: #dc5d55; }.dean-workload-breakdown b { color: var(--navy); margin-left: 2px; }.dean-workload-breakdown small { grid-column: 1 / -1; font-size: 10px; color: var(--txt-mute); }
 .decision-filters { display: flex; align-items: center; gap: 10px; }
 .decision-filters .select { min-width: 130px; height: 34px; }
 .check-label { display: inline-flex; align-items: center; gap: 5px; color: var(--txt-soft); font-size: 12px; white-space: nowrap; }

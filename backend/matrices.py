@@ -30,6 +30,9 @@ RBAC_MATRIX = {
     27: {"view": F, "create": F, "edit": F, "delete": L, "approve": L, "reject": L, "verify": V, "publish": X, "export": F, "configure": F, "delegate": X, "audit": F},
     28: {"view": F, "create": F, "edit": F, "delete": L, "approve": L, "reject": L, "verify": V, "publish": X, "export": F, "configure": F, "delegate": X, "audit": F},
     36: {"view": V, "create": L, "edit": X, "delete": X, "approve": X, "reject": X, "verify": X, "publish": X, "export": L, "configure": X, "delegate": X, "audit": X},
+    41: {"view": F, "create": F, "edit": L, "delete": X, "approve": X, "reject": X, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
+    42: {"view": F, "create": F, "edit": L, "delete": X, "approve": X, "reject": X, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
+    43: {"view": F, "create": F, "edit": L, "delete": X, "approve": X, "reject": X, "verify": L, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
     37: {"view": V, "create": X, "edit": X, "delete": X, "approve": X, "reject": X, "verify": X, "publish": X, "export": X, "configure": X, "delegate": X, "audit": X},
     39: {"view": V, "create": X, "edit": X, "delete": X, "approve": X, "reject": X, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
     40: {"view": F, "create": L, "edit": X, "delete": X, "approve": F, "reject": F, "verify": V, "publish": V, "export": F, "configure": L, "delegate": F, "audit": F},
@@ -188,6 +191,7 @@ OFFICE_SCOPE = {
     27: "university", 28: "global", 29: "campus", 30: "campus", 31: "campus",
     32: "campus", 33: "campus", 34: "campus", 35: "campus",
     36: "individual", 37: "individual", 38: "individual", 39: "individual",
+    41: "program", 42: "faculty", 43: "section",
 }
 
 

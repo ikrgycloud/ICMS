@@ -30,7 +30,8 @@ import matrices as M
 from matrices import (APPROVAL_MATRIX, WF_VALID, WF_STATES, approval_limit_for,
                       APPROVAL_LIMITS, rbac_for, scope_for)
 from database import (SessionLocal, seed, CATALOG, OFFICES, LEVELS, office,
-                      DEMO_USERNAMES, TENANT, slug)
+                      DEMO_USERNAMES, TENANT, slug, ensure_versioned_migrations,
+                      demo_data_enabled)
 from models import (User, Person, Role, RolePermission, Delegation, WorkflowInstance,
                     WorkflowProfile, Approval, Notification, AuditLog, ApprovalLimit,
                     DelegationPolicy, DelegationProfile, DelegationOption,
@@ -84,6 +85,11 @@ GOVERNANCE_PATHS = ("/api/academics/timetable/readiness", "/api/academics/qualit
                     "/api/academics/plans", "/api/academics/allocation/proposals",
                     "/api/programs/proposals", "/api/curriculum/proposals",
                     "/api/academic-calendar/proposals", "/api/academic-governance")
+# These are the actual source and review offices for academic governance.
+# Keep this transport-level guard aligned with domain_api's authorization
+# policy; otherwise an authorized source office can see a form but every
+# mutation is rejected before its endpoint executes.
+GOVERNANCE_ROUTE_OFFICES = {6, 10, 17, 41, 42, 43}
 
 
 @app.middleware("http")
@@ -93,7 +99,7 @@ async def governance_route_guard(request: Request, call_next):
         try:
             token = auth_header.split(" ", 1)[1]
             actor = decode_token(token)
-            if actor.get("office_n") not in {6, 10, 17}:
+            if actor.get("office_n") not in GOVERNANCE_ROUTE_OFFICES:
                 return JSONResponse({"detail": "Academic governance access denied"}, status_code=403)
         except Exception:
             return JSONResponse({"detail": "Missing or invalid token"}, status_code=401)
@@ -121,8 +127,15 @@ def _startup():
             # development rows and previously kept Uvicorn in its startup state
             # for several minutes.  During that time nginx had no usable
             # upstream and returned 502 for every /api request.
-            print("seed:", seed(), flush=True)
-            _seed_domain_after_startup()
+            if demo_data_enabled():
+                print("seed:", seed(), flush=True)
+                _seed_domain_after_startup()
+            else:
+                # Production tenants are provisioned through controlled admin
+                # workflows/migrations.  Never create identities or academic
+                # operational records as a side effect of starting the API.
+                ensure_versioned_migrations()
+                print("production startup: demo operational seeding disabled", flush=True)
             return
         except Exception as e:
             print("waiting for db...", e, flush=True)
@@ -633,12 +646,16 @@ def login(body: LoginIn, s=Depends(db)):
     # IDs and email-style usernames should be convenient to type.  Preserve the
     # stored username but compare case-insensitively at authentication time.
     username = (body.username or "").strip().lower()
-    if username == "student":
-        username = "25ece072"
+    if username == "student" and demo_data_enabled():
+        # Use the explicitly provisioned portal account rather than a legacy
+        # identity row whose password depends on optional domain seeding.
+        # This keeps the documented development login usable even when an
+        # unrelated seed extension cannot complete.
+        username = "24cse014"
     u = s.query(User).filter(func.lower(User.username) == username).first()
     if not u or u.password_hash != pwhash(body.password):
         raise HTTPException(401, "Invalid credentials")
-    if username == "professor":
+    if username == "professor" and demo_data_enabled():
         professor = s.query(User).filter(
             User.username == "aarav_kulkarni", User.status == "active"
         ).first()

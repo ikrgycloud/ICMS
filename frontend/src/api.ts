@@ -306,7 +306,7 @@ export const api = {
   programAssessment: (proposalId: string) => req(`/academic-governance/program/assessments/${proposalId}`),
   setFacultyAvailability: (body: any) => req('/academic-governance/faculty/availability', { method: 'POST', body: JSON.stringify(body) }),
   setWorkloadRule: (body: any) => req('/academic-governance/faculty/workload-rules', { method: 'POST', body: JSON.stringify(body) }),
-  facultyWorkload: (term: string) => req(`/academic-governance/faculty/workload/${encodeURIComponent(term)}`),
+  facultyWorkload: (term = '') => req(`/academic-governance/faculty/workload${term ? `/${encodeURIComponent(term)}` : ''}`),
   facultyConflicts: () => req('/academic-governance/faculty/conflicts'),
   createFacultyConflict: (body: any) => req('/academic-governance/faculty/conflicts', { method: 'POST', body: JSON.stringify(body) }),
   approveFacultyConflict: (id: string, reason = '') => req(`/academic-governance/faculty/conflicts/${id}/approve?reason=${encodeURIComponent(reason)}`, { method: 'POST' }),

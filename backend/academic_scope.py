@@ -6,9 +6,11 @@ department links instead of trusting IDs supplied by clients.
 """
 from dataclasses import dataclass
 from typing import Any
+from datetime import datetime
 
 from fastapi import HTTPException
 import domain_models as D
+from database import demo_data_enabled
 
 
 @dataclass(frozen=True)
@@ -96,6 +98,42 @@ def actor_hierarchy(ctx: dict, session) -> AcademicHierarchy:
     return AcademicHierarchy(ctx.get("tenant_id"), school, department, program, section)
 
 
+def dean_scope_assignments(ctx: dict, session) -> list[D.DeanScopeAssignment]:
+    """Return only currently-effective persisted assignments for this Dean."""
+    if ctx.get("office_n") != 6:
+        return []
+    now = datetime.utcnow()
+    return session.query(D.DeanScopeAssignment).filter(
+        D.DeanScopeAssignment.tenant_id == ctx.get("tenant_id"),
+        D.DeanScopeAssignment.dean_user_id == ctx.get("sub"),
+        D.DeanScopeAssignment.active == True,
+        D.DeanScopeAssignment.effective_from <= now,
+        (D.DeanScopeAssignment.effective_to == None) | (D.DeanScopeAssignment.effective_to >= now),
+    ).all()
+
+
+def dean_scope_allows(ctx: dict, session, target: AcademicHierarchy) -> bool:
+    """Resolve a target against the Dean's persisted assignment rows.
+
+    Development keeps legacy data readable until administrators have created
+    assignments. Production deliberately fails closed when no assignment exists.
+    """
+    assignments = dean_scope_assignments(ctx, session)
+    if not assignments:
+        return demo_data_enabled()
+    for assignment in assignments:
+        if assignment.school_id and assignment.school_id != target.school_id:
+            continue
+        if assignment.dept_id and assignment.dept_id != target.dept_id:
+            continue
+        if assignment.program_id and assignment.program_id != target.program_id:
+            continue
+        if assignment.section_id and assignment.section_id != target.section_id:
+            continue
+        return True
+    return False
+
+
 def authorize_object(ctx: dict, session, obj: Any, action: str = "read", *, allow_dean: bool = True) -> bool:
     """Return whether actor may perform action on obj; raise 403 on denial."""
     actor = actor_hierarchy(ctx, session)
@@ -104,8 +142,10 @@ def authorize_object(ctx: dict, session, obj: Any, action: str = "read", *, allo
         raise HTTPException(403, "Academic object is outside the tenant scope")
     office = ctx.get("office_n")
     if allow_dean and office == 6:
-        return True
-    if office not in {10, 17, 11, 12, 13, 14}:
+        if dean_scope_allows(ctx, session, target):
+            return True
+        raise HTTPException(403, "Academic object is outside the Dean's assigned scope")
+    if office not in {10, 17, 11, 12, 13, 14, 41, 42, 43}:
         raise HTTPException(403, "Academic object is outside the actor scope")
     if not actor.dept_id:
         if office == 17 and actor.school_id and target.school_id == actor.school_id:

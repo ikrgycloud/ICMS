@@ -157,9 +157,13 @@ def policies(ctx=Depends(auth), s=Depends(db)):
 @router.get("/inbox")
 def decision_inbox(ctx=Depends(auth), s=Depends(db), state: str = ""):
     leadership(ctx)
-    query = s.query(D.AcademicProposal).filter(D.AcademicProposal.tenant_id == TENANT)
+    # An inbox is an assigned decision queue, never a tenant-wide proposal
+    # register. This prevents one Dean from seeing another approver's work.
+    query = s.query(D.AcademicProposal).filter(
+        D.AcademicProposal.tenant_id == ctx["tenant_id"],
+        D.AcademicProposal.assigned_to_office_n == ctx["office_n"],
+    )
     if ctx["office_n"] != 6:
-        query = query.filter(D.AcademicProposal.assigned_to_office_n == ctx["office_n"])
         scope_ref = (ctx.get("scope_ref") or "").removeprefix("dept_").removeprefix("scope_")
         if scope_ref and s.get(D.Department, scope_ref):
             query = query.filter((D.AcademicProposal.dept_id == scope_ref) | (D.AcademicProposal.dept_id == None))
@@ -507,11 +511,18 @@ def set_workload_rule(body: WorkloadRuleIn, ctx=Depends(auth), s=Depends(db)):
     return {"rule": {"id": row.id, "term": row.term, "min_units": row.min_units, "max_units": row.max_units, "overload_threshold": row.overload_threshold, "underload_threshold": row.underload_threshold}}
 
 
+@router.get("/faculty/workload")
 @router.get("/faculty/workload/{term}")
-def faculty_workload(term: str, ctx=Depends(auth), s=Depends(db)):
+def faculty_workload(term: str = "", ctx=Depends(auth), s=Depends(db)):
     leadership(ctx)
-    rule = s.query(D.FacultyWorkloadRule).filter(D.FacultyWorkloadRule.tenant_id == TENANT, D.FacultyWorkloadRule.term == term, D.FacultyWorkloadRule.active == True).order_by(D.FacultyWorkloadRule.id.desc()).first()
-    allocations = s.query(D.FacultyAllocation).filter(D.FacultyAllocation.tenant_id == TENANT, D.FacultyAllocation.term == term, D.FacultyAllocation.status == "APPROVED").all()
+    rule_query = s.query(D.FacultyWorkloadRule).filter(D.FacultyWorkloadRule.tenant_id == ctx["tenant_id"], D.FacultyWorkloadRule.active == True)
+    if term:
+        rule_query = rule_query.filter(D.FacultyWorkloadRule.term == term)
+    rule = rule_query.order_by(D.FacultyWorkloadRule.id.desc()).first()
+    allocation_query = s.query(D.FacultyAllocation).filter(D.FacultyAllocation.tenant_id == ctx["tenant_id"], D.FacultyAllocation.status == "APPROVED")
+    if term:
+        allocation_query = allocation_query.filter(D.FacultyAllocation.term == term)
+    allocations = allocation_query.all()
     totals = {}
     for item in allocations: totals[item.faculty_person_id] = totals.get(item.faculty_person_id, 0) + (item.workload_units or 0)
     return {"term": term, "rule": {"min_units": rule.min_units, "max_units": rule.max_units, "overload_threshold": rule.overload_threshold, "underload_threshold": rule.underload_threshold} if rule else None, "faculty": [{"faculty_id": key, "workload_units": value, "status": "overload" if rule and value > rule.overload_threshold else "underload" if rule and value < rule.underload_threshold else "within_threshold"} for key, value in totals.items()]}

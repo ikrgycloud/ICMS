@@ -12,7 +12,7 @@ const DAY_OPTIONS = [
   { value: 5, label: 'Saturday' },
 ]
 
-export default function Academics({ caps }: { caps: any }) {
+export default function Academics({ caps, go }: { caps: any, go?: (view: string) => void }) {
   const [tab, setTab] = useState<'sections' | 'courses'>('sections')
   const [sections, setSections] = useState<any>(null)
   const [courses, setCourses] = useState<any>(null)
@@ -147,7 +147,7 @@ export default function Academics({ caps }: { caps: any }) {
       <PageHead
         title="Academics"
         sub="Course catalog, sections, timetable management, and targeted student notices"
-        right={<GatedBtn can={!!caps.create_section} onClick={() => { setForm({ ...form, course_id: courses.courses[0]?.id || '' }); setShowAdd(true) }}>+ Create section</GatedBtn>}
+        right={<><GatedBtn can={!!caps.create_section} onClick={() => { setForm({ ...form, course_id: courses.courses[0]?.id || '' }); setShowAdd(true) }}>+ Create section</GatedBtn>{caps.assign_faculty && <button className="btn btn-out" type="button" onClick={() => go?.('source_allocation')}>Faculty allocation</button>}</>}
       />
 
       <div className="tabs">

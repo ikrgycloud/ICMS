@@ -218,6 +218,8 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
         proposal.status_version,
         decision === "approve" ? "" : "Decision recorded by Dean Academics",
       );
+      setModal(false);
+      setDetail(null);
       await load();
     } catch (e: any) {
       setError(e.message || "Could not record decision.");
@@ -399,7 +401,7 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
                     <b>{pending.length}</b>
                   </div>
                   <p>
-                    HODs and Academic Coordinators propose changes. Dean Academics reviews,
+                    Academic Office proposes changes. Dean Academics reviews,
                     decides, publishes, and all actions are recorded in the audit trail.
                   </p>
                 </div>
@@ -410,7 +412,7 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
       )}
       {modal && !detail && (
         <Modal
-          title={form.id ? "Edit Academic Event" : "Add Academic Event"}
+          title={form.id ? "Edit Academic Event" : "Propose Academic Event"}
           onClose={() => setModal(false)}
           footer={
             <>
@@ -509,18 +511,29 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
             setModal(false);
             setDetail(null);
           }}
+          footer={
+            <>
+              <button className="btn btn-out" onClick={() => { setModal(false); setDetail(null); }}>Close</button>
+              {canDecide && ["SUBMITTED", "RESUBMITTED"].includes(detail.state) && (
+                <>
+                  <button className="btn btn-rose" disabled={saving} onClick={() => decide(detail, "reject")}>Reject</button>
+                  <button className="btn btn-crimson" disabled={saving} onClick={() => decide(detail, "approve")}>Approve</button>
+                </>
+              )}
+            </>
+          }
         >
           <div className="calendar-detail">
-            <Pill s={detail.status || "published"} />
-            <h3>{detail.title}</h3>
-            <p>{detail.description || "No additional notes were provided."}</p>
+            <Pill s={detail.state || detail.status || "published"} />
+            <h3>{detail.payload?.title || detail.title}</h3>
+            <p>{detail.payload?.description || detail.description || "No additional notes were provided."}</p>
             <div className="snap">
               <span>Date range</span>
-              <b>{dates(detail.start_date, detail.end_date)}</b>
+              <b>{dates(detail.payload?.start_date || detail.start_date, detail.payload?.end_date || detail.end_date)}</b>
             </div>
             <div className="snap">
               <span>Campus</span>
-              <b>{detail.campus}</b>
+              <b>{detail.payload?.campus || detail.campus || "All Campuses"}</b>
             </div>
           </div>
         </Modal>

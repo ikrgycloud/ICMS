@@ -8,6 +8,9 @@
     "build": "vite build",
     "test:rbac-matrix": "node tests/rbac-matrix-contract.cjs",
     "test:e2e:phase11": "node tests/phase11-browser-e2e.cjs",
+    "test:e2e:dean-data-flow": "node tests/dean-data-flow-e2e.cjs",
+    "test:e2e:dean-program-flow": "node tests/dean-program-flow-e2e.cjs",
+    "test:e2e:dean-allocation-flow": "node tests/dean-allocation-flow-e2e.cjs",
     "preview": "vite preview --host --port 5173"
   },
   "dependencies": {

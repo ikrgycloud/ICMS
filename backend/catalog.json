@@ -1501,6 +1501,42 @@
    ],
    "scope": "Governance oversight (read + reserved approvals)",
    "reports_to": "\u2014"
+  },
+  {
+   "n": 41,
+   "name": "Program Coordinator",
+   "level": 6,
+   "purpose": "Owns programme-scoped academic planning and curriculum change requests.",
+   "internal_roles": ["Program Coordinator"],
+   "functionalities": ["Create programme proposals", "Prepare curriculum requests", "Track Dean decisions"],
+   "workflows": ["Draft programme request", "Submit to Dean", "Receive approved implementation"],
+   "modules": ["Academic Management", "Curriculum", "Approvals", "Audit"],
+   "scope": "Assigned school, department and programme only",
+   "reports_to": "Dean Academics"
+  },
+  {
+   "n": 42,
+   "name": "Academic Office",
+   "level": 6,
+   "purpose": "Owns the institutional academic calendar, milestones and examination windows.",
+   "internal_roles": ["Academic Office Officer"],
+   "functionalities": ["Create calendar proposals", "Manage academic milestones", "Track Dean decisions"],
+   "workflows": ["Draft calendar change", "Submit to Dean", "Publish approved calendar"],
+   "modules": ["Academic Calendar", "Academic Management", "Approvals", "Audit"],
+   "scope": "Assigned school or institutional academic calendar scope",
+   "reports_to": "Dean Academics"
+  },
+  {
+   "n": 43,
+   "name": "Timetable Coordinator",
+   "level": 6,
+   "purpose": "Owns scoped teaching timetable preparation, conflict detection and resolution.",
+   "internal_roles": ["Timetable Coordinator"],
+   "functionalities": ["Manage timetable entries", "Detect conflicts", "Resolve timetable exceptions"],
+   "workflows": ["Prepare timetable", "Resolve conflicts", "Submit exceptions"],
+   "modules": ["Academic Management", "Approvals", "Audit"],
+   "scope": "Assigned school, department, programme and section only",
+   "reports_to": "Dean Academics"
   }
  ]
 }

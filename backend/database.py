@@ -43,6 +43,19 @@ engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=Tr
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
+def demo_data_enabled() -> bool:
+    """Whether development-only identities and operational fixtures may exist.
+
+    Production is deliberately opt-in: a missing flag must never populate a
+    university database with users, curriculum, results, or timetable data.
+    Local development retains the existing convenient bootstrap behaviour.
+    """
+    configured = os.environ.get("DEMO_DATA_ENABLED")
+    if configured is not None:
+        return configured.strip().lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("ICMS_ENVIRONMENT", "development").lower() in {"development", "dev", "test", "testing"}
+
+
 def ensure_versioned_migrations():
     """Apply Admissions schema revisions without resetting existing data."""
     from migrations.runner import upgrade
@@ -73,6 +86,7 @@ DEMO_USERNAMES = {
     30: "hostel_warden", 31: "transport", 32: "purchase", 33: "store",
     34: "security", 35: "front_office", 36: "student", 37: "parent",
     38: "alumni", 39: "external_auditor", 40: "governing_body",
+    41: "program_coordinator", 42: "academic_office", 43: "timetable_coordinator",
 }
 
 

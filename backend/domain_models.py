@@ -1434,6 +1434,29 @@ class AcademicProposalEvent(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class DeanScopeAssignment(Base):
+    """A time-bound, persisted boundary for a Dean Academics appointment.
+
+    An assignment can represent a whole school, or be narrowed to a department,
+    programme, and section.  Multiple active rows compose a Dean's authority;
+    an absent assignment never implies institution-wide access in production.
+    """
+    __tablename__ = "dean_scope_assignments"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True, nullable=False)
+    dean_user_id = Column(String, ForeignKey("users.id"), index=True, nullable=False)
+    school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True)
+    dept_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True)
+    program_id = Column(String, ForeignKey("programs.id"), nullable=True, index=True)
+    section_id = Column(String, ForeignKey("sections.id"), nullable=True, index=True)
+    active = Column(Boolean, default=True, nullable=False, index=True)
+    effective_from = Column(DateTime, default=datetime.utcnow, nullable=False)
+    effective_to = Column(DateTime, nullable=True)
+    created_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class FacultyAllocation(Base):
     __tablename__ = "faculty_allocations"
     id = Column(String, primary_key=True)

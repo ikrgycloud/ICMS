@@ -2815,6 +2815,25 @@ def _bind_portal_accounts(s):
                 candidate.school_id = candidate.school_id or dep.school_id
                 candidate.program_id = candidate.program_id or "prog_cse_btech"
 
+    # Program Coordinator has programme-scoped proposal authority.  It must
+    # therefore be bound to a real staff/department/programme hierarchy; a
+    # global placeholder scope makes the UI advertise a proposal action while
+    # returning no selectable owning departments.
+    program_coordinator_login = _user("program_coordinator")
+    if program_coordinator_login and "CSE" in dept_ids:
+        dep = s.query(D.Department).filter(D.Department.code == "CSE").first()
+        if dep:
+            program_coordinator_login.scope_ref = dep.id
+            candidate = (s.query(D.StaffMember)
+                         .filter(D.StaffMember.dept_id == dep.id,
+                                 (D.StaffMember.user_id == None) | (D.StaffMember.user_id == program_coordinator_login.id))
+                         .order_by(D.StaffMember.date_joined).first())
+            if candidate:
+                candidate.user_id = program_coordinator_login.id
+                candidate.office_n = 41
+                candidate.school_id = candidate.school_id or dep.school_id
+                candidate.program_id = candidate.program_id or "prog_cse_btech"
+
     s.commit()
 
 
@@ -3941,7 +3960,13 @@ def _backfill_teaching_foundation(s):
             allocation = (s.query(D.TeachingAllocation)
                           .filter(D.TeachingAllocation.section_id == record.section_id,
                                   D.TeachingAllocation.status == "active").first())
-            faculty_id = allocation.faculty_id if allocation else ""
+            # A class session is accountable to a real faculty member.  Some
+            # historic attendance fixtures belong to sections with no active
+            # allocation; retain those legacy rows unlinked instead of writing
+            # an empty value into the faculty foreign key.
+            if not allocation or not allocation.faculty_id:
+                continue
+            faculty_id = allocation.faculty_id
             session = D.ClassSession(
                 id=f"session_legacy_{record.section_id}_{record.on_date.isoformat()}", tenant_id=TENANT,
                 allocation_id=allocation.id if allocation else None, section_id=record.section_id,
@@ -3985,6 +4010,20 @@ def _seed_marks_submission_demo(s):
     ]
     now = datetime.utcnow()
     for key, marks_state, stage, workflow_state, comment in examples:
+        # ``Assessment.workflow_instance_id`` is a database foreign key.  The
+        # workflow must be flushed before the assessment is added: otherwise a
+        # fresh PostgreSQL seed can batch the assessment first and reject the
+        # fixture, leaving the live demo dataset only partially populated.
+        workflow = None
+        if key != "draft":
+            workflow_id = f"wf_phase3_marks_{key}"
+            workflow = _ensure(s, WorkflowInstance, workflow_id, lambda workflow_id=workflow_id: WorkflowInstance(
+                id=workflow_id, tenant_id=TENANT, process_key="marks_submission", label="Marks submission", office_n=16,
+                title=f"Phase 3 {key.title()} marks for {section.section_code}", initiator_id=professor.id, initiator_name=staff.name,
+                scope_level="department",
+            ))
+            workflow.state = workflow_state; workflow.current_stage = stage; workflow.updated_at = now
+            s.flush()
         assessment_id = f"phase3_marks_{key}"
         assessment = _ensure(s, D.Assessment, assessment_id, lambda assessment_id=assessment_id, key=key: D.Assessment(
             id=assessment_id, tenant_id=TENANT, section_id=section.id, name=f"Phase 3 {key.title()} marks",
@@ -4000,13 +4039,6 @@ def _seed_marks_submission_demo(s):
         assessment.published_at = now if key == "published" else None; assessment.published_by = controller.username if key == "published" and controller else ""
         assessment.marks_published_at = now if key == "published" else None; assessment.marks_approved_at = now if key == "published" else None
         if key != "draft":
-            workflow_id = f"wf_phase3_marks_{key}"
-            workflow = _ensure(s, WorkflowInstance, workflow_id, lambda workflow_id=workflow_id: WorkflowInstance(
-                id=workflow_id, tenant_id=TENANT, process_key="marks_submission", label="Marks submission", office_n=16,
-                title=f"{assessment.name} for {section.section_code}", initiator_id=professor.id, initiator_name=staff.name,
-                scope_level="department",
-            ))
-            workflow.state = workflow_state; workflow.current_stage = stage; workflow.updated_at = now
             assessment.workflow_instance_id = workflow.id
             s.flush()
             decisions_by_key = {
@@ -4108,6 +4140,11 @@ def _ensure_legacy_student_roll_login(s):
     user = s.get(User, "user_36")
     if current and current.id != student.id:
         current.user_id = None
+    # ``student`` is a documented convenience login mapped by ``/auth/login``
+    # to this stable roll-number account.  Older seed databases retained the
+    # original placeholder hash on user_36, making that live login unusable.
+    user.password_hash = pwhash("demo123")
+    user.status = "active"
     user.username = "25ECE072"
     user.scope_ref = student.id
     student.user_id = user.id
@@ -4137,15 +4174,22 @@ def _seed_faculty_leave_demo(s):
     for key, kind, offset, reason, status, stage in examples:
         leave_id = f"phase5_leave_{key}"
         start = today + timedelta(days=offset)
+        # Persist the referenced workflow before inserting a new leave request
+        # that carries its foreign key.  PostgreSQL otherwise rejects a fresh
+        # demo seed when SQLAlchemy batches the leave rows first.
+        workflow = None
+        if stage:
+            workflow_id = f"phase5_wf_{key}"
+            workflow = _ensure(s, WorkflowInstance, workflow_id, lambda workflow_id=workflow_id: WorkflowInstance(id=workflow_id, tenant_id=TENANT, process_key="faculty_leave", label="Faculty leave", office_n=25, title=f"{kind} leave: {start.isoformat()} to {(start + timedelta(days=1)).isoformat()}", initiator_id=professor.id, initiator_name=staff.name, scope_level="department"))
+            workflow.process_key = "faculty_leave"; workflow.label = "Faculty leave"; workflow.office_n = 25; workflow.initiator_id = professor.id; workflow.initiator_name = staff.name
+            workflow.state = status; workflow.current_stage = stage; workflow.scope_level = "department"; workflow.updated_at = datetime.utcnow()
+            s.flush()
         leave = _ensure(s, D.LeaveRequest, leave_id, lambda leave_id=leave_id: D.LeaveRequest(id=leave_id, tenant_id=TENANT, staff_id=staff.id, staff_name=staff.name))
         leave.staff_id = staff.id; leave.staff_name = staff.name; leave.kind = kind; leave.from_date = start; leave.to_date = start + timedelta(days=1)
         leave.days = 2; leave.reason = reason; leave.requested_by = professor.id; leave.half_day = False; leave.status = status
         leave.submitted_at = datetime.combine(today, datetime.min.time()) if stage else None; leave.updated_at = datetime.utcnow()
         if stage:
-            workflow_id = f"phase5_wf_{key}"
-            workflow = _ensure(s, WorkflowInstance, workflow_id, lambda workflow_id=workflow_id: WorkflowInstance(id=workflow_id, tenant_id=TENANT, process_key="faculty_leave", label="Faculty leave", office_n=25, title=f"{kind} leave: {start.isoformat()} to {(start + timedelta(days=1)).isoformat()}", initiator_id=professor.id, initiator_name=staff.name, scope_level="department"))
-            workflow.process_key = "faculty_leave"; workflow.label = "Faculty leave"; workflow.office_n = 25; workflow.initiator_id = professor.id; workflow.initiator_name = staff.name
-            workflow.state = status; workflow.current_stage = stage; workflow.scope_level = "department"; workflow.updated_at = datetime.utcnow(); leave.workflow_instance_id = workflow.id
+            leave.workflow_instance_id = workflow.id
             s.flush()
             if status == "returned": leave.returned_comment = "Please clarify the handover plan before resubmitting."
             if status == "rejected": leave.decided_by = hod_staff.name
