@@ -36,6 +36,8 @@ from migrations import v0034_administration_evidence_verification
 from migrations import v0035_administration_approval_delegation
 from migrations import v0036_administration_finance_controls
 from migrations import v0037_administration_outbox_lease
+from migrations import v0008_transport_route_status
+from migrations import v0009_faculty_teaching
 
 MIGRATIONS = [v0001_admissions_foundation, v0002_repair_legacy_application_status,
               v0003_admission_seat_pool_identity, v0004_admissions_phase2_application_context]
@@ -72,6 +74,8 @@ MIGRATIONS.append(v0034_administration_evidence_verification)
 MIGRATIONS.append(v0035_administration_approval_delegation)
 MIGRATIONS.append(v0036_administration_finance_controls)
 MIGRATIONS.append(v0037_administration_outbox_lease)
+MIGRATIONS.append(v0008_transport_route_status)
+MIGRATIONS.append(v0009_faculty_teaching)
 
 
 def upgrade(engine):

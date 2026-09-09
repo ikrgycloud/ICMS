@@ -28,6 +28,7 @@ from capabilities import (modules_for_office, module_meta, MODULE_ACTIONS,
 import domain_models as D
 from academic_scope import authorize_object, hierarchy
 from governance_engine import validate_transition
+from teaching import faculty_owns_section
 from models import User, Person, OrgScope, WorkflowInstance, Notification
 
 router = APIRouter(prefix="/api")
@@ -559,6 +560,26 @@ def _staff_profile(s, ctx):
     return s.query(D.StaffMember).filter(D.StaffMember.user_id == ctx["sub"]).first()
 
 
+def _faculty_or_403(s, ctx):
+    staff = _staff_profile(s, ctx)
+    if not staff or ctx["office_n"] not in {11, 12, 13, 14}:
+        raise HTTPException(403, "Teaching faculty access required")
+    return staff
+
+
+def _session_or_404(s, session_id):
+    session = s.query(D.ClassSession).get(session_id)
+    if not session:
+        raise HTTPException(404, "Class session not found")
+    return session
+
+
+def _checkin_window_open(session, now):
+    if not session.scheduled_start or not session.scheduled_end:
+        return True
+    return session.scheduled_start - timedelta(minutes=30) <= now <= session.scheduled_end + timedelta(minutes=30)
+
+
 def _section_or_404(s, section_id: str):
     row = s.query(D.Section).get(section_id)
     if not row:
@@ -662,7 +683,9 @@ def principal_overview(academic_year: str = "", student_semester: str = "", ctx=
         except (TypeError, ValueError): return ""
     years = sorted(set(filter(None, (academic_year_for(t) for t in terms))), reverse=True)
     selected_year = academic_year if academic_year in years else (years[0] if years else "")
-    student_query = s.query(D.Student).filter(D.Student.status == "active")
+    student_query = _student_scope(
+        s.query(D.Student).filter(D.Student.status == "active"), ctx
+    )
     try:
         selected_student_semester = int(student_semester) if student_semester else 0
     except (TypeError, ValueError):
@@ -3125,11 +3148,11 @@ def attendance_roster(section_id: str, ctx=Depends(auth), s=Depends(db)):
 
 class MarkAttendanceIn(BaseModel):
     section_id: str
+    class_session_id: str
     present_ids: list[str] = []
     absent_ids: list[str] = []
+    statuses: dict[str, str] = {}
     on_date: str = ""
-
-
 @router.post("/attendance/mark")
 def mark_attendance(body: MarkAttendanceIn, ctx=Depends(auth), s=Depends(db)):
     dec, verb = gate(s, ctx, "attendance", "mark")
@@ -3139,18 +3162,43 @@ def mark_attendance(body: MarkAttendanceIn, ctx=Depends(auth), s=Depends(db)):
     if set(body.present_ids).union(body.absent_ids) - enrolled_ids:
         raise HTTPException(403, "Attendance includes a student outside this section")
     d = date.fromisoformat(body.on_date) if body.on_date else date.today()
+    staff = _faculty_or_403(s, ctx)
+    session = _session_or_404(s, body.class_session_id)
+    if session.section_id != body.section_id:
+        raise HTTPException(422, "Class session does not belong to this section")
+    if session.faculty_id != staff.id or not faculty_owns_section(s, staff.id, body.section_id, session.session_date):
+        raise HTTPException(403, "You are not assigned to this class session")
+    if not session.checked_in_at:
+        raise HTTPException(409, "Check in to this class session before marking attendance")
+    if session.status == "attendance_finalized":
+        raise HTTPException(409, "Attendance is finalized; use the correction workflow when it is available")
+    if session.status in {"cancelled", "completed"}:
+        raise HTTPException(409, "Attendance cannot be recorded for this session")
+    d = date.fromisoformat(body.on_date) if body.on_date else session.session_date
+    if d != session.session_date:
+        raise HTTPException(422, "Attendance date must match the selected class session")
+    if not _checkin_window_open(session, datetime.utcnow()):
+        raise HTTPException(422, "Attendance marking is outside the allowed session window")
     who = actor_name(s, ctx)
+    roster_ids = {row.student_id for row in s.query(D.Enrollment).filter(D.Enrollment.section_id == body.section_id, D.Enrollment.status == "enrolled").all()}
+    raw_statuses = dict(body.statuses)
+    raw_statuses.update({student_id: "present" for student_id in body.present_ids})
+    raw_statuses.update({student_id: "absent" for student_id in body.absent_ids})
+    allowed_statuses = {"present", "absent", "late", "excused"}
+    if not raw_statuses or not set(raw_statuses).issubset(roster_ids):
+        raise HTTPException(422, "Attendance may only be recorded for active students in this section")
+    if any(status.lower() not in allowed_statuses for status in raw_statuses.values()):
+        raise HTTPException(422, "Attendance status must be Present, Absent, Late or Excused")
 
-    def upsert(student_id: str, present: bool):
+    def upsert(student_id: str, status: str):
         row = (
             s.query(D.AttendanceRecord)
-            .filter(
-                D.AttendanceRecord.section_id == body.section_id,
-                D.AttendanceRecord.student_id == student_id,
-                D.AttendanceRecord.on_date == d,
-            )
+            .filter(D.AttendanceRecord.class_session_id == session.id,
+                    D.AttendanceRecord.student_id == student_id)
             .first()
         )
+        if row and row.finalized_at:
+            raise HTTPException(409, "Attendance is finalized; use the correction workflow when it is available")
         if row is None:
             row = D.AttendanceRecord(
                 id=uid(),
@@ -3158,26 +3206,25 @@ def mark_attendance(body: MarkAttendanceIn, ctx=Depends(auth), s=Depends(db)):
                 section_id=body.section_id,
                 student_id=student_id,
                 on_date=d,
+                class_session_id=session.id,
             )
             s.add(row)
-        row.present = present
-        row.status = "present" if present else "absent"
+        normalized = status.lower()
+        row.present = normalized in {"present", "late", "excused"}
+        row.status = normalized
         row.note = ""
         row.marked_by = who
+        row.version_no = (row.version_no or 0) + 1 if row.id else 1
         row.updated_at = datetime.utcnow()
 
-    for sid in body.present_ids:
-        upsert(sid, True)
-    for sid in body.absent_ids:
-        upsert(sid, False)
+    for sid, status in raw_statuses.items():
+        upsert(sid, status)
     s.commit()
-    n = len(body.present_ids) + len(body.absent_ids)
+    n = len(raw_statuses)
     write_audit(s, ctx["sub"], who, ctx["office_n"], "attendance.mark",
                 f"section:{body.section_id}", "", "recorded",
                 f"Marked {n} students on {d.isoformat()}")
     return {"marked": n, "decision": dec.as_dict()}
-
-
 # --------------------------------------------------------------------------- #
 #  EXAMINATIONS: marks entry + result publication (SoD-separated)
 # --------------------------------------------------------------------------- #
@@ -3544,7 +3591,7 @@ def update_assessment(assessment_id: str, body: AssessmentUpsertIn, ctx=Depends(
 class EnterMarksIn(BaseModel):
     assessment_id: str
     marks: dict  # {student_id: score}
-
+MARKS_EDITABLE_STATES = {"draft", "returned"}
 
 @router.post("/exams/marks")
 def enter_marks(body: EnterMarksIn, ctx=Depends(auth), s=Depends(db)):
@@ -3558,6 +3605,8 @@ def enter_marks(body: EnterMarksIn, ctx=Depends(auth), s=Depends(db)):
         raise HTTPException(403, "You cannot enter marks for this section")
     if a.locked:
         raise HTTPException(409, "Assessment is locked; marks cannot be changed")
+    if (a.marks_state or "draft") not in MARKS_EDITABLE_STATES:
+        raise HTTPException(409, "Marks are submitted for review and cannot be edited")
     who = actor_name(s, ctx)
     valid_student_ids = {
         row.student_id
@@ -3568,22 +3617,28 @@ def enter_marks(body: EnterMarksIn, ctx=Depends(auth), s=Depends(db)):
     for stu_id, score in body.marks.items():
         if stu_id not in valid_student_ids:
             raise HTTPException(400, "Marks can be entered only for students enrolled in this section")
+        try:
+            score = float(score)
+        except (TypeError, ValueError):
+            raise HTTPException(422, "Marks must be numeric")
+        if score < 0 or score > a.max_marks:
+            raise HTTPException(422, f"Marks must be between 0 and {a.max_marks}")
         existing = s.query(D.Mark).filter(D.Mark.assessment_id == a.id,
                                           D.Mark.student_id == stu_id).first()
         if existing:
-            existing.score = float(score)
+            existing.score = score
             existing.status = "draft"
             existing.updated_at = datetime.utcnow()
         else:
             s.add(D.Mark(id=uid(), tenant_id=TENANT, assessment_id=a.id,
-                         student_id=stu_id, score=float(score), entered_by=who,
+                          student_id=stu_id, score=score, entered_by=who,
                          status="draft", updated_at=datetime.utcnow()))
     s.commit()
     write_audit(s, ctx["sub"], who, ctx["office_n"], "marks.enter",
                 f"assessment:{a.id}", "", "entered", f"Entered {len(body.marks)} marks for {a.name}")
-    return {"entered": len(body.marks), "decision": dec.as_dict()}
-
-
+    total_entered = s.query(D.Mark).filter(D.Mark.assessment_id == a.id).count()
+    return {"assessment_id": a.id, "entered": len(body.marks), "total_entered": total_entered,
+            "decision": dec.as_dict()}
 class PublishMarksIn(BaseModel):
     assessment_id: str
 
@@ -4836,14 +4891,314 @@ def allocate_hostel(alloc_id: str, ctx=Depends(auth), s=Depends(db)):
     return {"status": "allocated", "decision": dec.as_dict()}
 
 
+class TransportRouteIn(BaseModel):
+    name: str
+    route_code: str = ""
+    vehicle_no: str = ""
+    seats: int = Field(40, ge=1, le=200)
+
+class TransportStopIn(BaseModel):
+    route_id: str
+    name: str
+    sequence: int = Field(1, ge=1)
+    address: str = ""
+    pickup_time: str = ""
+    drop_time: str = ""
+    latitude: float | None = None
+    longitude: float | None = None
+
+class TransportVehicleIn(BaseModel):
+    number: str = ""
+    vehicle_number: str = ""
+    kind: str = "Bus"
+    capacity: int = Field(40, ge=1, le=200)
+    status: str = "available"
+
+class TransportDriverIn(BaseModel):
+    name: str
+    employee_id: str = ""
+    phone: str = ""
+    license_no: str = ""
+    license_number: str = ""
+    license_expiry: date | None = None
+
+class TransportRequestIn(BaseModel):
+    route_id: str
+    stop_id: str = ""
+    pickup_stop_id: str = ""
+
+class TransportAllocationIn(BaseModel):
+    student_id: str
+    route_id: str
+    stop_id: str = ""
+    pickup_stop_id: str = ""
+    vehicle_id: str
+    driver_id: str | None = None
+
+def _transport_bundle(s):
+    routes = s.query(D.TransportRoute).filter(D.TransportRoute.status != "inactive").all()
+    vehicles = s.query(D.TransportVehicle).all()
+    drivers = s.query(D.TransportDriver).all()
+    reqs = s.query(D.TransportRequest).order_by(desc(D.TransportRequest.created_at)).all()
+    allocs = s.query(D.TransportAllocation).filter(D.TransportAllocation.status == "active").all()
+    students = s.query(D.Student).filter(D.Student.status == "active").all()
+    student_map = {x.id: x for x in students}
+    route_map = {x.id: x for x in routes}
+    vehicle_map = {x.id: x for x in vehicles}
+    driver_map = {x.id: x for x in drivers}
+    def stop_id(body): return body.stop_id or body.pickup_stop_id
+    def allocation_driver(a):
+        vehicle = vehicle_map.get(a.vehicle_id)
+        driver_id = a.driver_id or (vehicle.driver_id if vehicle else None)
+        return driver_id, driver_map.get(driver_id)
+    def allocation_payload(a):
+        student = student_map.get(a.student_id)
+        vehicle = vehicle_map.get(a.vehicle_id)
+        driver_id, driver = allocation_driver(a)
+        stop = s.get(D.TransportStop, a.stop_id)
+        route = route_map.get(a.route_id)
+        return {"id": a.id, "student_id": a.student_id, "student_name": student.name if student else a.student_id,
+                "roll_no": student.roll_no if student else "", "route_id": a.route_id,
+                "route": route.name if route else a.route_id, "stop_id": a.stop_id,
+                "pickup_stop_id": a.stop_id, "pickup": stop.name if stop else "",
+                "vehicle_id": a.vehicle_id, "vehicle": vehicle.number if vehicle else a.vehicle_id,
+                "driver_id": driver_id, "driver": driver.name if driver else "", "status": a.status}
+    return {
+        "routes": [{"id": r.id, "name": r.name, "route_code": r.id[:6].upper(), "status": "ACTIVE", "vehicle_no": r.vehicle_no, "seats": r.seats,
+                    "taken": sum(a.vehicle_id == r.vehicle_no for a in allocs),
+                    "stops": [{"id": x.id, "name": x.name, "sequence": x.sequence, "address": x.address,
+                               "pickup_time": x.pickup_time, "drop_time": x.drop_time,
+                               "latitude": x.latitude, "longitude": x.longitude}
+                              for x in s.query(D.TransportStop).filter(D.TransportStop.route_id == r.id).order_by(D.TransportStop.sequence).all()]}
+                   for r in routes],
+        "vehicles": [{"id": v.id, "number": v.number, "vehicle_number": v.number, "kind": v.kind, "vehicle_type": v.kind, "capacity": v.capacity,
+                      "status": v.status, "occupied": sum(a.vehicle_id == v.id for a in allocs),
+                      "driver_id": v.driver_id} for v in vehicles],
+        "drivers": [{"id": d.id, "name": d.name, "employee_id": d.employee_id, "phone": d.phone,
+                     "license_no": d.license_no, "license_expiry": d.license_expiry.isoformat() if d.license_expiry else "",
+                     "status": d.status} for d in drivers],
+        "requests": [{"id": q.id, "student_id": q.student_id, "student_name": (s.get(D.Student, q.student_id).name if s.get(D.Student, q.student_id) else q.student_id), "student": (s.get(D.Student, q.student_id).name if s.get(D.Student, q.student_id) else q.student_id),
+                      "route_id": q.route_id, "stop_id": q.stop_id, "pickup_stop_id": q.stop_id, "status": q.status.upper()} for q in reqs],
+        "allocations": [allocation_payload(a) for a in allocs],
+        "students": [{"id": x.id, "roll_no": x.roll_no, "name": x.name} for x in students],
+    }
+
 @router.get("/transport")
 def transport(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "transport", "view")[0])
-    rows = s.query(D.TransportRoute).all()
-    return {"routes": [{"id": r.id, "name": r.name, "stops": r.stops,
-                        "vehicle": r.vehicle_no, "seats": r.seats,
-                        "taken": r.seats_taken, "free": r.seats - r.seats_taken}
-                       for r in rows]}
+    return _transport_bundle(s)
+
+@router.post("/transport/routes")
+def create_transport_route(body: TransportRouteIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
+    row = D.TransportRoute(id=uid(), tenant_id=TENANT, name=body.name, vehicle_no=body.vehicle_no, seats=body.seats, status="active")
+    s.add(row); s.commit(); return {"id": row.id, "decision": dec.as_dict()}
+
+@router.post("/transport/stops")
+def create_transport_stop(body: TransportStopIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
+    if not s.get(D.TransportRoute, body.route_id): raise HTTPException(404, "Route not found")
+    row = D.TransportStop(id=uid(), tenant_id=TENANT, **body.model_dump())
+    s.add(row); s.commit(); return {"id": row.id, "decision": dec.as_dict()}
+
+@router.post("/transport/vehicles")
+def create_transport_vehicle(body: TransportVehicleIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    number = body.number or body.vehicle_number
+    if not number: raise HTTPException(422, "Vehicle number is required")
+    if s.query(D.TransportVehicle).filter(D.TransportVehicle.number == number).first(): raise HTTPException(409, "Vehicle number already exists")
+    row = D.TransportVehicle(id=uid(), tenant_id=TENANT, number=number, kind=body.kind, capacity=body.capacity, status=(body.status or "available").lower()); s.add(row); s.commit(); return {"id": row.id, "decision": dec.as_dict()}
+
+@router.post("/transport/drivers")
+def create_transport_driver(body: TransportDriverIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    row = D.TransportDriver(id=uid(), tenant_id=TENANT, name=body.name, employee_id=body.employee_id, phone=body.phone, license_no=body.license_no or body.license_number, license_expiry=body.license_expiry); s.add(row); s.commit(); return {"id": row.id, "decision": dec.as_dict()}
+
+@router.post("/transport/requests")
+def create_transport_request(body: TransportRequestIn, ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "transport", "view")[0])
+    student = s.query(D.Student).filter(or_(D.Student.user_id == ctx["sub"], D.Student.id == ctx.get("scope_ref"))).first()
+    if not student: raise HTTPException(403, "Student account required")
+    if s.query(D.TransportRequest).filter(D.TransportRequest.student_id == student.id, D.TransportRequest.status == "pending").first(): raise HTTPException(409, "Request already pending")
+    stop_id = body.stop_id or body.pickup_stop_id
+    if not stop_id: raise HTTPException(422, "Pickup stop is required")
+    row = D.TransportRequest(id=uid(), tenant_id=TENANT, student_id=student.id, route_id=body.route_id, stop_id=stop_id); s.add(row); s.commit(); return {"id": row.id, "status": row.status}
+
+@router.post("/transport/allocations")
+def create_transport_allocation(body: TransportAllocationIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    v = s.get(D.TransportVehicle, body.vehicle_id) or s.query(D.TransportVehicle).filter(D.TransportVehicle.number == body.vehicle_id).first()
+    # The UI historically used both ACTIVE and AVAILABLE (and older records
+    # may use ASSIGNED). Only maintenance/inactive vehicles must be blocked;
+    # assignment itself is a valid way to move an operational vehicle forward.
+    if not v or (v.status or "").strip().lower() in ("maintenance", "inactive", "retired"): raise HTTPException(400, "Vehicle is not available")
+    if s.query(D.TransportAllocation).filter(D.TransportAllocation.student_id == body.student_id, D.TransportAllocation.status == "active").first(): raise HTTPException(409, "Student already allocated")
+    occupied = s.query(D.TransportAllocation).filter(D.TransportAllocation.vehicle_id == v.id, D.TransportAllocation.status == "active").count()
+    if occupied >= v.capacity: raise HTTPException(400, "Vehicle has no available seats")
+    stop_id = body.stop_id or body.pickup_stop_id
+    row = D.TransportAllocation(id=uid(), tenant_id=TENANT, student_id=body.student_id, route_id=body.route_id, stop_id=stop_id, vehicle_id=body.vehicle_id, driver_id=body.driver_id); s.add(row); s.commit(); return {"id": row.id, "decision": dec.as_dict()}
+
+@router.post("/transport/requests/{request_id}/approve")
+def approve_transport_request(request_id: str, body: TransportAllocationIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    q = s.get(D.TransportRequest, request_id)
+    if not q or q.status != "pending": raise HTTPException(404, "Pending request not found")
+    q.status = "approved"
+    v = s.get(D.TransportVehicle, body.vehicle_id) or s.query(D.TransportVehicle).filter(D.TransportVehicle.number == body.vehicle_id).first()
+    if not v: raise HTTPException(404, "Vehicle not found")
+    s.add(D.TransportAllocation(id=uid(), tenant_id=TENANT, student_id=q.student_id, route_id=body.route_id, stop_id=body.stop_id or body.pickup_stop_id, vehicle_id=body.vehicle_id, driver_id=body.driver_id))
+    s.commit(); return {"status": q.status, "decision": dec.as_dict()}
+
+@router.post("/transport/requests/{request_id}/reject")
+def reject_transport_request(request_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    q=s.get(D.TransportRequest, request_id)
+    if not q: raise HTTPException(404, "Request not found")
+    q.status="rejected"; s.commit(); return {"status": q.status, "decision": dec.as_dict()}
+
+@router.put("/transport/allocations/{allocation_id}")
+def update_transport_allocation(allocation_id: str, body: TransportAllocationIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    a=s.get(D.TransportAllocation, allocation_id)
+    if not a: raise HTTPException(404, "Allocation not found")
+    for k in ("student_id","route_id","vehicle_id","driver_id"): setattr(a,k,getattr(body,k))
+    a.stop_id=body.stop_id or body.pickup_stop_id; s.commit(); return {"id":a.id,"decision":dec.as_dict()}
+
+@router.delete("/transport/allocations/{allocation_id}")
+def delete_transport_allocation(allocation_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    a=s.get(D.TransportAllocation, allocation_id)
+    if not a: raise HTTPException(404, "Allocation not found")
+    a.status="inactive"; s.commit(); return {"status":"inactive","decision":dec.as_dict()}
+
+@router.delete("/transport/routes/{route_id}")
+def delete_transport_route(route_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
+    r=s.get(D.TransportRoute, route_id)
+    if not r: raise HTTPException(404, "Route not found")
+    # Keep the route for history, but atomically remove its operational links.
+    # vehicle_no is the route assignment; clearing it leaves the vehicle and its
+    # driver assignment intact while making the vehicle route-less.
+    for allocation in s.query(D.TransportAllocation).filter(
+        D.TransportAllocation.route_id == route_id,
+        D.TransportAllocation.status == "active",
+    ).all():
+        allocation.status = "inactive"
+    r.status = "inactive"
+    r.vehicle_no = ""
+    s.commit()
+    return {"status":"inactive","decision":dec.as_dict()}
+
+@router.put("/transport/routes/{route_id}")
+def update_transport_route(route_id: str, body: TransportRouteIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
+    r = s.get(D.TransportRoute, route_id)
+    if not r: raise HTTPException(404, "Route not found")
+    r.name = body.name.strip() or r.name
+    r.vehicle_no = body.vehicle_no.strip()
+    r.seats = body.seats
+    s.commit()
+    return {"id": r.id, "decision": dec.as_dict()}
+
+@router.put("/transport/stops/{stop_id}")
+def update_transport_stop(stop_id: str, body: TransportStopIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
+    x=s.get(D.TransportStop, stop_id)
+    if not x: raise HTTPException(404, "Stop not found")
+    for k,v in body.model_dump().items(): setattr(x,k,v)
+    s.commit(); return {"id":x.id,"decision":dec.as_dict()}
+
+@router.delete("/transport/stops/{stop_id}")
+def delete_transport_stop(stop_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
+    x=s.get(D.TransportStop, stop_id)
+    if not x: raise HTTPException(404, "Stop not found")
+    s.delete(x); s.commit(); return {"status":"deleted","decision":dec.as_dict()}
+
+@router.put("/transport/vehicles/{vehicle_id}")
+def update_transport_vehicle(vehicle_id: str, body: TransportVehicleIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    v=s.get(D.TransportVehicle, vehicle_id)
+    if not v: raise HTTPException(404, "Vehicle not found")
+    v.number=body.number or body.vehicle_number or v.number; v.kind=body.kind; v.capacity=body.capacity; v.status=(body.status or "available").lower()
+    s.commit(); return {"id":v.id,"decision":dec.as_dict()}
+
+@router.delete("/transport/vehicles/{vehicle_id}")
+def delete_transport_vehicle(vehicle_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    v = s.get(D.TransportVehicle, vehicle_id)
+    if not v: raise HTTPException(404, "Vehicle not found")
+    v.status = "inactive"; s.commit()
+    return {"status": "inactive", "decision": dec.as_dict()}
+
+@router.put("/transport/drivers/{driver_id}")
+def update_transport_driver(driver_id: str, body: TransportDriverIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    d = s.get(D.TransportDriver, driver_id)
+    if not d: raise HTTPException(404, "Driver not found")
+    d.name, d.employee_id, d.phone = body.name, body.employee_id, body.phone
+    d.license_no, d.license_expiry = body.license_no or body.license_number, body.license_expiry
+    s.commit(); return {"id": d.id, "decision": dec.as_dict()}
+
+@router.delete("/transport/drivers/{driver_id}")
+def delete_transport_driver(driver_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    d = s.get(D.TransportDriver, driver_id)
+    if not d: raise HTTPException(404, "Driver not found")
+    for v in s.query(D.TransportVehicle).filter(D.TransportVehicle.driver_id == driver_id).all(): v.driver_id = None
+    d.status = "inactive"; s.commit()
+    return {"status": "inactive", "decision": dec.as_dict()}
+
+class TransportTripIn(BaseModel):
+    vehicle_id: str
+    driver_id: str
+    trip_type: str
+
+class TransportLocationIn(BaseModel):
+    vehicle_id: str
+    trip_id: str
+    latitude: float
+    longitude: float
+
+@router.post("/transport/trips/start")
+def start_transport_trip(body: TransportTripIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    if body.trip_type not in ("PICKUP","DROP"): raise HTTPException(400,"Invalid trip type")
+    if s.query(D.TransportTrip).filter(D.TransportTrip.vehicle_id==body.vehicle_id,D.TransportTrip.status=="running").first(): raise HTTPException(409,"Trip already running")
+    t=D.TransportTrip(id=uid(),tenant_id=TENANT,vehicle_id=body.vehicle_id,driver_id=body.driver_id,trip_type=body.trip_type); s.add(t); s.commit(); return {"id":t.id,"status":t.status,"trip_type":t.trip_type}
+
+@router.post("/transport/trips/{trip_id}/end")
+def end_transport_trip(trip_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
+    t=s.get(D.TransportTrip,trip_id)
+    if not t: raise HTTPException(404,"Trip not found")
+    t.status="ended"; t.ended_at=datetime.utcnow(); s.commit(); return {"status":t.status,"decision":dec.as_dict()}
+
+@router.post("/transport/locations")
+def send_transport_location(body: TransportLocationIn, ctx=Depends(auth), s=Depends(db)):
+    t=s.get(D.TransportTrip,body.trip_id)
+    if not t or t.status!="running" or t.vehicle_id!=body.vehicle_id: raise HTTPException(400,"No running trip")
+    t.latitude=body.latitude; t.longitude=body.longitude; t.updated_at=datetime.utcnow(); s.commit(); return {"status":"recorded"}
+
+@router.get("/transport/live-location/{vehicle_id}")
+def live_transport_location(vehicle_id: str, ctx=Depends(auth), s=Depends(db)):
+    t=s.query(D.TransportTrip).filter(D.TransportTrip.vehicle_id==vehicle_id).order_by(desc(D.TransportTrip.started_at)).first()
+    if not t: return {"status":"NOT_STARTED","location":None}
+    return {"status":t.status.upper(),"location":{"latitude":t.latitude,"longitude":t.longitude,"recorded_at":t.updated_at.isoformat() if t.updated_at else ""} if t.latitude is not None else None}
+
+@router.get("/transport/my-allocation")
+def my_transport_allocation(ctx=Depends(auth), s=Depends(db)):
+    student=s.query(D.Student).filter(or_(D.Student.user_id==ctx["sub"],D.Student.id==ctx.get("scope_ref"))).first()
+    a=s.query(D.TransportAllocation).filter(D.TransportAllocation.student_id==student.id,D.TransportAllocation.status=="active").first() if student else None
+    return {"allocation": {"id":a.id,"student_id":a.student_id,"route_id":a.route_id,"pickup_stop_id":a.stop_id,"vehicle_id":a.vehicle_id,"status":a.status} if a else None}
+
+@router.get("/transport/driver-dashboard")
+def transport_driver_dashboard(ctx=Depends(auth), s=Depends(db)):
+    d=s.query(D.TransportDriver).filter(D.TransportDriver.user_id==ctx["sub"]).first()
+    if not d: raise HTTPException(403,"Driver account required")
+    v=s.query(D.TransportVehicle).filter(D.TransportVehicle.driver_id==d.id).first()
+    allocs=s.query(D.TransportAllocation).filter(D.TransportAllocation.vehicle_id==v.id,D.TransportAllocation.status=="active").all() if v else []
+    return {"driver": {"id":d.id,"name":d.name},"driver_id":d.id,"vehicle": {"id":v.id,"number":v.number,"capacity":v.capacity} if v else None,"students":[{"student_id":a.student_id} for a in allocs],"trip":None}
 
 
 # --------------------------------------------------------------------------- #

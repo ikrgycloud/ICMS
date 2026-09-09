@@ -433,6 +433,8 @@ def whoami(ctx=Depends(auth), s=Depends(db)):
 
 def _student_or_404(s, ctx):
     st = s.query(D.Student).filter(D.Student.user_id == ctx["sub"]).first()
+    if not st and ctx.get("scope_ref"):
+        st = s.query(D.Student).get(ctx["scope_ref"])
     if not st:
         raise HTTPException(404, "No student linked to this login")
     return st
