@@ -836,7 +836,7 @@
    "n": 23,
    "name": "Accounts Office",
    "level": 7,
-   "purpose": "Day-to-day accounting: transactions, fee collection, payments, cashiering, reconciliation.",
+   "purpose": "Day-to-day accounting plus payroll support: transactions, fee collection, payments, cashiering, reconciliation, and staff payroll postings.",
    "internal_roles": [
     "Accounts Manager",
     "Accountant",

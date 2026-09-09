@@ -2043,6 +2043,7 @@ def _seed_chairman_workflows(s):
         ("wf_exec_17", "student_grievance", "Women in STEM Grant Appeal", "approved", None, "user_20", "Grievance Officer", 4, False, datetime(2026, 8, 5, 8, 10), datetime(2026, 8, 13, 17, 40)),
         ("wf_exec_18", "question_paper", "Semester End Examination Security", "executed", None, "user_16", "Controller of Examinations", 4, False, datetime(2026, 8, 2, 8, 0), datetime(2026, 8, 12, 19, 0)),
         ("wf_exec_19", "payroll_approval", "August Payroll Release", "approved", 5.5e7, "user_24", "HR Director", 4, False, datetime(2026, 8, 10, 9, 0), datetime(2026, 8, 16, 11, 0)),
+        ("wf_exec_21", "payroll_approval", "September Payroll Release", "submitted", 5.8e7, "user_25", "HR Executive", 1, False, datetime(2026, 9, 1, 9, 0), datetime(2026, 9, 1, 9, 0)),
         ("wf_exec_20", "result_publication", "Autonomous Results Moderation", "rejected", None, "user_16", "Controller of Examinations", 2, False, datetime(2026, 7, 24, 14, 20), datetime(2026, 7, 27, 15, 0)),
     ]
 
@@ -2094,6 +2095,7 @@ def _seed_chairman_workflows(s):
         ("wf_exec_17", "Student Affairs", "STU-2026-011", "Research and scholarship appeal raised for final closure."),
         ("wf_exec_18", "Academic Operations", "EXM-2026-054", "Exam security approval and execution control pack."),
         ("wf_exec_19", "Finance", "PAY-2026-009", "Monthly payroll approval cycle for group release."),
+        ("wf_exec_21", "Finance", "PAY-2026-010", "September payroll inputs for staff salary release, statutory deductions, and bank transfer preparation."),
         ("wf_exec_20", "Academic Operations", "EXM-2026-055", "Results moderation request rejected after evidence review."),
     ]
     spec_index = {wf_id: created_at for wf_id, _, _, _, _, _, _, _, _, created_at, _ in specs}
@@ -2685,6 +2687,184 @@ def _bind_portal_accounts(s):
             if candidate:
                 candidate.user_id = hod_login.id
                 dep.hod_person_id = candidate.id
+
+    s.commit()
+
+
+def _seed_non_teaching_staff_records(s):
+    """Seed support staff profiles so Accounts/HR offices have real employees in the database."""
+    staff_specs = [
+        {"id": "staff_support_accounts_manager", "emp_id": "ACCM-001", "name": "Accounts Manager", "designation": "Accounts Manager", "office_n": 23, "user_id": "user_23"},
+        {"id": "staff_support_accountant", "emp_id": "ACCT-001", "name": "Accountant", "designation": "Accountant", "office_n": 23, "user_id": None},
+        {"id": "staff_support_accounts_officer", "emp_id": "ACCO-001", "name": "Accounts Officer", "designation": "Accounts Officer", "office_n": 23, "user_id": None},
+        {"id": "staff_support_accounts_executive", "emp_id": "ACCE-001", "name": "Accounts Executive", "designation": "Accounts Executive", "office_n": 23, "user_id": None},
+        {"id": "staff_support_cashier", "emp_id": "CASH-001", "name": "Cashier", "designation": "Cashier", "office_n": 23, "user_id": None},
+        {"id": "staff_support_fee_collection", "emp_id": "FEE-001", "name": "Fee Collection Officer", "designation": "Fee Collection Officer", "office_n": 23, "user_id": None},
+        {"id": "staff_support_fee_verification", "emp_id": "FEV-001", "name": "Fee Verification Officer", "designation": "Fee Verification Officer", "office_n": 23, "user_id": None},
+        {"id": "staff_support_vendor_payment", "emp_id": "VPP-001", "name": "Vendor Payment Officer", "designation": "Vendor Payment Officer", "office_n": 23, "user_id": None},
+        {"id": "staff_support_accounts_clerk", "emp_id": "ACCL-001", "name": "Accounts Clerk", "designation": "Accounts Clerk", "office_n": 23, "user_id": None},
+        {"id": "staff_support_hr_chief", "emp_id": "HRCH-001", "name": "Chief HR Officer", "designation": "Chief HR Officer", "office_n": 24, "user_id": "user_24"},
+        {"id": "staff_support_hr_director", "emp_id": "HRDR-001", "name": "HR Director", "designation": "HR Director", "office_n": 24, "user_id": None},
+        {"id": "staff_support_hr_manager", "emp_id": "HRM-001", "name": "HR Manager", "designation": "HR Manager", "office_n": 24, "user_id": None},
+        {"id": "staff_support_hr_business_partner", "emp_id": "HRBP-001", "name": "HR Business Partner", "designation": "HR Business Partner", "office_n": 24, "user_id": None},
+        {"id": "staff_support_recruitment_manager", "emp_id": "RCR-001", "name": "Recruitment Manager", "designation": "Recruitment Manager", "office_n": 24, "user_id": None},
+        {"id": "staff_support_employee_relations", "emp_id": "ER-001", "name": "Employee Relations Officer", "designation": "Employee Relations Officer", "office_n": 24, "user_id": None},
+        {"id": "staff_support_ld_manager", "emp_id": "LDM-001", "name": "Learning & Development Manager", "designation": "Learning & Development Manager", "office_n": 24, "user_id": None},
+        {"id": "staff_support_performance_manager", "emp_id": "PM-001", "name": "Performance Management Officer", "designation": "Performance Management Officer", "office_n": 24, "user_id": None},
+        {"id": "staff_support_hr_compliance", "emp_id": "HRC-001", "name": "HR Compliance Officer", "designation": "HR Compliance Officer", "office_n": 24, "user_id": None},
+        {"id": "staff_support_hr_executive", "emp_id": "HREX-001", "name": "HR Executive", "designation": "HR Executive", "office_n": 25, "user_id": "user_25"},
+        {"id": "staff_support_hr_officer", "emp_id": "HROF-001", "name": "HR Officer", "designation": "HR Officer", "office_n": 25, "user_id": None},
+        {"id": "staff_support_payroll_specialist", "emp_id": "PAY-001", "name": "Payroll Specialist", "designation": "Payroll Specialist", "office_n": 25, "user_id": None},
+        {"id": "staff_support_attendance_officer", "emp_id": "ATT-001", "name": "Attendance Officer", "designation": "Attendance Officer", "office_n": 25, "user_id": None},
+        {"id": "staff_support_training_coordinator", "emp_id": "TRN-001", "name": "Training Coordinator", "designation": "Training Coordinator", "office_n": 25, "user_id": None},
+        {"id": "staff_support_hr_admin", "emp_id": "HRA-001", "name": "HR Administrator", "designation": "HR Administrator", "office_n": 25, "user_id": None},
+        {"id": "staff_support_hr_clerk", "emp_id": "HRCk-001", "name": "HR Clerk", "designation": "HR Clerk", "office_n": 25, "user_id": None},
+    ]
+
+    for spec in staff_specs:
+        existing = s.query(D.StaffMember).get(spec["id"])
+        if not existing:
+            existing = D.StaffMember(
+                id=spec["id"],
+                tenant_id=TENANT,
+                emp_id=spec["emp_id"],
+                name=spec["name"],
+                email=f"{slug(spec['name'])}@icms.edu",
+                phone="",
+                office_hours="Mon–Fri 09:00 AM – 05:00 PM",
+                dept_id=None,
+                designation=spec["designation"],
+                office_n=spec["office_n"],
+                campus=CAMPUS_SCOPES[0],
+                status="active",
+                date_joined=date(2018, 1, 1),
+            )
+            s.add(existing)
+            s.flush()
+
+        existing.name = spec["name"]
+        existing.designation = spec["designation"]
+        existing.office_n = spec["office_n"]
+        existing.campus = existing.campus or CAMPUS_SCOPES[0]
+        existing.status = "active"
+        existing.email = existing.email or f"{slug(spec['name'])}@icms.edu"
+        if spec["user_id"]:
+            existing.user_id = spec["user_id"]
+
+    s.commit()
+
+
+def _seed_payroll_demo_data(s):
+    """Create demo payroll employee profiles and a sample payroll run."""
+    staff_rows = s.query(D.StaffMember).order_by(D.StaffMember.name).all()
+    if not staff_rows:
+        return
+
+    for index, member in enumerate(staff_rows, start=1):
+        payroll_emp = s.query(D.PayrollEmployee).filter(D.PayrollEmployee.staff_member_id == member.id).first()
+        if not payroll_emp:
+            payroll_emp = D.PayrollEmployee(
+                id=f"payroll_emp_{member.id}",
+                tenant_id=TENANT,
+                staff_member_id=member.id,
+                employee_code=member.emp_id or f"EMP-{index:03d}",
+                bank_account_no=f"100{index:05d}",
+                bank_ifsc="ICMS0001",
+                pan_no=f"PAN{index:05d}",
+                pay_mode="bank_transfer",
+                status="active",
+            )
+            s.add(payroll_emp)
+            s.flush()
+
+        existing_structure = s.query(D.PayrollSalaryStructure).filter(
+            D.PayrollSalaryStructure.employee_id == payroll_emp.id
+        ).first()
+        if existing_structure is None:
+            base_salary = 22000 + (index * 2400)
+            structure = D.PayrollSalaryStructure(
+                id=f"payroll_struct_{payroll_emp.id}",
+                tenant_id=TENANT,
+                employee_id=payroll_emp.id,
+                basic_pay=base_salary,
+                hra=base_salary * 0.18,
+                special_allowance=base_salary * 0.08,
+                conveyance_allowance=1800,
+                medical_allowance=1200,
+                other_earnings=0,
+                pf_employee_share=base_salary * 0.12,
+                professional_tax=200,
+                income_tax=base_salary * 0.02,
+                loan_deduction=0,
+                advance_deduction=0,
+                other_deductions=0,
+                effective_from=datetime.utcnow(),
+            )
+            s.add(structure)
+
+    s.flush()
+
+    today = datetime.utcnow()
+    payroll_month = today.strftime("%Y-%m")
+    existing_run = s.query(D.PayrollRun).filter(D.PayrollRun.payroll_month == payroll_month).first()
+    if existing_run is not None:
+        s.commit()
+        return
+
+    run = D.PayrollRun(
+        id=f"payroll_run_{payroll_month.replace('-', '_')}",
+        tenant_id=TENANT,
+        payroll_month=payroll_month,
+        run_name=f"{today.strftime('%B %Y')} Payroll Run",
+        status="generated",
+        generated_by="system",
+    )
+    s.add(run)
+    s.flush()
+
+    employees = s.query(D.PayrollEmployee).filter(D.PayrollEmployee.status == "active").all()
+    for emp in employees:
+        structure = (
+            s.query(D.PayrollSalaryStructure)
+            .filter(D.PayrollSalaryStructure.employee_id == emp.id)
+            .order_by(D.PayrollSalaryStructure.effective_from.desc())
+            .first()
+        )
+        if not structure:
+            continue
+
+        gross_salary = (
+            structure.basic_pay
+            + structure.hra
+            + structure.special_allowance
+            + structure.conveyance_allowance
+            + structure.medical_allowance
+            + structure.other_earnings
+        )
+        total_deductions = (
+            structure.pf_employee_share
+            + structure.professional_tax
+            + structure.income_tax
+            + structure.loan_deduction
+            + structure.advance_deduction
+            + structure.other_deductions
+        )
+
+        entry = D.PayrollEntry(
+            id=f"payroll_entry_{emp.id}_{payroll_month.replace('-', '_')}",
+            tenant_id=TENANT,
+            run_id=run.id,
+            employee_id=emp.id,
+            gross_salary=gross_salary,
+            total_earnings=gross_salary,
+            total_deductions=total_deductions,
+            net_salary=gross_salary - total_deductions,
+            present_days=22,
+            paid_days=22,
+            leave_days=0,
+            payment_status="pending",
+        )
+        s.add(entry)
 
     s.commit()
 
@@ -4143,6 +4323,10 @@ def seed_domain():
     ensure_additive_schema()
     s = SessionLocal()
     try:
+        # Payroll support data must be available even if a later optional demo
+        # seed encounters a legacy foreign-key conflict.
+        _seed_non_teaching_staff_records(s)
+        _seed_payroll_demo_data(s)
         _seed_core_domain(s)
         _seed_fee_setup_reference_data(s)
         _seed_reference_extensions(s)
@@ -4195,6 +4379,7 @@ def seed_domain():
             "workflows": s.query(WorkflowInstance).count(),
             "partners": s.query(D.Partner).count(),
             "accreditations": s.query(D.Accreditation).count(),
+            "payroll_employees": s.query(D.PayrollEmployee).count(),
         }
     finally:
         s.close()

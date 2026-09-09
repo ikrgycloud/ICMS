@@ -96,6 +96,11 @@ export const api = {
     req('/workflows/decide', { method: 'POST', body: JSON.stringify({ workflow_id, action, reason }) }),
   workflows: (scope = 'all') => req(`/workflows?scope=${scope}`),
   workflow: (id: string) => req(`/workflows/${id}`),
+  payrollRuns: () => req('/portal/payroll/runs'),
+  createPayrollRun: (body: any) => req('/portal/payroll/runs', { method: 'POST', body: JSON.stringify(body) }),
+  payrollRunDetails: (runId: string) => req(`/portal/payroll/runs/${encodeURIComponent(runId)}`),
+  updatePayrollEntryStatus: (entryId: string, status: string) =>
+    req(`/portal/payroll/entries/${encodeURIComponent(entryId)}/status`, { method: 'POST', body: JSON.stringify({ status }) }),
   chairmanApprovals: (params: Record<string, any> = {}) => {
     const qs = new URLSearchParams()
     Object.entries(params).forEach(([key, value]) => {
@@ -314,6 +319,21 @@ export const api = {
 
   // ---- finance ----
   invoices: () => req('/finance/invoices'),
+  reviewInvoice: (invoice_id: string, body: any) => req(`/finance/invoices/${invoice_id}/review`, { method: 'POST', body: JSON.stringify(body) }),
+  financeAdjustments: () => req('/finance/adjustments'),
+  createAdjustment: (body: any) => req('/finance/adjustments', { method: 'POST', body: JSON.stringify(body) }),
+  financeReconciliations: () => req('/finance/reconciliations'),
+  createReconciliation: (body: any) => req('/finance/reconciliations', { method: 'POST', body: JSON.stringify(body) }),
+  financeRefunds: () => req('/finance/refunds'),
+  createRefund: (body: any) => req('/finance/refunds', { method: 'POST', body: JSON.stringify(body) }),
+  decideRefund: (refund_id: string, body: any) => req(`/finance/refunds/${refund_id}/decision`, { method: 'POST', body: JSON.stringify(body) }),
+  executeRefund: (refund_id: string) => req(`/finance/refunds/${refund_id}/execute`, { method: 'POST' }),
+  vendorPayments: () => req('/finance/vendor-payments'),
+  createVendorPayment: (body: any) => req('/finance/vendor-payments', { method: 'POST', body: JSON.stringify(body) }),
+  approveVendorPayment: (vendor_payment_id: string, body: any) => req(`/finance/vendor-payments/${vendor_payment_id}/approve`, { method: 'POST', body: JSON.stringify(body) }),
+  payVendorPayment: (vendor_payment_id: string) => req(`/finance/vendor-payments/${vendor_payment_id}/pay`, { method: 'POST' }),
+  dayCloses: () => req('/finance/day-closes'),
+  createDayClose: (body: any) => req('/finance/day-close', { method: 'POST', body: JSON.stringify(body) }),
   academicRollovers: () => req('/academic-rollover'),
   academicRolloverPolicy: () => req('/academic-rollover/policy'),
   updateAcademicRolloverPolicy: (body: any) => req('/academic-rollover/policy', { method: 'PUT', body: JSON.stringify(body) }),
@@ -487,6 +507,7 @@ export const api = {
   studentAnnouncements: () => req('/portal/student/announcements'),
   studentLibraryLoans: () => req('/portal/student/library-loans'),
   facultyHome: () => req('/portal/faculty/home'),
+  facultyPayroll: () => req('/portal/payroll/me'),
   facultyCourseCoordination: () => req('/portal/faculty/course-coordination'),
   facultyAcademicRisk: () => req('/portal/faculty/academic-risk'),
   facultyCourseRegistrations: () => req('/portal/faculty/course-registrations'),

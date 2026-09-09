@@ -6,6 +6,7 @@ from sqlalchemy.orm import sessionmaker
 import domain_models as D
 from authority import pwhash
 from domain_seed import _seed_student_portal_accounts
+from main import LoginIn, login
 from models import Base, Person, Role, User, UserRole
 
 
@@ -45,6 +46,17 @@ class StudentSeedAccountTests(unittest.TestCase):
         _seed_student_portal_accounts(self.session)
         self.assertEqual(self.session.query(User).count(), 2)
         self.assertEqual(self.session.query(UserRole).count(), 1)
+
+    def test_shared_student_login_works_without_roll_number_alias(self):
+        result = login(LoginIn(username="student", password="demo123"), s=self.session)
+        self.assertIn("token", result)
+        self.assertEqual(result["user"]["username"], "student")
+
+    def test_roll_number_login_creates_missing_alias_for_database_student(self):
+        result = login(LoginIn(username="23cse002", password="demo123"), s=self.session)
+        self.assertIn("token", result)
+        self.assertEqual(result["user"]["username"], "23cse002")
+        self.assertIsNotNone(self.session.query(User).filter(User.username.ilike("23cse002")).first())
 
 
 if __name__ == "__main__":

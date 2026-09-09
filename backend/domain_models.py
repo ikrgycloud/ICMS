@@ -204,6 +204,111 @@ class StaffMember(Base):
     user_id = Column(String, nullable=True)
 
 
+class PayrollEmployee(Base):
+    __tablename__ = "payroll_employees"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    staff_member_id = Column(String, ForeignKey("staff_members.id"), index=True, nullable=False)
+    employee_code = Column(String, unique=True, nullable=False)
+    bank_account_no = Column(String, default="")
+    bank_ifsc = Column(String, default="")
+    pan_no = Column(String, default="")
+    pf_no = Column(String, default="")
+    esi_no = Column(String, default="")
+    pay_mode = Column(String, default="bank_transfer")
+    status = Column(String, default="active")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PayrollSalaryStructure(Base):
+    __tablename__ = "payroll_salary_structures"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    employee_id = Column(String, ForeignKey("payroll_employees.id"), index=True, nullable=False)
+
+    basic_pay = Column(Float, default=0)
+    hra = Column(Float, default=0)
+    special_allowance = Column(Float, default=0)
+    conveyance_allowance = Column(Float, default=0)
+    medical_allowance = Column(Float, default=0)
+    other_earnings = Column(Float, default=0)
+
+    pf_employee_share = Column(Float, default=0)
+    pf_employer_share = Column(Float, default=0)
+    professional_tax = Column(Float, default=0)
+    income_tax = Column(Float, default=0)
+    loan_deduction = Column(Float, default=0)
+    advance_deduction = Column(Float, default=0)
+    other_deductions = Column(Float, default=0)
+
+    effective_from = Column(DateTime, nullable=False)
+    effective_to = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PayrollRun(Base):
+    __tablename__ = "payroll_runs"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    payroll_month = Column(String, nullable=False)
+    run_name = Column(String, nullable=False)
+    status = Column(String, default="draft")
+    generated_by = Column(String, default="")
+    reviewed_by = Column(String, default="")
+    approved_by = Column(String, default="")
+    payment_date = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PayrollEntry(Base):
+    __tablename__ = "payroll_entries"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    run_id = Column(String, ForeignKey("payroll_runs.id"), index=True, nullable=False)
+    employee_id = Column(String, ForeignKey("payroll_employees.id"), index=True, nullable=False)
+
+    gross_salary = Column(Float, default=0)
+    total_earnings = Column(Float, default=0)
+    total_deductions = Column(Float, default=0)
+    net_salary = Column(Float, default=0)
+
+    present_days = Column(Integer, default=0)
+    paid_days = Column(Integer, default=0)
+    leave_days = Column(Integer, default=0)
+
+    payslip_status = Column(String, default="not_generated")
+    payment_status = Column(String, default="pending")
+    notes = Column(Text, default="")
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PayrollPayslip(Base):
+    __tablename__ = "payroll_payslips"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    entry_id = Column(String, ForeignKey("payroll_entries.id"), index=True, nullable=False)
+    pdf_url = Column(String, default="")
+    generated_at = Column(DateTime, default=datetime.utcnow)
+    viewed_at = Column(DateTime, nullable=True)
+
+
+class PayrollPaymentPosting(Base):
+    __tablename__ = "payroll_payment_postings"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    entry_id = Column(String, ForeignKey("payroll_entries.id"), index=True, nullable=False)
+    payment_method = Column(String, default="bank_transfer")
+    bank_ref_no = Column(String, default="")
+    posted_by = Column(String, default="")
+    posted_at = Column(DateTime, nullable=True)
+    status = Column(String, default="pending")
+    remarks = Column(Text, default="")
+
+
 class StaffCheckIn(Base):
     __tablename__ = "staff_check_ins"
     id = Column(String, primary_key=True)
@@ -908,6 +1013,109 @@ class FeeInvoice(Base):
     paid = Column(Float, default=0)
     status = Column(String, default="due")    # due/partial/paid/waived
     due_date = Column(Date, nullable=True)
+
+
+class FinanceInvoiceReview(Base):
+    __tablename__ = "finance_invoice_reviews"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    invoice_id = Column(String, ForeignKey("fee_invoices.id"), index=True)
+    student_id = Column(String, default="", index=True)
+    decision = Column(String, default="approved")
+    remarks = Column(Text, default="")
+    reviewed_by = Column(String, default="")
+    reviewed_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class FinanceAdjustment(Base):
+    __tablename__ = "finance_adjustments"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    invoice_id = Column(String, ForeignKey("fee_invoices.id"), index=True)
+    student_id = Column(String, default="", index=True)
+    adjustment_type = Column(String, default="credit")  # credit / debit / refund
+    amount = Column(Float, default=0)
+    reason = Column(Text, default="")
+    status = Column(String, default="pending_review")  # pending_review / approved / rejected
+    created_by = Column(String, default="")
+    reviewed_by = Column(String, default="")
+    remarks = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    reviewed_at = Column(DateTime, nullable=True)
+
+
+class FinanceReconciliation(Base):
+    __tablename__ = "finance_reconciliations"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    period_start = Column(DateTime, nullable=True)
+    period_end = Column(DateTime, nullable=True)
+    opening_balance = Column(Float, default=0)
+    total_collected = Column(Float, default=0)
+    total_adjustments = Column(Float, default=0)
+    closing_balance = Column(Float, default=0)
+    status = Column(String, default="draft")  # draft / closed
+    notes = Column(Text, default="")
+    created_by = Column(String, default="")
+    closed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class FinanceRefund(Base):
+    __tablename__ = "finance_refunds"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    invoice_id = Column(String, ForeignKey("fee_invoices.id"), index=True)
+    student_id = Column(String, default="", index=True)
+    amount = Column(Float, default=0)
+    reason = Column(Text, default="")
+    status = Column(String, default="pending_approval")  # pending_approval / approved / rejected / executed
+    created_by = Column(String, default="")
+    approved_by = Column(String, default="")
+    executed_by = Column(String, default="")
+    remarks = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    approved_at = Column(DateTime, nullable=True)
+    executed_at = Column(DateTime, nullable=True)
+
+
+class FinanceDayClose(Base):
+    __tablename__ = "finance_day_closes"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    close_date = Column(Date, nullable=False, index=True)
+    total_collected = Column(Float, default=0)
+    total_pending_verification = Column(Float, default=0)
+    total_pending_clearance = Column(Float, default=0)
+    total_adjustments = Column(Float, default=0)
+    total_refunds = Column(Float, default=0)
+    total_vendor_payments = Column(Float, default=0)
+    opening_balance = Column(Float, default=0)
+    closing_balance = Column(Float, default=0)
+    status = Column(String, default="closed")  # closed / draft
+    notes = Column(Text, default="")
+    created_by = Column(String, default="")
+    closed_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class VendorPayment(Base):
+    __tablename__ = "vendor_payments"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    vendor_name = Column(String, default="")
+    invoice_ref = Column(String, default="")
+    amount = Column(Float, default=0)
+    status = Column(String, default="pending_approval")  # pending_approval / approved / paid / rejected
+    approval_reference = Column(String, default="")
+    notes = Column(Text, default="")
+    created_by = Column(String, default="")
+    approved_by = Column(String, default="")
+    paid_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    approved_at = Column(DateTime, nullable=True)
+    paid_at = Column(DateTime, nullable=True)
 
 
 class FeeComponent(Base):

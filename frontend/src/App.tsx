@@ -191,7 +191,12 @@ const ADMISSION_MANAGER_TAB: Record<string, string> = {
 export default function App({ onLogout }: { onLogout: () => void }) {
   const [user, setUser] = useState<any>(getUser())
   const [ws, setWs] = useState<any>(null)
-  const [view, setView] = useState(() => getUser()?.office_n === 31 ? 'transport' : 'overview')
+  const [view, setView] = useState(() => {
+    const currentUser = getUser()
+    if (currentUser?.office_n === 31) return 'transport'
+    if (currentUser?.office_n === 23) return 'finance'
+    return 'overview'
+  })
   const [sideOpen, setSideOpen] = useState(false)
   const [notifs, setNotifs] = useState<any>({ notifications: [], unread: 0 })
   const [showNotif, setShowNotif] = useState(false)
@@ -241,7 +246,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
       const next = await api.switchRole(role)
       saveSession(next.token, next.user)
       setUser(next.user)
-      setView(next.user?.office_n === 31 ? 'transport' : 'overview')
+      setView(next.user?.office_n === 31 ? 'transport' : next.user?.office_n === 23 ? 'finance' : 'overview')
       loadWs()
     } catch (error) {
       // Keep the current session if the switch fails.

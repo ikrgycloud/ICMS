@@ -99,7 +99,7 @@ OFFICE_MODULES = {
     20: ["grievance", "students"],                                                 # Grievance
     21: ["grievance", "students"],                                                 # Discipline
     22: ["finance", "students", "rollover", "approvals", "analytics"],                         # Finance Manager
-    23: ["finance", "students", "approvals"],                                      # Accounts
+    23: ["finance", "students", "hr", "approvals"],                               # Accounts
     24: ["hr", "approvals", "analytics"],                                          # HR Manager
     25: ["hr", "approvals"],                                                       # HR Executive
     26: ["procurement", "assets", "hr", "approvals"],                              # Admin Manager

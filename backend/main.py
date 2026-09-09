@@ -34,7 +34,7 @@ from database import (SessionLocal, seed, CATALOG, OFFICES, LEVELS, office,
 from models import (User, Person, Role, RolePermission, Delegation, WorkflowInstance,
                     WorkflowProfile, Approval, Notification, AuditLog, ApprovalLimit,
                     DelegationPolicy, DelegationProfile, DelegationOption,
-                    DelegationContext)
+                    DelegationContext, UserRole)
 
 from domain_api import router as domain_router
 from faculty_api import router as faculty_router
@@ -566,17 +566,93 @@ class LoginIn(BaseModel):
     demo_context: str | None = None
 
 
+def _ensure_roll_number_student_login(s, requested_username, student):
+    """Recover and bind a roll-number student alias when older databases missed it."""
+    if not student:
+        return None
+
+    user = s.query(User).filter(func.lower(User.username) == requested_username).first()
+    if not user and student.user_id:
+        user = s.get(User, student.user_id)
+        if user and user.username and user.username.lower() == "student":
+            user = None
+
+    if not user:
+        person_id = f"person_student_{requested_username}"
+        person = s.get(Person, person_id)
+        if not person:
+            person = Person(
+                id=person_id,
+                tenant_id=student.tenant_id or TENANT,
+                name=student.name or requested_username,
+                email=student.email or f"{requested_username}@icms.edu",
+                contact="",
+            )
+            s.add(person)
+            s.flush()
+
+        user = User(
+            id=f"user_student_{requested_username}",
+            tenant_id=student.tenant_id or TENANT,
+            person_id=person_id,
+            username=requested_username,
+            password_hash=pwhash("demo123"),
+            status="active",
+            mfa_enabled=False,
+            office_n=36,
+            role="Student",
+            scope_level="individual",
+            scope_ref=student.id,
+        )
+        s.add(user)
+        s.flush()
+
+    user.username = requested_username
+    user.office_n = 36
+    user.role = "Student"
+    user.scope_level = "individual"
+    user.scope_ref = student.id
+    user.status = "active"
+    if user.password_hash == "seed":
+        user.password_hash = pwhash("demo123")
+
+    for bound in s.query(D.Student).filter(D.Student.user_id == user.id).all():
+        if bound.id != student.id:
+            bound.user_id = None
+
+    student.user_id = user.id
+
+    student_role = s.get(Role, "role_36_0")
+    if student_role:
+        link_id = f"ur_student_{student.id}"
+        if not s.get(UserRole, link_id):
+            s.add(UserRole(
+                id=link_id,
+                user_id=user.id,
+                role_id=student_role.id,
+                org_scope_id=student.id,
+            ))
+
+    s.flush()
+    return user
+
+
 @app.post("/api/auth/login")
 def login(body: LoginIn, s=Depends(db)):
     # IDs and email-style usernames should be convenient to type.  Preserve the
     # stored username but compare case-insensitively at authentication time.
-    username = (body.username or "").strip().lower()
-    if username == "student":
-        username = "25ece072"
-    u = s.query(User).filter(func.lower(User.username) == username).first()
+    # The shared demo student account is the documented login name, while older
+    # databases may still have the roll-number alias bound to the same row.
+    requested_username = (body.username or "").strip().lower()
+    u = s.query(User).filter(func.lower(User.username) == requested_username).first()
+    if not u and requested_username == "student":
+        u = s.query(User).filter(func.lower(User.username) == "25ece072").first()
+    if not u and requested_username != "student":
+        student = s.query(D.Student).filter(func.lower(D.Student.roll_no) == requested_username).first()
+        u = _ensure_roll_number_student_login(s, requested_username, student)
     if not u or u.password_hash != pwhash(body.password):
         raise HTTPException(401, "Invalid credentials")
-    if username == "professor":
+    if requested_username == "professor":
         professor = s.query(User).filter(
             User.username == "aarav_kulkarni", User.status == "active"
         ).first()
