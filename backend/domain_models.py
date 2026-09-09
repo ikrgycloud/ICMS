@@ -121,20 +121,6 @@ class HODInput(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
-class FacultyAllocation(Base):
-    __tablename__ = "course_offering_faculty_allocations"
-    id = Column(String, primary_key=True)
-    tenant_id = Column(String, index=True)
-    offering_id = Column(String, ForeignKey("course_offerings.id"), index=True)
-    section_id = Column(String, ForeignKey("sections.id"), nullable=True, index=True)
-    faculty_id = Column(String, ForeignKey("staff_members.id"), index=True)
-    status = Column(String, default="Assigned")
-    created_by = Column(String, default="")
-    updated_by = Column(String, default="")
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
-
-
 class TimetablePlanWorkflow(Base):
     __tablename__ = "timetable_plan_workflows"
     id = Column(String, primary_key=True)
@@ -182,14 +168,6 @@ class CurriculumExecutionIssue(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
-
-class ClassSession(Base):
-    __tablename__ = "class_sessions"
-    id = Column(String, primary_key=True); tenant_id = Column(String, index=True)
-    timetable_plan_id = Column(String, ForeignKey("timetable_plan_workflows.id"), index=True); timetable_entry_id = Column(String, ForeignKey("timetable_entries.id"), index=True)
-    offering_id = Column(String, ForeignKey("course_offerings.id"), index=True); section_id = Column(String, ForeignKey("sections.id"), index=True); faculty_id = Column(String, ForeignKey("staff_members.id"), index=True)
-    room = Column(String, default=""); session_date = Column(Date, index=True); start_time = Column(String); end_time = Column(String); status = Column(String, default="Planned", index=True)
-    created_by = Column(String, default=""); updated_by = Column(String, default=""); created_at = Column(DateTime, default=datetime.utcnow); updated_at = Column(DateTime, default=datetime.utcnow)
 
 class ClassSessionCheckIn(Base):
     __tablename__ = "class_session_checkins"

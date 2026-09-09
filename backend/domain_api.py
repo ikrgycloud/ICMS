@@ -1762,8 +1762,6 @@ def decide_academic_calendar_proposal(proposal_id: str, decision: str, body: Aca
 
 @router.get("/academic-calendar")
 def academic_calendar(term: str = "", academic_year: str = "", program_id: str = "", department_id: str = "", student_year: int | None = None, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academic_calendar", "view")[0])
-def academic_calendar(term: str = "", ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academic_calendar", "view", governance=True)[0])
     term_rows = (s.query(D.AcademicCalendarEntry.term)
                  .filter(D.AcademicCalendarEntry.status != "deleted")
@@ -1842,18 +1840,32 @@ def academic_calendar(term: str = "", ctx=Depends(auth), s=Depends(db)):
 
 @router.post("/academic-calendar")
 def create_academic_calendar_entry(body: AcademicCalendarIn, ctx=Depends(auth), s=Depends(db)):
-    raise HTTPException(410, "Academic calendar changes must be submitted as proposals")
     dec, _ = gate(s, ctx, "academic_calendar", "create")
     require(dec)
     if ctx["office_n"] not in CALENDAR_ACADEMIC_EDITORS:
         raise HTTPException(403, "This office cannot manage the academic calendar")
+    if not body.title.strip() or not body.term.strip() or not body.academic_year.strip():
+        raise HTTPException(422, "Academic year, term, and title are required")
+    start = date.fromisoformat(body.start_date)
+    end = date.fromisoformat(body.end_date) if body.end_date else start
+    if end < start:
+        raise HTTPException(422, "End date cannot be earlier than start date")
+    duplicate = s.query(D.AcademicCalendarEntry).filter(
+        D.AcademicCalendarEntry.tenant_id == ctx["tenant_id"],
+        D.AcademicCalendarEntry.term == body.term,
+        D.AcademicCalendarEntry.title == body.title.strip(),
+        D.AcademicCalendarEntry.start_date == start,
+        D.AcademicCalendarEntry.status != "deleted",
+    ).first()
+    if duplicate:
+        raise HTTPException(409, "A matching academic calendar entry already exists")
     now = datetime.utcnow()
     row = D.AcademicCalendarEntry(
         id=uid(), tenant_id=TENANT, term=body.term, academic_year=body.academic_year, program_id=body.program_id, department_id=body.department_id, student_year=body.student_year, title=body.title,
         category=body.category, campus=body.campus,
-        start_date=date.fromisoformat(body.start_date),
-        end_date=date.fromisoformat(body.end_date) if body.end_date else date.fromisoformat(body.start_date), start_time=body.start_time, end_time=body.end_time,
-        description=body.description, status=body.status or ("draft" if ctx["office_n"] == 17 else "published"),
+        start_date=start,
+        end_date=end, start_time=body.start_time, end_time=body.end_time,
+        description=body.description, status=("draft" if ctx["office_n"] == 17 else (body.status or "published")),
         owner_office_n=ctx["office_n"], created_by=ctx["sub"], updated_by=ctx["sub"],
         created_at=now, updated_at=now
     )
@@ -1885,7 +1897,6 @@ def create_academic_calendar_entry(body: AcademicCalendarIn, ctx=Depends(auth), 
 
 @router.put("/academic-calendar/{entry_id}")
 def update_academic_calendar_entry(entry_id: str, body: AcademicCalendarIn, ctx=Depends(auth), s=Depends(db)):
-    raise HTTPException(410, "Academic calendar changes must be submitted as proposals")
     row = s.get(D.AcademicCalendarEntry, entry_id)
     if not row or row.status == "deleted":
         raise HTTPException(404, "Academic calendar entry not found")
@@ -1893,14 +1904,20 @@ def update_academic_calendar_entry(entry_id: str, body: AcademicCalendarIn, ctx=
     require(dec)
     if ctx["office_n"] not in CALENDAR_ACADEMIC_EDITORS or (ctx["office_n"] == 17 and row.owner_office_n != 17 and row.created_by != ctx["sub"]):
         raise HTTPException(403, "This office cannot manage the academic calendar")
+    if row.status not in {"draft", "correction_required"}:
+        raise HTTPException(409, "Only draft or correction-required entries can be edited")
+    start = date.fromisoformat(body.start_date)
+    end = date.fromisoformat(body.end_date) if body.end_date else start
+    if end < start:
+        raise HTTPException(422, "End date cannot be earlier than start date")
     prev = row.status
     row.term = body.term
     row.academic_year, row.program_id, row.department_id, row.student_year = body.academic_year, body.program_id, body.department_id, body.student_year
     row.title = body.title
     row.category = body.category
     row.campus = body.campus
-    row.start_date = date.fromisoformat(body.start_date)
-    row.end_date = date.fromisoformat(body.end_date) if body.end_date else row.start_date
+    row.start_date = start
+    row.end_date = end
     row.start_time, row.end_time = body.start_time, body.end_time
     row.description = body.description
     row.status = body.status or row.status
@@ -1937,9 +1954,10 @@ def submit_academic_calendar_entry(entry_id: str, ctx=Depends(auth), s=Depends(d
     if not row or row.status == "deleted": raise HTTPException(404, "Academic calendar entry not found")
     if ctx["office_n"] != 17 or row.created_by != ctx["sub"]: raise HTTPException(403, "Only the creating Academic Coordinator may submit this draft")
     dec, _ = gate(s, ctx, "academic_calendar", "edit"); require(dec)
-    if row.status != "draft": raise HTTPException(409, "Only draft calendar entries can be submitted")
+    if row.status not in {"draft", "correction_required"}: raise HTTPException(409, "Only draft or correction-required calendar entries can be submitted")
+    previous = row.status
     row.status, row.updated_by, row.updated_at = "pending_review", ctx["sub"], datetime.utcnow(); s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic_calendar.submit", f"academic_calendar:{row.id}", "draft", row.status, "Submitted for academic calendar review")
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic_calendar.submit", f"academic_calendar:{row.id}", previous, row.status, "Submitted for academic calendar review")
     return {"status": row.status, "decision": dec.as_dict()}
 
 
@@ -1959,12 +1977,14 @@ def decide_academic_calendar_entry(entry_id: str, body: AcademicCalendarDecision
     if row.status != "pending_review":
         raise HTTPException(409, "Only pending calendar changes can be decided")
     action = body.action.strip().lower()
-    if action not in {"approve", "return"}:
-        raise HTTPException(400, "Decision must be approve or return")
-    if action == "return" and not body.reason.strip():
-        raise HTTPException(400, "A reason is required when returning a calendar change")
+    if action not in {"approve", "reject", "return", "publish"}:
+        raise HTTPException(400, "Decision must be approve, reject, return, or publish")
+    if action in {"reject", "return"} and not body.reason.strip():
+        raise HTTPException(400, "A reason is required when rejecting or requesting correction")
+    if action == "publish" and row.status != "approved":
+        raise HTTPException(409, "Only approved calendar entries can be published")
     previous = row.status
-    row.status = "published" if action == "approve" else "draft"
+    row.status = {"approve": "approved", "publish": "published", "return": "correction_required", "reject": "rejected"}[action]
     row.updated_by, row.updated_at = ctx["sub"], datetime.utcnow()
     s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic_calendar.decision",
@@ -1975,7 +1995,6 @@ def decide_academic_calendar_entry(entry_id: str, body: AcademicCalendarDecision
 
 @router.delete("/academic-calendar/{entry_id}")
 def delete_academic_calendar_entry(entry_id: str, ctx=Depends(auth), s=Depends(db)):
-    raise HTTPException(410, "Academic calendar changes must be submitted as proposals")
     row = s.get(D.AcademicCalendarEntry, entry_id)
     if not row or row.status == "deleted":
         raise HTTPException(404, "Academic calendar entry not found")
@@ -1983,6 +2002,8 @@ def delete_academic_calendar_entry(entry_id: str, ctx=Depends(auth), s=Depends(d
     require(dec)
     if ctx["office_n"] not in CALENDAR_ACADEMIC_EDITORS or (ctx["office_n"] == 17 and row.owner_office_n != 17 and row.created_by != ctx["sub"]):
         raise HTTPException(403, "This office cannot manage the academic calendar")
+    if row.status not in {"draft", "correction_required"}:
+        raise HTTPException(409, "Only draft or correction-required entries can be deleted")
     prev = row.status
     row.status = "deleted"
     row.updated_by = ctx["sub"]
@@ -3091,10 +3112,13 @@ class CourseOfferingStatusIn(BaseModel):
 def _course_offering_payload(s, row):
     course, program = s.get(D.Course, row.course_id), s.get(D.Program, row.program_id)
     hod = s.query(D.HODInput).filter_by(offering_id=row.id).first()
-    allocations = s.query(D.FacultyAllocation).filter_by(offering_id=row.id).all()
     sections = s.query(D.Section).filter_by(offering_id=row.id).all()
+    section_ids = [x.id for x in sections]
+    allocations = s.query(D.FacultyAllocation).filter(
+        D.FacultyAllocation.section_id.in_(section_ids) if section_ids else text("1=0")
+    ).all()
     section_capacity = sum(x.capacity or 0 for x in sections)
-    faculty_complete = bool(hod and len([a for a in allocations if a.status in {"Assigned", "Confirmed"}]) >= hod.required_faculty_count)
+    faculty_complete = bool(hod and len([a for a in allocations if str(a.status).upper() in {"ASSIGNED", "CONFIRMED", "APPROVED"}]) >= hod.required_faculty_count)
     sections_defined = bool(hod and len(sections) >= hod.required_sections and section_capacity >= hod.expected_capacity)
     ready = bool(hod and hod.status == "Submitted" and sections_defined and faculty_complete)
     return {"id": row.id, "course_id": row.course_id, "course_code": course.code if course else "",
@@ -3108,7 +3132,7 @@ def _course_offering_payload(s, row):
             "created_at": row.created_at.isoformat() if row.created_at else "",
             "updated_at": row.updated_at.isoformat() if row.updated_at else "",
             "hod_input": {"id": hod.id, "required_faculty_count": hod.required_faculty_count, "required_sections": hod.required_sections, "expected_capacity": hod.expected_capacity, "delivery_type": hod.delivery_type, "remarks": hod.remarks, "status": hod.status} if hod else None,
-            "faculty_allocations": [{"id": a.id, "faculty_id": a.faculty_id, "section_id": a.section_id, "status": a.status, "faculty": (s.get(D.StaffMember, a.faculty_id).name if s.get(D.StaffMember, a.faculty_id) else "")} for a in allocations],
+            "faculty_allocations": [{"id": a.id, "faculty_id": a.faculty_person_id, "section_id": a.section_id, "status": a.status, "faculty": (s.get(D.StaffMember, a.faculty_person_id).name if s.get(D.StaffMember, a.faculty_person_id) else "")} for a in allocations],
             "sections": [{"id": x.id, "section": x.section_code, "faculty": s.get(D.StaffMember, x.faculty_person_id).name if x.faculty_person_id and s.get(D.StaffMember, x.faculty_person_id) else "—", "room": x.room, "schedule": x.schedule, "capacity": x.capacity, "enrolled": s.query(D.Enrollment).filter_by(section_id=x.id, status="enrolled").count(), "status": "Ready" if x.faculty_person_id else "Pending"} for x in sections],
             "section_readiness": {"required_sections": hod.required_sections if hod else 0, "created_sections": len(sections), "required_capacity": hod.expected_capacity if hod else 0, "total_capacity": section_capacity, "faculty_assigned": faculty_complete},
             "readiness": {"ready": ready, "hod_submitted": bool(hod and hod.status == "Submitted"), "faculty_complete": faculty_complete, "sections_defined": sections_defined}}
@@ -3179,8 +3203,16 @@ def create_faculty_allocation(offering_id: str, body: FacultyAllocationIn, ctx=D
     dec, _ = gate(s, ctx, "academics", "assign_faculty"); require(dec); offering = s.query(D.CourseOffering).filter_by(id=offering_id).first(); faculty = s.get(D.StaffMember, body.faculty_id)
     if not offering or not faculty: raise HTTPException(404, "Offering or faculty not found")
     if body.section_id and not s.query(D.Section).filter_by(id=body.section_id, offering_id=offering_id, course_id=offering.course_id).first(): raise HTTPException(400, "Section does not belong to this offering")
-    if s.query(D.FacultyAllocation).filter_by(offering_id=offering_id, faculty_id=body.faculty_id, status="Assigned").first(): raise HTTPException(409, "Faculty is already assigned to this offering")
-    row = D.FacultyAllocation(id=uid(), tenant_id=TENANT, offering_id=offering_id, section_id=body.section_id or None, faculty_id=body.faculty_id, status="Assigned", created_by=ctx["sub"], updated_by=ctx["sub"]); s.add(row); s.commit(); return {"id": row.id, "status": row.status, "decision": dec.as_dict()}
+    existing = s.query(D.FacultyAllocation).filter(
+        D.FacultyAllocation.section_id == body.section_id,
+        D.FacultyAllocation.faculty_person_id == body.faculty_id,
+        D.FacultyAllocation.status.in_(["PROPOSED", "APPROVED"]),
+    ).first()
+    if existing: raise HTTPException(409, "Faculty is already assigned to this section")
+    row = D.FacultyAllocation(id=uid(), tenant_id=TENANT, section_id=body.section_id or None,
+                              faculty_person_id=body.faculty_id, term=offering.term,
+                              workload_units=1, status="PROPOSED", created_by=ctx["sub"])
+    s.add(row); s.commit(); return {"id": row.id, "status": row.status, "decision": dec.as_dict()}
 
 
 @router.get("/academics/course-offerings/{offering_id}/readiness")
@@ -3220,7 +3252,10 @@ def _execution_payload(s, offering):
                       "created_at": i.created_at.isoformat() if i.created_at else "",
                       "updated_at": i.updated_at.isoformat() if i.updated_at else ""} for i in issues]
     readiness = base["readiness"]
-    sessions = s.query(D.ClassSession).filter_by(offering_id=offering.id).all()
+    offering_section_ids = [x.id for x in s.query(D.Section.id).filter(D.Section.offering_id == offering.id).all()]
+    sessions = s.query(D.ClassSession).filter(
+        D.ClassSession.section_id.in_(offering_section_ids) if offering_section_ids else text("1=0")
+    ).all()
     completed_sessions = sum(x.status in {"Completed", "Complete"} for x in sessions)
     progress = round(completed_sessions * 100 / len(sessions)) if sessions else 0
     open_issue = any(i.status != "Resolved" for i in issues)
@@ -3399,7 +3434,7 @@ def list_sections(ctx=Depends(auth), s=Depends(db)):
     fac_map = {f.id: f.name for f in s.query(D.StaffMember).all()}
     rows = s.query(D.Section).limit(200).all()
     rows = [r for r in rows if not r.offering_id or _offering_in_academic_scope(s, s.get(D.CourseOffering, r.offering_id), ctx)]
-    course_map = {c.id: (c.code, c.title) for c in scoped_academic_query(s, D.Course, ctx).all()}
+    course_map = {c.id: (c.code, c.title, c.semester) for c in scoped_academic_query(s, D.Course, ctx).all()}
     fac_map = {f.id: f.name for f in s.query(D.StaffMember).filter(D.StaffMember.tenant_id == ctx["tenant_id"]).all()}
     section_query = scoped_academic_query(s, D.Section, ctx)
     rows = section_query.limit(200).all()
@@ -3773,7 +3808,27 @@ def close_timetable_plan(plan_id: str, ctx=Depends(auth), s=Depends(db)):
 
 
 def _session_payload(x):
-    return {"id": x.id, "timetable_plan_id": x.timetable_plan_id, "timetable_entry_id": x.timetable_entry_id, "offering_id": x.offering_id, "section_id": x.section_id, "faculty_id": x.faculty_id, "room": x.room, "session_date": x.session_date.isoformat(), "start_time": x.start_time, "end_time": x.end_time, "status": x.status, "created_by": x.created_by, "updated_at": x.updated_at.isoformat() if x.updated_at else ""}
+    start = getattr(x, "start_time", None)
+    end = getattr(x, "end_time", None)
+    scheduled_start = getattr(x, "scheduled_start", None)
+    scheduled_end = getattr(x, "scheduled_end", None)
+    return {
+        "id": x.id,
+        "timetable_plan_id": getattr(x, "timetable_plan_id", None),
+        "timetable_entry_id": getattr(x, "timetable_entry_id", None),
+        "offering_id": getattr(x, "offering_id", None),
+        "section_id": x.section_id,
+        "faculty_id": x.faculty_id,
+        "room": x.room or "",
+        "session_date": x.session_date.isoformat() if x.session_date else "",
+        "start_time": start or (scheduled_start.isoformat() if scheduled_start else ""),
+        "end_time": end or (scheduled_end.isoformat() if scheduled_end else ""),
+        "scheduled_start": scheduled_start.isoformat() if scheduled_start else None,
+        "scheduled_end": scheduled_end.isoformat() if scheduled_end else None,
+        "status": x.status,
+        "created_by": getattr(x, "created_by", ""),
+        "updated_at": x.updated_at.isoformat() if x.updated_at else "",
+    }
 
 
 @router.get("/academics/class-sessions")

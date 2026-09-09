@@ -8,7 +8,7 @@ import os
 import json
 import re
 from datetime import datetime, timedelta
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from models import (Base, Tenant, OrgScope, Person, User, Role, Permission,
@@ -41,6 +41,47 @@ DATABASE_URL = os.environ.get("DATABASE_URL", f"sqlite:///{HERE}/icms.db")
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+
+def ensure_additive_schema():
+    """Create domain tables and add additive columns required by existing databases."""
+    Base.metadata.create_all(engine)
+    additions = {
+        "students": [("blood_group", "VARCHAR DEFAULT ''"), ("student_type", "VARCHAR DEFAULT 'Regular'")],
+        "attendance_records": [("status", "VARCHAR DEFAULT 'present'"), ("note", "VARCHAR DEFAULT ''"), ("updated_at", "TIMESTAMP")],
+        "academic_rollovers": [("executed_by", "VARCHAR DEFAULT ''"), ("executed_at", "TIMESTAMP"), ("remarks", "TEXT DEFAULT ''")],
+        "academic_rollover_decisions": [("academic_status", "VARCHAR DEFAULT 'PENDING'"), ("finance_status", "VARCHAR DEFAULT 'CLEAR'"), ("outstanding_amount", "FLOAT DEFAULT 0"), ("carry_forward_amount", "FLOAT DEFAULT 0"), ("processed_at", "TIMESTAMP")],
+    }
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        for table, columns in additions.items():
+            if not inspector.has_table(table):
+                continue
+            existing = {c["name"] for c in inspector.get_columns(table)}
+            for name, ddl in columns:
+                if name not in existing:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+
+
+def _ensure_course_columns():
+    if not inspect(engine).has_table("courses"):
+        return
+    wanted = {"program_id": "VARCHAR", "regulation": "VARCHAR", "course_type": "VARCHAR", "category": "VARCHAR", "ltp": "VARCHAR", "prerequisite": "VARCHAR", "status": "VARCHAR"}
+    existing = {c["name"] for c in inspect(engine).get_columns("courses")}
+    with engine.begin() as conn:
+        for name, ddl in wanted.items():
+            if name not in existing:
+                conn.execute(text(f"ALTER TABLE courses ADD COLUMN {name} {ddl}"))
+
+
+def _ensure_staff_contact_columns():
+    if not inspect(engine).has_table("staff_members"):
+        return
+    existing = {c["name"] for c in inspect(engine).get_columns("staff_members")}
+    with engine.begin() as conn:
+        for name in ("phone", "office_hours"):
+            if name not in existing:
+                conn.execute(text(f"ALTER TABLE staff_members ADD COLUMN {name} VARCHAR"))
 
 
 def demo_data_enabled() -> bool:
@@ -91,6 +132,10 @@ DEMO_USERNAMES = {
 
 
 def seed():
+    Base.metadata.create_all(engine)
+    _ensure_course_columns()
+    _ensure_staff_contact_columns()
+    ensure_additive_schema()
     ensure_versioned_migrations()
     s = SessionLocal()
     try:

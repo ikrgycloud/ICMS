@@ -67,7 +67,7 @@ export default function AcademicCoordinatorCenter({
     if (!data) return [];
     const sections = data.sections.sections || [],
       courses = data.courses.courses || [],
-      cal = data.calendar.entries || [];
+      cal = data.calendar?.entries || [];
     const offerings = data.offerings.offerings || [], conflicts = data.conflicts.conflicts || [], execution = data.execution.items || [];
     const coverage = sections.length
       ? Math.round(
@@ -246,10 +246,7 @@ export default function AcademicCoordinatorCenter({
       </main>
     </div>
   );
-    Promise.all([api.sections(), api.courses(), api.academicCalendar(), api.academicRollovers(), api.attendanceSections(), api.notifications(), api.timetableReadiness(), api.academicQualityRisks()])
-      .then(([sections, courses, calendar, rollovers, attendance, notifications, readiness, risks]) => setData({ sections, courses, calendar, rollovers, attendance, notifications, readiness, risks }))
-      .catch(() => setData({ sections: { sections: [] }, courses: { courses: [] }, calendar: { entries: [], proposals: [] }, rollovers: { rollovers: [] }, attendance: { sections: [] }, notifications: { notifications: [] }, readiness: { exceptions: [] }, risks: { risks: [] } }))
-  }, [])
+  if (false) {
   const stats = useMemo(() => {
     if (!data) return []
     const sections = data.sections.sections || [], courses = data.courses.courses || [], cal = data.calendar.entries || [], calendarProposals = data.calendar.proposals || [], rollovers = data.rollovers.rollovers || [], exceptions = data.readiness.exceptions || [], risks = data.risks.risks || []
@@ -268,4 +265,5 @@ export default function AcademicCoordinatorCenter({
       <section className="coordinator-card"><header><div><h2>End-to-end academic delivery</h2><p>Operational hand-offs from offering to attendance.</p></div></header><div className="coordinator-delivery-flow">{execution.map((item, i) => <div className={i < 4 ? 'ready' : i === 5 ? 'attention' : ''} key={item}><i>{i + 1}</i><span>{item}</span></div>)}</div></section>
       <div className="coordinator-roles"><strong>Connected roles</strong><span>Dean Academics</span><span>Vice Principal</span><span>HODs</span><span>Program Coordinators</span><span>Curriculum Officer</span><span>Timetable Officer</span><span>Faculty</span><span>Students</span><span>Exam Controller</span><span>Facilities</span><span>HR</span></div>
     </main></div>
-}
+ }
+  }

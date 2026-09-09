@@ -15,7 +15,7 @@ const STATUS_OPTIONS = [
 const yearLabel = (year: number) =>
   `${year}${year === 1 ? "st" : year === 2 ? "nd" : year === 3 ? "rd" : "th"} Year`;
 
-export default function AcademicCoordinatorCurriculumExecution() {
+export default function AcademicCoordinatorCurriculumExecution({ onNavigate }: { onNavigate?: (view: string) => void }) {
   const [items, setItems] = useState<any[] | null>(null);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<any>(null);
@@ -92,6 +92,9 @@ export default function AcademicCoordinatorCurriculumExecution() {
         sub="Track approved curriculum delivery across offerings, sections, faculty and timetable readiness."
         right={
           <div className="curriculum-head-actions">
+            <button className="btn btn-crimson" onClick={() => onNavigate?.("coordinator_course_offerings")}>
+              Create Curriculum
+            </button>
             <button className="btn btn-out curriculum-refresh" onClick={load}>
               Refresh
             </button>

@@ -662,7 +662,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'dean_reports':
       return <DeanAcademicWorkspaces initialTab="reports" />
     case 'curriculum':
-      return user.office_n === 17 ? <AcademicCoordinatorCurriculumExecution /> : <Curriculum />
+      return user.office_n === 17 ? <AcademicCoordinatorCurriculumExecution onNavigate={go} /> : <Curriculum />
     case 'courses_subjects':
       return <CoursesSubjects />
     case 'coordinator_course_offerings':

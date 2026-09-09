@@ -383,8 +383,6 @@ export const api = {
   classSession: (id: string) => req(`/academics/class-sessions/${id}`),
   generateClassSession: (body: any) => req('/academics/class-sessions/generate', { method: 'POST', body: JSON.stringify(body) }),
   transitionClassSession: (id: string, status: string) => req(`/academics/class-sessions/${id}/transition`, { method: 'POST', body: JSON.stringify({ status }) }),
-  facultyClassSessions: () => req('/portal/faculty/class-sessions'),
-  checkInClassSession: (id: string) => req(`/portal/faculty/class-sessions/${id}/check-in`, { method: 'POST' }),
   completeClassSession: (id: string) => req(`/portal/faculty/class-sessions/${id}/complete`, { method: 'POST' }),
   academicConflicts: (filters: any = {}) => {
     const params = new URLSearchParams()

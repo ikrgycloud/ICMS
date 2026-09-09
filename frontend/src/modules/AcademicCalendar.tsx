@@ -27,16 +27,7 @@ const blank = (term = "") => ({
   start_time: "", end_time: "",
 });
 
-export default function AcademicCalendar({
-  user,
-  caps,
-}: {
-  user: any;
-  caps: any;
-}) {
-});
-
-export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
+export default function AcademicCalendar({ user, caps }: { user: any; caps: any }) {
   const [term, setTerm] = useState(""),
     [data, setData] = useState<any>(null),
     [loading, setLoading] = useState(true),
@@ -55,10 +46,15 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
   async function load(value = term) {
     setLoading(true);
     try {
-      const next = await api.academicCalendar(value, { academicYear, programId, departmentId, studentYear });
-      const next = await api.academicCalendar(value);
+      const response = await api.academicCalendar(value, {
+        academicYear,
+        programId,
+        departmentId,
+        studentYear,
+      });
+      const next = response || { entries: [], proposals: [], summary: {}, term_options: [] };
       setData(next);
-      if (!value && next.selected_term) setTerm(next.selected_term);
+      if (!value && next?.selected_term) setTerm(next.selected_term);
     } catch (e: any) {
       setError(e.message || "We could not load the academic calendar.");
     } finally {
@@ -69,7 +65,6 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
     load(term);
   }, [term, academicYear, programId, departmentId, studentYear]);
   const yearOptions = data?.academic_year_options || [];
-  }, [term]);
   const campuses = useMemo<string[]>(
     () => [
       "All Campuses",
@@ -109,10 +104,10 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
   const pending = useMemo(
     () =>
       (data?.entries || []).filter((x: any) =>
-        String(x.status).toLowerCase().includes("pending"),
-      (data?.proposals || []).filter((x: any) =>
+        String(x.status).toLowerCase().includes("pending")
+      ).concat((data?.proposals || []).filter((x: any) =>
         ["SUBMITTED", "RESUBMITTED"].includes(x.state),
-      ),
+      )),
     [data],
   );
   const upcoming = useMemo(
@@ -144,10 +139,7 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
     );
     return conflicts;
   }, [data]);
-  const canCreate = !!data?.workflow_permissions?.propose,
-    canDecide = !!data?.workflow_permissions?.decide,
-    canEdit = false,
-    canDelete = false;
+  const canDecide = !!data?.workflow_permissions?.decide;
   function open(x: any) {
     if (x.editable && canEdit) {
       setForm({
@@ -183,6 +175,10 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
       await load();
     } catch (e: any) {
       setError(e.message || "Could not save the event.");
+    } finally {
+      setSaving(false);
+    }
+  }
   function exportCsv() {
     const header = [
       "Term",
@@ -219,35 +215,6 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
     link.click();
     URL.revokeObjectURL(url);
   }
-  async function save() {
-    setError("");
-    if (!form.title.trim()) {
-      setError("Event title is required.");
-      return;
-    }
-    if (!form.term.trim()) {
-      setError("Term is required.");
-      return;
-    }
-    if (form.end_date < form.start_date) {
-      setError("End date cannot be earlier than the start date.");
-      return;
-    }
-    setSaving(true);
-    try {
-      const created = await api.createAcademicCalendarProposal(form);
-      await api.submitAcademicCalendarProposal(
-        created.proposal.id,
-        created.proposal.status_version,
-      );
-      setModal(false);
-      await load();
-    } catch (e: any) {
-      setError(e.message || "Could not submit the calendar proposal.");
-    } finally {
-      setSaving(false);
-    }
-  }
   async function remove() {
     setSaving(true);
     try {
@@ -256,7 +223,9 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
       await load();
     } catch (e: any) {
       setError(e.message || "Could not delete the event.");
-    return;
+    } finally {
+      setSaving(false);
+    }
   }
   async function decide(proposal: any, decision: string) {
     setSaving(true);
@@ -290,6 +259,18 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
         sub="Institution-wide academic dates, examinations, teaching periods, holidays, and academic milestones."
         right={
           <div className="calendar-head-actions academic-filter-bar">
+            <button
+              className="btn btn-crimson"
+              type="button"
+              onClick={() => {
+                setError("");
+                setDetail(null);
+                setForm(blank(data?.selected_term || term));
+                setModal(true);
+              }}
+            >
+              Add academic event
+            </button>
             <button className="btn btn-out" onClick={() => setFiltersOpen((open) => !open)}>
               {filtersOpen ? "Hide filters" : "Filters"}
             </button>
@@ -309,50 +290,6 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
               <label>Academic year<select className="select" value={academicYear} onChange={e => setAcademicYear(e.target.value)}><option value="">All years</option>{yearOptions.map((x: string) => <option key={x}>{x}</option>)}</select></label>
               <label>Student year<select className="select" value={studentYear} onChange={e => setStudentYear(e.target.value)}><option value="">All years</option>{[1,2,3,4].map(x => <option key={x} value={x}>{x} Year</option>)}</select></label>
             </>}
-        sub="Dean Academics governance for teaching periods, examinations, registration, results, and academic milestones."
-        right={
-          <div className="calendar-head-actions academic-filter-bar">
-            <label>
-              Academic year
-              <select
-                className="select academic-term-select"
-                value={data?.selected_term || ""}
-                onChange={(e) => setTerm(e.target.value)}
-              >
-                {data?.term_options?.map((x: string) => (
-                  <option key={x}>{x}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Campus
-              <select
-                className="select"
-                value={campus}
-                onChange={(e) => setCampus(e.target.value)}
-              >
-                {campuses.map((x) => (
-                  <option key={x}>{x}</option>
-                ))}
-              </select>
-            </label>
-            <button className="btn btn-out" onClick={exportCsv} disabled={!entries.length}>
-              Export CSV
-            </button>
-            {canCreate && (
-              <button
-                className="btn btn-crimson"
-                onClick={() => {
-                  setForm({ ...blank(data.selected_term), status: user?.office_n === 17 ? "draft" : "published" });
-                  setForm(blank(data.selected_term));
-                  setDetail(null);
-                  setModal(true);
-                }}
-              >
-                Add Academic Event
-                Propose Academic Event
-              </button>
-            )}
           </div>
         }
       />
@@ -365,11 +302,11 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
       {data && (
         <>
           <div className="academic-kpis">
-            <Metric i="▣" n={data.summary.milestones} t="Academic Events" />
+            <Metric i="▣" n={data?.summary?.milestones ?? 0} t="Academic Events" />
             <Metric i="◷" n={upcoming.length} t="Upcoming Events" />
-            <Metric i="▤" n={data.summary.exam_windows} t="Exam Windows" />
+            <Metric i="▤" n={data?.summary?.exam_windows ?? 0} t="Exam Windows" />
             <Metric i="!" n={pending.length} t="Pending Approval" />
-            <Metric i="☂" n={data.summary.breaks} t="Holidays / Breaks" />
+            <Metric i="☂" n={data?.summary?.breaks ?? 0} t="Holidays / Breaks" />
           </div>
           {examConflicts.length > 0 && (
             <div className="calendar-banner warn">
@@ -499,7 +436,6 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
       )}
       {modal && !detail && (
         <Modal
-          title={form.id ? "Edit Academic Event" : "Add Academic Event"}
           className="academic-calendar-event-modal"
           title={form.id ? "Edit Academic Event" : "Propose Academic Event"}
           onClose={() => setModal(false)}
@@ -629,30 +565,6 @@ export default function AcademicCalendar({ caps }: { user: any; caps: any }) {
             <div className="snap"><span>Academic year / term</span><b>{detail.academic_year || "All years"} · {detail.term}</b></div>
             <div className="snap"><span>Target</span><b>{detail.program_id || "All programs"} · {detail.department_id || "All departments"} · {detail.student_year ? `${detail.student_year} Year` : "All student years"}</b></div>
             <div className="snap"><span>Time</span><b>{detail.start_time || "Not specified"}{detail.end_time ? ` – ${detail.end_time}` : ""}</b></div>
-          footer={
-            <>
-              <button className="btn btn-out" onClick={() => { setModal(false); setDetail(null); }}>Close</button>
-              {canDecide && ["SUBMITTED", "RESUBMITTED"].includes(detail.state) && (
-                <>
-                  <button className="btn btn-rose" disabled={saving} onClick={() => decide(detail, "reject")}>Reject</button>
-                  <button className="btn btn-crimson" disabled={saving} onClick={() => decide(detail, "approve")}>Approve</button>
-                </>
-              )}
-            </>
-          }
-        >
-          <div className="calendar-detail">
-            <Pill s={detail.state || detail.status || "published"} />
-            <h3>{detail.payload?.title || detail.title}</h3>
-            <p>{detail.payload?.description || detail.description || "No additional notes were provided."}</p>
-            <div className="snap">
-              <span>Date range</span>
-              <b>{dates(detail.payload?.start_date || detail.start_date, detail.payload?.end_date || detail.end_date)}</b>
-            </div>
-            <div className="snap">
-              <span>Campus</span>
-              <b>{detail.payload?.campus || detail.campus || "All Campuses"}</b>
-            </div>
           </div>
         </Modal>
       )}
@@ -679,6 +591,7 @@ function Side({ title, rows, empty, open, showPill }: any) {
       <div className="card-pad">
         {rows.length ? (
           rows.map((x: any) => (
+            <>
             <button
               className="academic-side-item"
               onClick={() => open(x)}
@@ -750,6 +663,7 @@ function Side({ title, rows, empty, open, showPill }: any) {
                 </span>
               )}
             </div>
+            </>
           ))
         ) : (
           <Empty icon="✓" text={empty} />

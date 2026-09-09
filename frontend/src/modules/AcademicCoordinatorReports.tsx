@@ -20,7 +20,7 @@ export default function AcademicCoordinatorReports({ onNavigate }: { onNavigate?
       api.academicCalendar(), api.academicAnnouncements(),
     ]).then((results: any[]) => {
       const value = results.map((result) => result.status === "fulfilled" ? result.value : {});
-      setData({ programs: value[0].programs || [], offerings: value[1].offerings || [], sections: value[2].sections || [], plans: value[3].plans || [], conflicts: value[4].conflicts || [], sessions: value[5].sessions || [], execution: value[6].items || [], calendar: value[7].entries || [], notices: value[8].announcements || [] });
+      setData({ programs: value[0]?.programs || [], offerings: value[1]?.offerings || [], sections: value[2]?.sections || [], plans: value[3]?.plans || [], conflicts: value[4]?.conflicts || [], sessions: value[5]?.sessions || [], execution: value[6]?.items || [], calendar: value[7]?.entries || [], notices: value[8]?.announcements || [] });
     }).catch((e: any) => setError(e.message || "Unable to load reports"));
   }, []);
 
