@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import text
 from database import engine, SessionLocal
 import domain_models as D
+from administration_jobs import process_slas, process_outbox
 
 POLL_SECONDS = int(os.getenv("ICMS_WORKER_POLL_SECONDS", "5"))
 MAX_ATTEMPTS = int(os.getenv("ICMS_WORKER_MAX_ATTEMPTS", "5"))
@@ -82,6 +83,11 @@ def execute(job):
         finally:
             session.close()
         return
+    if payload.get("operation") == "process_administration_sla":
+        session=SessionLocal()
+        try: process_slas(session); process_outbox(session, worker_id=WORKER_ID)
+        finally: session.close()
+        return
     raise RuntimeError(f"No handler registered for queue job {payload.get('operation', 'unknown')}")
 
 
@@ -115,7 +121,16 @@ def main():
     ensure_queue()
     heartbeat("healthy")
     while True:
-        if not run_once():
+        ran = run_once()
+        # Administration SLA and outbox processing are durable DB scans, so a
+        # worker restart simply resumes pending work without frontend polling.
+        admin_session = SessionLocal()
+        try:
+            process_slas(admin_session)
+            process_outbox(admin_session, worker_id=WORKER_ID)
+        finally:
+            admin_session.close()
+        if not ran:
             time.sleep(POLL_SECONDS)
 
 

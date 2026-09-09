@@ -83,6 +83,20 @@ COURSE_BANK = {
     ],
 }
 
+# Complete the taught curriculum across both odd and even semesters.  These
+# records are added only when absent, so existing institution-created courses
+# are never overwritten on subsequent application starts.
+EVEN_SEMESTER_COURSE_BANK = {
+    "CSE": [("CS102", "Discrete Mathematics for Computing", 4, 2), ("CS203", "Object-Oriented Programming", 4, 4), ("CS304", "Software Engineering", 3, 6), ("CS406", "Capstone Project", 4, 8)],
+    "ECE": [("EC102", "Network Analysis", 4, 2), ("EC202", "Analog Communications", 4, 4), ("EC302", "Embedded Systems", 3, 6), ("EC402", "Communication Systems Project", 4, 8)],
+    "MEC": [("ME102", "Engineering Drawing", 3, 2), ("ME202", "Manufacturing Processes", 4, 4), ("ME302", "Machine Design", 4, 6), ("ME402", "Mechanical Design Project", 4, 8)],
+    "CIV": [("CE102", "Building Materials", 3, 2), ("CE202", "Concrete Technology", 3, 4), ("CE302", "Transportation Engineering", 4, 6), ("CE402", "Civil Engineering Project", 4, 8)],
+    "EEE": [("EE102", "Electronic Devices", 4, 2), ("EE202", "Control Systems", 4, 4), ("EE302", "Power Electronics", 4, 6), ("EE402", "Electrical Systems Project", 4, 8)],
+    "MAT": [("MA102", "Programming for Mathematics", 3, 2), ("MA202", "Numerical Methods", 4, 4), ("MA302", "Operations Analytics", 3, 6), ("MA402", "Mathematics Computing Project", 4, 8)],
+    "MGT": [("MG102", "Business Communication", 3, 2), ("MG202", "Marketing Management", 3, 4), ("MG302", "Business Analytics", 4, 6), ("MG402", "Management Capstone", 4, 8)],
+    "HSS": [("HS102", "Professional Ethics", 2, 2), ("HS202", "Environmental Studies", 2, 4), ("HS302", "Research Methods", 3, 6), ("HS402", "Social Impact Project", 3, 8)],
+}
+
 DEMO_ATTENDANCE_TODAY = date(2026, 8, 25)
 DEMO_ATTENDANCE_NOW = datetime(2026, 8, 25, 16, 15)
 STUDENT_PORTAL_ATTENDANCE_DEMO = [
@@ -1912,6 +1926,33 @@ def _seed_core_domain(s):
     s.commit()
 
 
+def _seed_even_semester_curriculum(s):
+    """Backfill a complete approved curriculum for the live demonstration tenant."""
+    for dept_code, courses in EVEN_SEMESTER_COURSE_BANK.items():
+        department = s.query(D.Department).filter(
+            D.Department.tenant_id == TENANT, D.Department.code == dept_code
+        ).first()
+        if not department:
+            continue
+        program = s.query(D.Program).filter(
+            D.Program.tenant_id == TENANT, D.Program.dept_id == department.id,
+            D.Program.level == "UG"
+        ).first()
+        for code, title, credits, semester in courses:
+            course_id = f"course_{code.lower()}"
+            if s.get(D.Course, course_id):
+                continue
+            s.add(D.Course(
+                id=course_id, tenant_id=TENANT, dept_id=department.id,
+                program_id=program.id if program else None, code=code, title=title,
+                credits=credits, semester=semester,
+                description=f"{title} course for semester {semester}.",
+                regulation="R2023", course_type="Core", category="Professional Core",
+                ltp="3-1-0" if credits >= 4 else "3-0-0", status="Active",
+            ))
+    s.commit()
+
+
 def _seed_reference_extensions(s):
     for code, name, dean in SCHOOLS:
         sid = f"school_{code.lower()}"
@@ -3687,6 +3728,7 @@ def seed_domain():
     s = SessionLocal()
     try:
         _seed_core_domain(s)
+        _seed_even_semester_curriculum(s)
         _seed_fee_setup_reference_data(s)
         _seed_reference_extensions(s)
         _seed_calendar_data(s)

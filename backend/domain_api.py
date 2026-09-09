@@ -2312,7 +2312,22 @@ def program_proposals(ctx=Depends(auth), s=Depends(db)):
     )
     if ctx["office_n"] != 6:
         query = query.filter(D.AcademicProposal.scope_ref == (actor_department_id(s, ctx) or "__no_scope__"))
-    return {"proposals": [_proposal_payload(s, row) for row in query.order_by(desc(D.AcademicProposal.updated_at)).all()], "can_decide": ctx["office_n"] == 6}
+    departments = scoped_academic_query(s, D.Department, ctx).order_by(D.Department.name).all()
+    terms = s.query(D.AcademicYear, D.Semester).join(
+        D.Semester, D.Semester.academic_year_id == D.AcademicYear.id
+    ).filter(
+        D.AcademicYear.tenant_id == ctx["tenant_id"],
+        D.AcademicYear.is_active == True,
+        D.Semester.is_active == True,
+    ).order_by(D.AcademicYear.start_date.desc(), D.Semester.sequence).all()
+    return {
+        "proposals": [_proposal_payload(s, row) for row in query.order_by(desc(D.AcademicProposal.updated_at)).all()],
+        "can_decide": ctx["office_n"] == 6,
+        "form_options": {
+            "departments": [{"id": row.id, "code": row.code, "name": row.name} for row in departments],
+            "effective_terms": [{"value": f"{year.name} · {semester.name}", "label": f"{year.name} · {semester.name}"} for year, semester in terms],
+        },
+    }
 
 
 @router.get("/programs/proposals/{proposal_id}")
@@ -2641,7 +2656,10 @@ def transition_next_plan(plan_id:str,body:CommitteeTransitionIn,ctx=Depends(auth
     row.state=target; row.approved_by=ctx["sub"] if target=="APPROVED" else row.approved_by; row.updated_at=datetime.utcnow(); s.commit(); return {"id":row.id,"state":row.state}
 
 
-CURRICULUM_PROPOSERS = {6, 10, 17}
+# Curriculum ownership sits with the academic unit.  The Dean is the
+# independent academic authority that reviews and decides proposals, rather
+# than routinely originating the requests they must approve.
+CURRICULUM_PROPOSERS = {10, 17}
 
 
 def _curriculum_proposal_payload(s, proposal):
@@ -2660,9 +2678,11 @@ def curriculum_proposals(state: str = "", ctx=Depends(auth), s=Depends(db)):
     if ctx["office_n"] != 6:
         department_id = actor_department_id(s, ctx)
         allowed_departments = allowed_departments.filter(D.Department.id == (department_id or "__no_scope__"))
+    available_programs = scoped_academic_query(s, D.Program, ctx).order_by(D.Program.name).all()
     return {"proposals": [_curriculum_proposal_payload(s, row) for row in query.order_by(desc(D.AcademicProposal.updated_at)).all()],
             "can_propose": ctx["office_n"] in CURRICULUM_PROPOSERS, "can_decide": ctx["office_n"] == 6,
-            "proposal_departments": [{"id": row.id, "code": row.code, "name": row.name} for row in allowed_departments.order_by(D.Department.code).all()]}
+            "proposal_departments": [{"id": row.id, "code": row.code, "name": row.name} for row in allowed_departments.order_by(D.Department.code).all()],
+            "programs": [{"id": row.id, "code": row.code, "name": row.name} for row in available_programs]}
 
 
 @router.get("/curriculum/proposals/{proposal_id}")
@@ -2677,7 +2697,7 @@ def curriculum_proposal_detail(proposal_id: str, ctx=Depends(auth), s=Depends(db
 def create_curriculum_proposal(body: CurriculumProposalIn, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view")[0])
     if ctx["office_n"] not in CURRICULUM_PROPOSERS:
-        raise HTTPException(403, "Only HOD, Academic Coordinator, or Dean Academics can propose curriculum changes")
+        raise HTTPException(403, "Only an HOD or Academic Coordinator can propose curriculum changes")
     dept = require_academic_object(s, ctx, s.query(D.Department).filter(D.Department.tenant_id == ctx["tenant_id"], D.Department.code == body.dept_code.strip()).first(), "create", "Department")
     existing = require_academic_object(s, ctx, s.get(D.Course, body.course_id), "create", "Course") if body.course_id else None
     if existing and existing.dept_id != dept.id: raise HTTPException(403, "Course is outside the selected department scope")
@@ -4083,7 +4103,7 @@ def list_invoices(ctx=Depends(auth), s=Depends(db)):
 @router.get("/finance/budget")
 def list_budget(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "finance", "view")[0])
-    rows = s.query(D.BudgetLine).all()
+    rows = s.query(D.BudgetLine).filter(D.BudgetLine.tenant_id == ctx.get("tenant_id", TENANT)).all()
     return {"budget": [{"category": b.category, "allocated": b.allocated,
                         "spent": b.spent, "remaining": b.allocated - b.spent,
                         "fiscal_year": b.fiscal_year} for b in rows],
@@ -4699,7 +4719,7 @@ def return_book(loan_id: str, ctx=Depends(auth), s=Depends(db)):
 @router.get("/hr/leave")
 def list_leave(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "hr", "view")[0])
-    rows = s.query(D.LeaveRequest).order_by(desc(D.LeaveRequest.id)).all()
+    rows = s.query(D.LeaveRequest).filter(D.LeaveRequest.tenant_id == ctx.get("tenant_id", TENANT)).order_by(desc(D.LeaveRequest.id)).all()
     return {"leave": [{"id": l.id, "staff": l.staff_name, "kind": l.kind,
                        "from": l.from_date.isoformat(), "to": l.to_date.isoformat(),
                        "days": l.days, "reason": l.reason, "status": l.status}
@@ -4710,7 +4730,7 @@ def list_leave(ctx=Depends(auth), s=Depends(db)):
 @router.get("/hr/jobs")
 def list_jobs(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "hr", "view")[0])
-    rows = s.query(D.JobPosting).all()
+    rows = s.query(D.JobPosting).filter(D.JobPosting.tenant_id == ctx.get("tenant_id", TENANT)).all()
     return {"jobs": [{"id": j.id, "title": j.title, "dept": j.dept, "kind": j.kind,
                       "openings": j.openings, "status": j.status} for j in rows],
               "can_post": can(s, ctx, "hr", "post_job")}
@@ -4778,7 +4798,7 @@ def decide_leave(body: LeaveDecisionIn, ctx=Depends(auth), s=Depends(db)):
 @router.get("/assets")
 def list_assets(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "assets", "view")[0])
-    rows = s.query(D.Asset).all()
+    rows = s.query(D.Asset).filter(D.Asset.tenant_id == ctx.get("tenant_id", TENANT)).all()
     return {"assets": [{"id": a.id, "tag": a.tag, "name": a.name, "category": a.category,
                         "location": a.location, "status": a.status, "value": a.value}
                        for a in rows],

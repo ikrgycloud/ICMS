@@ -50,6 +50,8 @@ import AssociateProfessorHome from './personas/AssociateProfessorHome'
 import FacultySchedule from './personas/FacultySchedule'
 import ParentHome from './personas/ParentHome'
 import FrontDeskWorkspace from './frontdesk/FrontDeskWorkspace'
+import DeanAdministration from './modules/DeanAdministration'
+import SpecialistQueue from './modules/SpecialistQueue'
 
 const LEVEL_COLORS: Record<number, string> = {
   1: '#d92d3a',
@@ -71,6 +73,14 @@ const DEAN_ACADEMICS_NAV = [
   ['Authority', 'My Approvals', 'decision_inbox'], ['Authority', 'My Requests', 'workflows'],
   ['Reports', 'Reports & Analytics', 'dean_reports'], ['Reports', 'Audit', 'audit'],
   ['Reference', 'Directory', 'directory'],
+] as const
+const DEAN_ADMINISTRATION_NAV = [
+  ['Overview', 'Overview', 'administration_dashboard'],
+  // Every item has its own view identity. Reusing a key here makes every
+  // matching button active, and makes unrelated workspaces indistinguishable.
+  ['School Administration', 'Administrative Plan', 'administration_plans'], ['School Administration', 'Resources & Facilities', 'administration_resources'], ['School Administration', 'Workforce', 'administration_workforce'], ['School Administration', 'Budget', 'administration_budget'], ['School Administration', 'Procurement & Assets', 'administration_procurement_assets'],
+  ['Authority', 'My Reviews', 'administration_reviews'], ['Authority', 'My Requests', 'administration_requests'],
+  ['Reports', 'Reports & Analytics', 'administration_reports'], ['Reports', 'Audit', 'audit'], ['Reference', 'Directory', 'directory'],
 ] as const
 const CHAIRMAN_GROUP_ORDER = ['Governance', 'Institution', 'Strategy & Insights', 'Support']
 const CHAIRMAN_DISPLAY: Record<string, { label: string; group: string }> = {
@@ -229,7 +239,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     // Faculty & Staff is a Principal-specific presentation of the authorised
     // HR module.  It has its own route so that the list/profile experience is
     // retained when opened from the dashboard KPI or the Principal sidebar.
-    const virtualModule = (user?.office_n === 4 && ['faculty_staff', 'curriculum', 'courses_subjects'].includes(view)) || (user?.office_n === 6 && ['courses_subjects', 'decision_inbox', 'dean_programs', 'dean_timetable', 'dean_allocation', 'dean_risk', 'dean_reports', 'analytics'].includes(view)) || view.startsWith('director_') || view.startsWith('manager_')
+    const virtualModule = (user?.office_n === 4 && ['faculty_staff', 'curriculum', 'courses_subjects'].includes(view)) || (user?.office_n === 6 && ['courses_subjects', 'decision_inbox', 'dean_programs', 'dean_timetable', 'dean_allocation', 'dean_risk', 'dean_reports', 'analytics'].includes(view)) || (user?.office_n === 7 && view.startsWith('administration_')) || view.startsWith('director_') || view.startsWith('manager_')
     // Finance is a student self-service destination even though students do
     // not receive the staff Finance workspace capability from the backend.
     if (!virtualModule && !(user?.persona === 'student' && view === 'finance') && !ws.modules.some((module: any) => module.key === view)) {
@@ -294,6 +304,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const chairmanShell = user.office_n === 1
   const principalShell = user.office_n === 4
   const deanAcademicsShell = user.office_n === 6
+  const deanAdministrationShell = user.office_n === 7
   const facultyShell = user.persona === 'faculty'
   const directorAdmissionsShell = user.office_n === 15 && user.active_role === 'Director of Admissions'
   // The seeded office role is named “Admissions Manager”; accept the singular
@@ -320,6 +331,12 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     return out
   }, {})
   const deanGroupKeys = [...new Set(DEAN_ACADEMICS_NAV.map(([group]) => group))]
+  const deanAdministrationGroups = DEAN_ADMINISTRATION_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
+    const source = displayModules.find((module: any) => module.key === key) || { key, actions: {} }
+    ;(out[group] = out[group] || []).push({ key, label, group, source, enabled: true })
+    return out
+  }, {})
+  const deanAdministrationGroupKeys = [...new Set(DEAN_ADMINISTRATION_NAV.map(([group]) => group))]
   const facultyGroups = FACULTY_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
     const source = displayModules.find((module: any) => module.key === key)
     ;(out[group] = out[group] || []).push({ key, label, group, source, enabled: Boolean(source) })
@@ -343,12 +360,14 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const activeAdmissionsGroupKeys = directorAdmissionsShell ? directorGroupKeys : managerGroupKeys
   const current = (deanAcademicsShell
     ? Object.values(deanGroups).flat().find((module: any) => module.key === view)
+    : deanAdministrationShell
+    ? Object.values(deanAdministrationGroups).flat().find((module: any) => module.key === view)
     : admissionsOperationsShell
     ? Object.values(activeAdmissionsGroups).flat().find((module: any) => module.key === view)
     : undefined) || displayModules.find((module: any) => module.key === view) || displayModules[0]
 
   return (
-    <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''} ${facultyShell ? 'faculty-shell' : ''} ${deanAcademicsShell ? 'dean-academics-shell' : ''} ${directorAdmissionsShell ? 'director-admissions-shell' : ''} ${admissionManagerShell ? 'admission-manager-shell' : ''}`}>
+    <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''} ${facultyShell ? 'faculty-shell' : ''} ${deanAcademicsShell ? 'dean-academics-shell' : ''} ${deanAdministrationShell ? 'dean-administration-shell' : ''} ${directorAdmissionsShell ? 'director-admissions-shell' : ''} ${admissionManagerShell ? 'admission-manager-shell' : ''}`}>
       <aside className={`sidebar ${sideOpen ? 'open' : ''}`}>
         <div className="brand">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -369,13 +388,13 @@ export default function App({ onLogout }: { onLogout: () => void }) {
         </div>
 
         <nav className="side-nav">
-          {(deanAcademicsShell ? deanGroupKeys : principalShell ? Object.keys(principalGroups) : facultyShell ? Object.keys(facultyGroups) : admissionsOperationsShell ? activeAdmissionsGroupKeys : groupKeys).map(group => (
+          {(deanAcademicsShell ? deanGroupKeys : deanAdministrationShell ? deanAdministrationGroupKeys : principalShell ? Object.keys(principalGroups) : facultyShell ? Object.keys(facultyGroups) : admissionsOperationsShell ? activeAdmissionsGroupKeys : groupKeys).map(group => (
             <div key={group}>
-              {deanAcademicsShell || admissionsOperationsShell ? <button className="side-sec director-nav-group" onClick={() => deanAcademicsShell ? setCollapsedDeanGroups(current => ({ ...current, [group]: !current[group] })) : setCollapsedDirectorGroups(current => ({ ...current, [group]: !current[group] }))} type="button">{group}<span>{(deanAcademicsShell ? collapsedDeanGroups[group] : collapsedDirectorGroups[group]) ? '+' : '−'}</span></button> : <div className="side-sec">{group}</div>}
-              {((!deanAcademicsShell && !admissionsOperationsShell) || (deanAcademicsShell ? !collapsedDeanGroups[group] : !collapsedDirectorGroups[group])) && (deanAcademicsShell ? deanGroups[group] : principalShell ? principalGroups[group] : facultyShell ? facultyGroups[group] : admissionsOperationsShell ? activeAdmissionsGroups[group] : groups[group]).map((module: any) => (
+              {deanAcademicsShell || deanAdministrationShell || admissionsOperationsShell ? <button className="side-sec director-nav-group" onClick={() => (deanAcademicsShell || deanAdministrationShell) ? setCollapsedDeanGroups(current => ({ ...current, [group]: !current[group] })) : setCollapsedDirectorGroups(current => ({ ...current, [group]: !current[group] }))} type="button">{group}<span>{((deanAcademicsShell || deanAdministrationShell) ? collapsedDeanGroups[group] : collapsedDirectorGroups[group]) ? '+' : '−'}</span></button> : <div className="side-sec">{group}</div>}
+              {((!deanAcademicsShell && !deanAdministrationShell && !admissionsOperationsShell) || ((deanAcademicsShell || deanAdministrationShell) ? !collapsedDeanGroups[group] : !collapsedDirectorGroups[group])) && ((deanAcademicsShell ? deanGroups[group] : deanAdministrationShell ? deanAdministrationGroups[group] : principalShell ? principalGroups[group] : facultyShell ? facultyGroups[group] : admissionsOperationsShell ? activeAdmissionsGroups[group] : groups[group]) || []).map((module: any) => (
                 <button
-                  key={(deanAcademicsShell || principalShell || facultyShell || admissionsOperationsShell) ? `${group}-${module.label}` : module.key}
-                  className={`nav-item ${(facultyShell ? FACULTY_ACTIVE_LABEL[view] === module.label : view === module.key) && (!(deanAcademicsShell || principalShell || facultyShell || admissionsOperationsShell) || module.enabled) ? 'on' : ''}`}
+                  key={(deanAcademicsShell || deanAdministrationShell || principalShell || facultyShell || admissionsOperationsShell) ? `${group}-${module.label}` : module.key}
+                  className={`nav-item ${(facultyShell ? FACULTY_ACTIVE_LABEL[view] === module.label : view === module.key) && (!(deanAcademicsShell || deanAdministrationShell || principalShell || facultyShell || admissionsOperationsShell) || module.enabled) ? 'on' : ''}`}
                   onClick={() => {
                     setView(module.key)
                     setSideOpen(false)
@@ -529,6 +548,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <DeanPrograms />
     case 'overview':
       if (user.office_n === 6) return <DeanAcademicsDashboard go={go} />
+      if (user.office_n === 7) return <DeanAdministration mode="dashboard" />
       if (user.office_n === 15 && user.active_role === 'Director of Admissions') return <DirectorAdmissionsDashboard user={user} go={go} />
       if (user.persona === 'student') return <StudentHome user={user} go={go} />
       if (user.office_n === 12) return <AssociateProfessorHome go={go} />
@@ -587,6 +607,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       if (user.persona === 'student') return <StudentLibraryView />
       return <Library caps={caps} />
     case 'hr':
+      if (user.office_n === 24) return <SpecialistQueue title="HR Staffing Requests" />
       return <HR caps={caps} />
     case 'faculty_staff':
       return <FacultyStaff />
@@ -595,8 +616,31 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'recruitment':
       return <HR caps={caps} />
     case 'procurement':
+      if (user.office_n === 32) return <SpecialistQueue title="Procurement Requisitions" />
       return <Procurement caps={caps} />
+    case 'administration_dashboard':
+      return <DeanAdministration mode="dashboard" />
+    case 'administration_plans':
+      return <DeanAdministration mode="plans" />
+    case 'administration_requirements':
+      return <DeanAdministration mode="requirements" />
+    case 'administration_resources':
+      return <DeanAdministration mode="requirements" workspaceTitle="Resources & Facilities" categoryFilter="FACILITIES" />
+    case 'administration_workforce':
+      return <DeanAdministration mode="requirements" workspaceTitle="Workforce" categoryFilter="WORKFORCE" />
+    case 'administration_budget':
+      return <DeanAdministration mode="requirements" workspaceTitle="Budget" categoryFilter="BUDGET" />
+    case 'administration_procurement_assets':
+      return <DeanAdministration mode="requirements" workspaceTitle="Procurement & Assets" categoryFilter="PROCUREMENT,ASSETS" />
+    case 'administration_requests':
+      return <DeanAdministration mode="requests" />
+    case 'administration_reviews':
+      return <DeanAdministration mode="reviews" />
+    case 'administration_reports':
+      return <DeanAdministration mode="reports" />
     case 'assets':
+      if (user.office_n === 29) return <SpecialistQueue title="Facilities Work Orders" />
+      if (user.office_n === 27) return <SpecialistQueue title="IT Service Requests" />
       return <Assets caps={caps} />
     case 'hostel':
       return <Hostel caps={caps} />

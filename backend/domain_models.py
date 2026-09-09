@@ -1075,6 +1075,8 @@ class BudgetLine(Base):
     category = Column(String)          # Salaries / Infrastructure / Labs ...
     allocated = Column(Float, default=0)
     spent = Column(Float, default=0)
+    reserved = Column(Float, default=0)
+    committed = Column(Float, default=0)
     fiscal_year = Column(String, default="2025-26")
 
 

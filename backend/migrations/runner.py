@@ -23,6 +23,19 @@ from migrations import v0021_quality_effectiveness
 from migrations import v0022_job_queue
 from migrations import v0023_notification_delivery
 from migrations import v0024_governance_policy_repair
+from migrations import v0025_administration_domain
+from migrations import v0026_administration_workflow_policy
+from migrations import v0027_administration_scope_history
+from migrations import v0028_specialist_execution_boundaries
+from migrations import v0029_administration_reliability
+from migrations import v0030_administration_sla_policy_link
+from migrations import v0031_administration_sla_lifecycle
+from migrations import v0032_administration_evidence_policy
+from migrations import v0033_administration_evidence_retention
+from migrations import v0034_administration_evidence_verification
+from migrations import v0035_administration_approval_delegation
+from migrations import v0036_administration_finance_controls
+from migrations import v0037_administration_outbox_lease
 
 MIGRATIONS = [v0001_admissions_foundation, v0002_repair_legacy_application_status,
               v0003_admission_seat_pool_identity, v0004_admissions_phase2_application_context]
@@ -46,6 +59,19 @@ MIGRATIONS.append(v0021_quality_effectiveness)
 MIGRATIONS.append(v0022_job_queue)
 MIGRATIONS.append(v0023_notification_delivery)
 MIGRATIONS.append(v0024_governance_policy_repair)
+MIGRATIONS.append(v0025_administration_domain)
+MIGRATIONS.append(v0026_administration_workflow_policy)
+MIGRATIONS.append(v0027_administration_scope_history)
+MIGRATIONS.append(v0028_specialist_execution_boundaries)
+MIGRATIONS.append(v0029_administration_reliability)
+MIGRATIONS.append(v0030_administration_sla_policy_link)
+MIGRATIONS.append(v0031_administration_sla_lifecycle)
+MIGRATIONS.append(v0032_administration_evidence_policy)
+MIGRATIONS.append(v0033_administration_evidence_retention)
+MIGRATIONS.append(v0034_administration_evidence_verification)
+MIGRATIONS.append(v0035_administration_approval_delegation)
+MIGRATIONS.append(v0036_administration_finance_controls)
+MIGRATIONS.append(v0037_administration_outbox_lease)
 
 
 def upgrade(engine):

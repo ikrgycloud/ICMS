@@ -43,6 +43,8 @@ from portal_api import router as portal_router
 from integrations_api import router as integrations_router
 from sms_api import router as sms_router
 from frontdesk_api import router as frontdesk_router, seed_frontdesk
+from administration_api import router as administration_router
+from specialist_api import router as specialist_router
 from domain_seed import seed_domain
 import frontdesk_models  # register Front Office tables before create_all
 
@@ -55,8 +57,23 @@ bearer_scheme = HTTPBearer(scheme_name="BearerAuth", auto_error=False)
 
 app = FastAPI(title="ICMS — Integrated College/University Management System",
               version="1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
-                   allow_headers=["*"])
+_environment = os.environ.get("ICMS_ENVIRONMENT", "development").lower()
+_cors_origins = [origin.strip() for origin in os.environ.get("CORS_ALLOW_ORIGINS", "").split(",") if origin.strip()]
+if _environment in {"production", "prod"} and not _cors_origins:
+    raise RuntimeError("CORS_ALLOW_ORIGINS must be configured in production")
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins or ["http://localhost:5173", "http://localhost:8080"], allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+                   allow_headers=["Authorization", "Content-Type"])
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    if _environment in {"production", "prod"}:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
 
 # Defense-in-depth for routes that expose Dean academic governance.  This is
 # intentionally server-side so hidden frontend routes cannot be replayed.
@@ -86,6 +103,8 @@ app.include_router(portal_router)
 app.include_router(integrations_router)
 app.include_router(sms_router)
 app.include_router(frontdesk_router)
+app.include_router(administration_router)
+app.include_router(specialist_router)
 
 
 @app.on_event("startup")
@@ -867,6 +886,41 @@ def _workflow_process(process_key: str):
     return next((p for p in APPROVAL_MATRIX if p["key"] == process_key), None)
 
 
+def _approval_limit_from_db(s, ctx, process_key):
+    """Approval thresholds are policy data, not a runtime constant."""
+    row = (s.query(ApprovalLimit)
+           .filter(ApprovalLimit.tenant_id == ctx.get("tenant_id", TENANT),
+                   ApprovalLimit.scope_level == ctx.get("scope_level", "campus"),
+                   ApprovalLimit.process == process_key)
+           .first())
+    return row.threshold if row else None
+
+
+def _workflow_stage_offices(proc, stage):
+    """Resolve named legacy matrix stages to offices; unknown labels fail closed."""
+    if not proc or stage >= len(proc.get("chain", [])):
+        return set()
+    label = proc["chain"][stage].lower()
+    mapping = (("campus head", {3}), ("principal", {4}), ("vice principal", {5}),
+               ("dean", {6, 7, 8, 9}), ("finance", {22}), ("accounts", {23}),
+               ("hr", {24, 25}), ("purchase", {32}), ("procurement", {32}),
+               ("maintenance", {29}), ("system admin", {28}), ("security admin", {28}),
+               ("store", {33}), ("warden", {30}), ("transport", {31}),
+               ("admissions", {15}), ("exam", {16}), ("hod", {10}), ("chairman", {1}))
+    for token, offices in mapping:
+        if token in label:
+            return offices
+    return set()
+
+
+def _workflow_visible_to(wf, proc, ctx):
+    if wf.tenant_id != ctx.get("tenant_id", TENANT):
+        return False
+    if wf.initiator_id == ctx["sub"] or wf.office_n == ctx["office_n"]:
+        return True
+    return ctx["office_n"] in _workflow_stage_offices(proc, wf.current_stage)
+
+
 def _semester_meta_for_date(dt_value: datetime | None):
     current = dt_value or datetime.utcnow()
     year = current.year
@@ -944,7 +998,7 @@ def _ensure_workflow_profile(
 ):
     profile = s.query(WorkflowProfile).filter(WorkflowProfile.workflow_id == wf.id).first()
     if profile is None:
-        profile = WorkflowProfile(id=f"profile_{wf.id}", tenant_id=TENANT, workflow_id=wf.id)
+        profile = WorkflowProfile(id=f"profile_{wf.id}", tenant_id=wf.tenant_id, workflow_id=wf.id)
         s.add(profile)
     fallback = _semester_meta_for_date(wf.created_at)
     semester_meta = _semester_meta_from_key(semester_key, wf.created_at) if semester_key else fallback
@@ -982,7 +1036,7 @@ def _start_workflow_record(
         # Students can still initiate their own requests (create=Limited).
         pass
     wf = WorkflowInstance(
-        id=uid(), tenant_id=TENANT, process_key=proc["key"], label=proc["label"],
+        id=uid(), tenant_id=ctx.get("tenant_id", TENANT), process_key=proc["key"], label=proc["label"],
         office_n=proc["office_n"], title=clean_title, state="submitted",
         amount=amount, initiator_id=u.id, initiator_name=p.name if p else u.username,
         current_stage=1, scope_level=ctx.get("scope_level", "campus"))
@@ -1072,9 +1126,12 @@ class DecideWF(BaseModel):
 @app.post("/api/workflows/decide")
 def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)):
     wf = s.query(WorkflowInstance).get(body.workflow_id)
-    if not wf:
+    if not wf or wf.tenant_id != ctx.get("tenant_id", TENANT):
         raise HTTPException(404, "Workflow not found")
     proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
+    stage_offices = _workflow_stage_offices(proc, wf.current_stage)
+    if ctx["office_n"] != wf.office_n and ctx["office_n"] not in stage_offices:
+        raise HTTPException(403, "Only the current workflow stage owner may act")
     u = s.query(User).get(ctx["sub"])
     p = s.query(Person).get(u.person_id)
     o = office(ctx["office_n"])
@@ -1086,8 +1143,7 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
     rbac = rbac_for(ctx["office_n"], o["level"], verb if verb in VERBS else "approve")
 
     # Approval limit for this process & the actor's scope.
-    limit = approval_limit_for(ctx.get("scope_level", "campus"), wf.process_key) \
-        if proc and proc.get("amount") else None
+    limit = _approval_limit_from_db(s, ctx, wf.process_key) if proc and proc.get("amount") else None
 
     # Run the authority gate (Document §7 steps 8-13).
     dec = authorize(
@@ -1278,7 +1334,7 @@ def _visible_page_numbers(page: int, total_pages: int):
 
 @app.get("/api/workflows")
 def list_workflows(scope: str = "all", ctx=Depends(non_front_office), s=Depends(db)):
-    q = s.query(WorkflowInstance)
+    q = s.query(WorkflowInstance).filter(WorkflowInstance.tenant_id == ctx.get("tenant_id", TENANT))
     pending_states = ["submitted", "under_review", "reviewed", "escalated"]
     if scope == "mine":
         q = q.filter(WorkflowInstance.initiator_id == ctx["sub"])
@@ -1308,7 +1364,8 @@ def list_workflows(scope: str = "all", ctx=Depends(non_front_office), s=Depends(
                     seen.add(wf.id)
             rows = sorted(rows, key=lambda item: item.updated_at or item.created_at, reverse=True)[:100]
     else:
-        rows = q.order_by(desc(WorkflowInstance.updated_at)).limit(100).all()
+        candidates = q.order_by(desc(WorkflowInstance.updated_at)).limit(250).all()
+        rows = [row for row in candidates if _workflow_visible_to(row, _workflow_process(row.process_key), ctx)][:100]
     out = []
     for wf in rows:
         proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
@@ -1319,9 +1376,11 @@ def list_workflows(scope: str = "all", ctx=Depends(non_front_office), s=Depends(
 @app.get("/api/workflows/{wid}")
 def get_workflow(wid: str, ctx=Depends(non_front_office), s=Depends(db)):
     wf = s.query(WorkflowInstance).get(wid)
-    if not wf:
+    if not wf or wf.tenant_id != ctx.get("tenant_id", TENANT):
         raise HTTPException(404, "Not found")
     proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
+    if not _workflow_visible_to(wf, proc, ctx):
+        raise HTTPException(403, "Workflow is outside your scope")
     return _wf_payload(s, wf, proc)
 
 

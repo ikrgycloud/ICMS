@@ -16,6 +16,8 @@ from models import (Base, Tenant, OrgScope, Person, User, Role, Permission,
 # Register domain tables before additive schema creation.  This keeps command-line
 # bootstrap and test setup consistent with FastAPI startup.
 import domain_models  # noqa: F401
+import administration_models  # noqa: F401
+import specialist_models  # noqa: F401
 from authority import pwhash, VERBS, scope_covers
 from matrices import (rbac_for, APPROVAL_LIMITS, scope_for, APPROVAL_MATRIX)
 

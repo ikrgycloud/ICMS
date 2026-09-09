@@ -62,7 +62,6 @@ export default function DeanAcademicsDashboard({ go }: { go: (view: string) => v
   }
 
   const departmentPerformance = data?.department_performance || []
-  const maxDepartmentPass = Math.max(1, ...departmentPerformance.map((row: any) => Number(row.pass_rate || 0)))
   const trendData = data?.result_trends || []
   const curriculumEntries = Object.entries(data?.curriculum_status || {})
   const curriculumTotal = curriculumEntries.reduce((sum: number, [, count]) => sum + Number(count || 0), 0)
@@ -74,17 +73,9 @@ export default function DeanAcademicsDashboard({ go }: { go: (view: string) => v
     { label: 'Pending', value: Number(readiness.pending || 0) },
   ])
   const readinessTotal = readinessSegments.reduce((sum, segment) => sum + segment.value, 0)
-  const avgWorkload = data?.faculty_workload?.avg_load ?? 0
   const healthScorecard = data?.health_scorecard || []
   const healthPriority = data?.health_priority
   const healthScope = [filters.academic_year || 'All academic years', filters.semester ? `Semester ${filters.semester}` : 'All semesters'].join(' · ')
-  const exceptionItems = [
-    { label: 'Pending decisions', count: Number(data?.kpis?.needs_my_decision || 0), target: 'decision_inbox', tone: 'warning' },
-    { label: 'Timetable conflicts', count: Number(data?.kpis?.timetable_conflicts || 0), target: 'dean_timetable', tone: 'danger' },
-    { label: 'At-risk students', count: Number(data?.health?.at_risk_students || 0), target: 'analytics', tone: 'danger' },
-    { label: 'Overloaded faculty', count: Number(data?.faculty_workload?.overloaded || 0), target: 'dean_allocation', tone: 'warning' },
-  ]
-
   if (!data && loading) return <Spinner />
   if (!data) return <div className="card card-pad calendar-banner warn">{error || 'Unable to load academic dashboard'}</div>
 
@@ -114,18 +105,9 @@ export default function DeanAcademicsDashboard({ go }: { go: (view: string) => v
     <div className="dean-kpi-grid">
       {kpis.map(([label, value, target], index) => (
         <button key={label} className={`dean-kpi ${index === kpis.length - 1 ? 'needs-decision' : ''}`} onClick={() => go(String(target))} type="button" aria-label={`${label}: ${value}`}>
-          <div className="dean-kpi-icon"><DeanKpiIcon label={label} /></div>
+          <div className="dean-kpi-icon"><DeanKpiIcon label={String(label)} /></div>
           <div className="dean-kpi-label">{label}</div>
           <div className="dean-kpi-value">{value}</div>
-        </button>
-      ))}
-    </div>
-
-    <div className="dean-exception-strip" aria-label="Academic exceptions requiring attention">
-      <div className="dean-exception-intro"><span>Attention required</span><small>Priority items in your scope</small></div>
-      {exceptionItems.map((item) => (
-        <button key={item.label} className={`dean-exception-item ${item.tone}`} onClick={() => go(item.target)} type="button" aria-label={`${item.label}: ${item.count}`}>
-          <span>{item.label}</span><strong>{item.count}</strong>
         </button>
       ))}
     </div>
@@ -184,14 +166,6 @@ export default function DeanAcademicsDashboard({ go }: { go: (view: string) => v
       </section>
 
       <section className="dean-panel">
-        <div className="dean-panel-head"><h3>Faculty Workload</h3><button className="dean-panel-link" type="button" onClick={() => go('dean_allocation')}>Manage allocation</button></div>
-        <div className="dean-workload-wrap">
-          <WorkloadGauge value={Number(avgWorkload || 0)} status={data.faculty_workload?.status} units={data.faculty_workload?.avg_units} />
-          <div className="dean-workload-summary"><span><b>{Number(data.faculty_workload?.assigned || 0)}</b> assigned</span><span><b>{Number(data.faculty_workload?.unassigned || 0)}</b> unassigned</span><span><b>{Number(data.faculty_workload?.overloaded || 0)}</b> overloaded</span></div>
-        </div>
-      </section>
-
-      <section className="dean-panel">
         <div className="dean-panel-head"><h3>Result Trends (Overall Pass Rate %)</h3></div>
         <div className="dean-trend-wrap">
           <TrendChart data={trendData} />
@@ -224,6 +198,7 @@ export default function DeanAcademicsDashboard({ go }: { go: (view: string) => v
         </div>
         <button className="dean-view-all" onClick={() => go('decision_inbox')} type="button">View All</button>
       </section>
+
     </div>
   </div>
 }
@@ -258,28 +233,6 @@ function HealthMetric({ metric, onOpen }: { metric: any; onOpen: () => void }) {
     <small className={`dean-health-comparison ${trend}`}>{comparisonText}</small>
     <small className="dean-health-target">{metric.target}</small>
   </button>
-}
-
-function WorkloadGauge({ value, status, units }: { value: number; status?: string | null; units?: number | null }) {
-  const clamped = Math.min(100, Math.max(0, value))
-  const angle = 180 + clamped * 1.8
-  const radians = angle * Math.PI / 180
-  const x = 100 + 76 * Math.cos(radians)
-  const y = 100 + 76 * Math.sin(radians)
-  const label = status || 'No allocation data'
-  return <div className="dean-workload-gauge" role="img" aria-label={`Average faculty workload ${Math.round(clamped)} percent, ${label}`}>
-    <svg viewBox="0 0 200 120" aria-hidden="true">
-      <path className="gauge-track" pathLength="100" d="M24 100 A76 76 0 0 1 176 100" />
-      <path className="gauge-green" pathLength="100" strokeDasharray="25 75" strokeDashoffset="0" d="M24 100 A76 76 0 0 1 176 100" />
-      <path className="gauge-yellow" pathLength="100" strokeDasharray="25 75" strokeDashoffset="-25" d="M24 100 A76 76 0 0 1 176 100" />
-      <path className="gauge-orange" pathLength="100" strokeDasharray="25 75" strokeDashoffset="-50" d="M24 100 A76 76 0 0 1 176 100" />
-      <path className="gauge-red" pathLength="100" strokeDasharray="25 75" strokeDashoffset="-75" d="M24 100 A76 76 0 0 1 176 100" />
-      <line className="gauge-needle" x1="100" y1="100" x2={x} y2={y} />
-      <circle className="gauge-pin" cx="100" cy="100" r="5" />
-    </svg>
-    <div className="dean-workload-inner"><strong>{clamped < 10 ? clamped.toFixed(1) : Math.round(clamped)}%</strong><span>{label}</span>{units != null && <small>{Number(units).toFixed(2)} units / 4</small>}</div>
-    <div className="dean-workload-footer"><span>0%</span><span>100%</span></div>
-  </div>
 }
 
 function valueColoredSegments(segments: Array<{ label: string; value: number }>) {
