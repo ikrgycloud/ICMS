@@ -2869,6 +2869,75 @@ def _seed_payroll_demo_data(s):
     s.commit()
 
 
+def _ensure_payroll_staff_logins(s):
+    """Give every active payroll employee a usable demo portal login."""
+    payroll_rows = (
+        s.query(D.PayrollEmployee)
+        .join(D.StaffMember, D.StaffMember.id == D.PayrollEmployee.staff_member_id)
+        .filter(D.PayrollEmployee.status == "active", D.StaffMember.status == "active")
+        .order_by(D.PayrollEmployee.employee_code)
+        .all()
+    )
+    for payroll_emp in payroll_rows:
+        staff = s.get(D.StaffMember, payroll_emp.staff_member_id)
+        user = s.get(User, staff.user_id) if staff.user_id else None
+        if not user:
+            username = slug(payroll_emp.employee_code)
+            existing = s.query(User).filter(func.lower(User.username) == username.lower()).first()
+            if existing:
+                username = f"{username}_{slug(staff.id)}"
+
+            person_id = f"person_payroll_{staff.id}"
+            person = s.get(Person, person_id)
+            if not person:
+                person = Person(
+                    id=person_id,
+                    tenant_id=TENANT,
+                    name=staff.name,
+                    email=staff.email or f"{username}@icms.edu",
+                    contact=staff.phone or "",
+                )
+                s.add(person)
+                s.flush()
+
+            user = User(
+                id=f"user_payroll_{staff.id}",
+                tenant_id=TENANT,
+                person_id=person.id,
+                username=username,
+                password_hash=pwhash("demo123"),
+                status="active",
+                mfa_enabled=False,
+                office_n=staff.office_n,
+                role=staff.designation or "Staff",
+                scope_level="department" if staff.office_n in {11, 12, 13, 14} else "campus",
+                scope_ref=staff.dept_id or CAMPUS_SCOPES[0],
+            )
+            s.add(user)
+            s.flush()
+            staff.user_id = user.id
+
+        user.status = "active"
+        user.password_hash = pwhash("demo123")
+        if not user.office_n:
+            user.office_n = staff.office_n
+        if not user.role:
+            user.role = staff.designation or "Staff"
+
+        role_id = f"role_{staff.office_n}_0"
+        if s.get(Role, role_id):
+            link_id = f"ur_payroll_{staff.id}"
+            if not s.get(UserRole, link_id):
+                s.add(UserRole(
+                    id=link_id,
+                    user_id=user.id,
+                    role_id=role_id,
+                    org_scope_id=staff.dept_id or "scope_global",
+                ))
+
+    s.commit()
+
+
 def _seed_principal_dashboard_data(s):
     """Populate idempotent, date-distributed demo records for the Principal view.
 
@@ -4327,6 +4396,7 @@ def seed_domain():
         # seed encounters a legacy foreign-key conflict.
         _seed_non_teaching_staff_records(s)
         _seed_payroll_demo_data(s)
+        _ensure_payroll_staff_logins(s)
         _seed_core_domain(s)
         _seed_fee_setup_reference_data(s)
         _seed_reference_extensions(s)
@@ -4367,6 +4437,7 @@ def seed_domain():
             _seed_admissions_phase5(s)
         _seed_student_portal_accounts(s)
         _ensure_legacy_student_roll_login(s)
+        _ensure_payroll_staff_logins(s)
         return {
             "status": "domain-seeded",
             "schools": s.query(D.School).count(),
