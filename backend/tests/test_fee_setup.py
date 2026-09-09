@@ -144,3 +144,77 @@ class FeeSetupTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("pdf", content_type)
         self.assertGreater(len(body), 500)
+
+    def test_finance_manager_can_review_invoices_and_record_adjustments(self):
+        status, invoices = self._request("GET", "/api/finance/invoices", self.finance_token)
+        self.assertEqual(status, 200, invoices)
+        invoice = next((item for item in invoices.get("invoices", []) if float(item.get("balance", 0)) > 0), None)
+        self.assertIsNotNone(invoice, invoices)
+
+        status, review = self._request("POST", f"/api/finance/invoices/{invoice['id']}/review", self.finance_token, {
+            "decision": "approved",
+            "remarks": "Reviewed for collection"
+        })
+        self.assertEqual(status, 200, review)
+        self.assertIn(review.get("status", ""), {"approved", "pending_review"})
+
+        status, adjustment = self._request("POST", "/api/finance/adjustments", self.finance_token, {
+            "invoice_id": invoice["id"],
+            "adjustment_type": "credit",
+            "amount": 1,
+            "reason": "Test adjustment"
+        })
+        self.assertEqual(status, 200, adjustment)
+        self.assertEqual(adjustment.get("adjustment", {}).get("status"), "pending_review")
+
+    def test_accounts_office_workflow_supports_refunds_vendor_payments_and_day_close(self):
+        status, invoices = self._request("GET", "/api/finance/invoices", self.finance_token)
+        self.assertEqual(status, 200, invoices)
+        invoice = next((item for item in invoices.get("invoices", []) if float(item.get("paid", 0)) > 0), None)
+        self.assertIsNotNone(invoice, invoices)
+
+        status, refund = self._request("POST", "/api/finance/refunds", self.finance_token, {
+            "invoice_id": invoice["id"],
+            "amount": 1,
+            "reason": "Test refund request"
+        })
+        self.assertEqual(status, 200, refund)
+        refund_id = refund.get("refund", {}).get("id")
+        self.assertIsNotNone(refund_id)
+
+        status, reviewed = self._request("POST", f"/api/finance/refunds/{refund_id}/decision", self.finance_token, {
+            "decision": "approved",
+            "remarks": "Approved for test"
+        })
+        self.assertEqual(status, 200, reviewed)
+        self.assertEqual(reviewed.get("refund", {}).get("status"), "approved")
+
+        status, executed = self._request("POST", f"/api/finance/refunds/{refund_id}/execute", self.finance_token)
+        self.assertEqual(status, 200, executed)
+        self.assertEqual(executed.get("refund", {}).get("status"), "executed")
+
+        status, vendor = self._request("POST", "/api/finance/vendor-payments", self.finance_token, {
+            "vendor_name": "Test Vendor",
+            "invoice_ref": "INV-TEST-1",
+            "amount": 250,
+            "notes": "Test vendor payment request"
+        })
+        self.assertEqual(status, 200, vendor)
+        vendor_id = vendor.get("vendor_payment", {}).get("id")
+        self.assertIsNotNone(vendor_id)
+
+        status, approved_vendor = self._request("POST", f"/api/finance/vendor-payments/{vendor_id}/approve", self.finance_token, {
+            "approval_reference": "VP-APP-001"
+        })
+        self.assertEqual(status, 200, approved_vendor)
+        self.assertEqual(approved_vendor.get("vendor_payment", {}).get("status"), "approved")
+
+        status, paid_vendor = self._request("POST", f"/api/finance/vendor-payments/{vendor_id}/pay", self.finance_token)
+        self.assertEqual(status, 200, paid_vendor)
+        self.assertEqual(paid_vendor.get("vendor_payment", {}).get("status"), "paid")
+
+        status, day_close = self._request("POST", "/api/finance/day-close", self.finance_token, {
+            "notes": "Test day close"
+        })
+        self.assertEqual(status, 200, day_close)
+        self.assertEqual(day_close.get("day_close", {}).get("status"), "closed")

@@ -5049,17 +5049,70 @@ def execute_academic_rollover(rollover_id: str, ctx=Depends(auth), s=Depends(db)
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.rollover.execute", f"rollover:{row.id}", "approved", "completed", f"Processed {len(promoted)} promoted students")
     return _rollover_payload(s, row)
 
+def _format_fee_category(value: str | None):
+    if not value:
+        return "Uncategorised"
+    return value.replace("_", " ").strip().title()
+
+
+def _invoice_fee_category_details(s, invoice):
+    lines = []
+    if invoice and invoice.fee_structure_id:
+        lines = s.query(D.FeeStructureLine).filter(D.FeeStructureLine.fee_structure_id == invoice.fee_structure_id).all()
+
+    categories = {}
+    for line in lines:
+        head = s.get(D.FeeHead, line.fee_head_id)
+        if not head:
+            continue
+        category = _format_fee_category(head.category)
+        if category not in categories:
+            categories[category] = {"fee_category_id": None, "fee_category": category,
+                                    "assigned": 0.0, "paid": 0.0, "balance": 0.0}
+        categories[category]["assigned"] += float(line.amount or 0)
+
+    if not categories:
+        summary = [{"fee_category_id": None, "fee_category": "Uncategorised",
+                    "assigned": float(invoice.amount or 0), "paid": float(invoice.paid or 0),
+                    "balance": float((invoice.amount or 0) - (invoice.paid or 0))}]
+        return {"fee_category_id": None, "fee_category": "Uncategorised", "categories": summary}
+
+    summaries = []
+    for category in categories:
+        assigned = round(categories[category]["assigned"], 2)
+        paid = round(min(float(invoice.paid or 0), assigned), 2)
+        balance = round(max(assigned - paid, 0), 2)
+        summaries.append({"fee_category_id": None, "fee_category": category,
+                          "assigned": assigned, "paid": paid, "balance": balance})
+
+    summaries.sort(key=lambda x: x["fee_category"])
+    primary = summaries[0]["fee_category"] if len(summaries) == 1 else "Mixed"
+    return {"fee_category_id": None, "fee_category": primary, "categories": summaries}
+
+
 @router.get("/finance/invoices")
 def list_invoices(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "finance", "view")[0])
     stu_map = {st.id: (st.roll_no, st.name) for st in s.query(D.Student).all()}
     rows = s.query(D.FeeInvoice).limit(300).all()
     out = []
+    category_buckets = {}
     for r in rows:
         roll, name = stu_map.get(r.student_id, ("", ""))
-        out.append({"id": r.id, "roll_no": roll, "name": name, "term": r.term,
-                    "amount": r.amount, "paid": r.paid, "balance": r.amount - r.paid,
-                    "status": r.status})
+        invoice_details = _invoice_fee_category_details(s, r)
+        row = {"id": r.id, "roll_no": roll, "name": name, "term": r.term,
+               "amount": r.amount, "paid": r.paid, "balance": r.amount - r.paid,
+               "status": r.status, "fee_category_id": invoice_details["fee_category_id"],
+               "fee_category": invoice_details["fee_category"], "categories": invoice_details["categories"]}
+        out.append(row)
+        for category in invoice_details["categories"]:
+            key = category["fee_category"]
+            bucket = category_buckets.setdefault(key, {"fee_category_id": None, "fee_category": key,
+                                                      "assigned": 0.0, "paid": 0.0, "balance": 0.0})
+            bucket["assigned"] += category["assigned"]
+            bucket["paid"] += category["paid"]
+            bucket["balance"] += category["balance"]
+
     summary = {
         "total_billed": s.query(func.coalesce(func.sum(D.FeeInvoice.amount), 0)).scalar() or 0,
         "total_collected": s.query(func.coalesce(func.sum(D.FeeInvoice.paid), 0)).scalar() or 0,
@@ -5069,10 +5122,15 @@ def list_invoices(ctx=Depends(auth), s=Depends(db)):
     payment_rows = []
     for payment in payments:
         roll, name = stu_map.get(payment.student_id, ("", ""))
+        invoice_details = _invoice_fee_category_details(s, s.get(D.FeeInvoice, payment.invoice_id)) if payment.invoice_id else {"fee_category_id": None, "fee_category": "Uncategorised", "categories": []}
         payment_rows.append({"id": payment.id, "invoice_id": payment.invoice_id, "roll_no": roll,
                              "name": name, "amount": payment.amount, "method": payment.method,
-                             "reference": payment.reference, "status": payment.status or "success", "at": payment.at.isoformat() if payment.at else ""})
+                             "reference": payment.reference, "status": payment.status or "success",
+                             "fee_category_id": invoice_details["fee_category_id"],
+                             "fee_category": invoice_details["fee_category"],
+                             "at": payment.at.isoformat() if payment.at else ""})
     return {"invoices": out, "payments": payment_rows, "summary": summary,
+            "categories": sorted(category_buckets.values(), key=lambda x: x["fee_category"]),
             "can_record": can(s, ctx, "finance", "record_payment"),
             "can_waive": can(s, ctx, "finance", "waive")}
 
@@ -5192,6 +5250,368 @@ class WaiveIn(BaseModel):
     invoice_id: str
     amount: float
     reason: str = ""
+
+
+class InvoiceReviewIn(BaseModel):
+    decision: str = "approved"
+    remarks: str = ""
+
+
+class FinanceAdjustmentIn(BaseModel):
+    invoice_id: str
+    adjustment_type: str = "credit"
+    amount: float = Field(gt=0)
+    reason: str = ""
+
+
+class FinanceReconciliationIn(BaseModel):
+    period_start: date | None = None
+    period_end: date | None = None
+    notes: str = ""
+
+
+class FinanceRefundIn(BaseModel):
+    invoice_id: str
+    amount: float = Field(gt=0)
+    reason: str = ""
+
+
+class FinanceRefundDecisionIn(BaseModel):
+    decision: str = "approved"
+    remarks: str = ""
+
+
+class VendorPaymentIn(BaseModel):
+    vendor_name: str
+    invoice_ref: str = ""
+    amount: float = Field(gt=0)
+    notes: str = ""
+
+
+class VendorPaymentApprovalIn(BaseModel):
+    approval_reference: str = ""
+
+
+class FinanceDayCloseIn(BaseModel):
+    notes: str = ""
+
+
+@router.post("/finance/invoices/{invoice_id}/review")
+def review_invoice(invoice_id: str, body: InvoiceReviewIn, ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "finance", "view")[0])
+    invoice = s.get(D.FeeInvoice, invoice_id)
+    if not invoice:
+        raise HTTPException(404, "Invoice not found")
+    decision = (body.decision or "approved").strip().lower()
+    if decision not in {"approved", "pending_review", "rejected"}:
+        raise HTTPException(422, "Invalid invoice review decision")
+    review = D.FinanceInvoiceReview(id=uid(), tenant_id=TENANT, invoice_id=invoice.id,
+        student_id=invoice.student_id, decision=decision, remarks=body.remarks or "",
+        reviewed_by=ctx["sub"], reviewed_at=datetime.utcnow())
+    s.add(review)
+    invoice.status = "paid" if invoice.paid >= invoice.amount and invoice.amount else (
+        "partial" if invoice.paid > 0 else invoice.status)
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.invoice.review",
+                f"invoice:{invoice.id}", invoice.status, decision, body.remarks or "Reviewed")
+    return {"status": decision, "review": {"id": review.id, "decision": decision, "remarks": review.remarks}}
+
+
+@router.get("/finance/adjustments")
+def list_adjustments(ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "finance", "view")[0])
+    rows = s.query(D.FinanceAdjustment).order_by(desc(D.FinanceAdjustment.created_at)).all()
+    return {"adjustments": [{
+        "id": row.id,
+        "invoice_id": row.invoice_id,
+        "student_id": row.student_id,
+        "adjustment_type": row.adjustment_type,
+        "amount": row.amount,
+        "reason": row.reason,
+        "status": row.status,
+        "created_by": row.created_by,
+        "reviewed_by": row.reviewed_by,
+        "remarks": row.remarks,
+        "created_at": row.created_at.isoformat() if row.created_at else "",
+    } for row in rows]}
+
+
+@router.post("/finance/adjustments")
+def create_adjustment(body: FinanceAdjustmentIn, ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "finance", "view")[0])
+    invoice = s.get(D.FeeInvoice, body.invoice_id)
+    if not invoice:
+        raise HTTPException(404, "Invoice not found")
+    if body.adjustment_type not in {"credit", "debit", "refund"}:
+        raise HTTPException(422, "Invalid adjustment type")
+    row = D.FinanceAdjustment(id=uid(), tenant_id=TENANT, invoice_id=invoice.id,
+        student_id=invoice.student_id, adjustment_type=body.adjustment_type,
+        amount=float(body.amount), reason=body.reason or "", status="pending_review",
+        created_by=ctx["sub"])
+    s.add(row)
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.adjustment.create",
+                f"invoice:{invoice.id}", "pending_review", row.adjustment_type,
+                f"Adjustment requested: ₹{body.amount:,.0f}")
+    return {"status": "pending_review", "adjustment": {"id": row.id, "invoice_id": row.invoice_id,
+        "student_id": row.student_id, "adjustment_type": row.adjustment_type, "amount": row.amount,
+        "status": row.status, "reason": row.reason}}
+
+
+@router.get("/finance/reconciliations")
+def list_reconciliations(ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "finance", "view")[0])
+    rows = s.query(D.FinanceReconciliation).order_by(desc(D.FinanceReconciliation.created_at)).all()
+    return {"reconciliations": [{
+        "id": row.id,
+        "period_start": row.period_start.isoformat() if row.period_start else "",
+        "period_end": row.period_end.isoformat() if row.period_end else "",
+        "opening_balance": row.opening_balance,
+        "total_collected": row.total_collected,
+        "total_adjustments": row.total_adjustments,
+        "closing_balance": row.closing_balance,
+        "status": row.status,
+        "notes": row.notes,
+        "created_by": row.created_by,
+        "closed_at": row.closed_at.isoformat() if row.closed_at else "",
+    } for row in rows]}
+
+
+@router.post("/finance/reconciliations")
+def create_reconciliation(body: FinanceReconciliationIn, ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "finance", "view")[0])
+    start = body.period_start or date.today().replace(day=1)
+    end = body.period_end or date.today()
+    summary = {"total_billed": s.query(func.coalesce(func.sum(D.FeeInvoice.amount), 0)).scalar() or 0,
+               "total_collected": s.query(func.coalesce(func.sum(D.FeeInvoice.paid), 0)).scalar() or 0,
+               "outstanding": s.query(func.coalesce(func.sum(D.FeeInvoice.amount - D.FeeInvoice.paid), 0)).scalar() or 0}
+    row = D.FinanceReconciliation(id=uid(), tenant_id=TENANT, period_start=datetime.combine(start, datetime.min.time()),
+        period_end=datetime.combine(end, datetime.max.time()), opening_balance=0,
+        total_collected=float(summary["total_collected"]), total_adjustments=0,
+        closing_balance=float(summary["total_collected"]), status="closed",
+        notes=body.notes or "", created_by=ctx["sub"])
+    s.add(row)
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.reconciliation.create",
+                f"reconciliation:{row.id}", "draft", "closed", row.notes or "Generated reconciliation")
+    return {"status": "closed", "reconciliation": {"id": row.id, "status": row.status, "notes": row.notes}}
+
+
+@router.get("/finance/refunds")
+def list_refunds(ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "finance", "view")[0])
+    rows = s.query(D.FinanceRefund).order_by(desc(D.FinanceRefund.created_at)).all()
+    return {"refunds": [{
+        "id": row.id,
+        "invoice_id": row.invoice_id,
+        "student_id": row.student_id,
+        "amount": row.amount,
+        "reason": row.reason,
+        "status": row.status,
+        "remarks": row.remarks,
+        "created_by": row.created_by,
+        "approved_by": row.approved_by,
+        "executed_by": row.executed_by,
+        "created_at": row.created_at.isoformat() if row.created_at else "",
+        "approved_at": row.approved_at.isoformat() if row.approved_at else "",
+        "executed_at": row.executed_at.isoformat() if row.executed_at else "",
+    } for row in rows]}
+
+
+@router.post("/finance/refunds")
+def create_refund(body: FinanceRefundIn, ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "finance", "view")[0])
+    invoice = s.get(D.FeeInvoice, body.invoice_id)
+    if not invoice:
+        raise HTTPException(404, "Invoice not found")
+    if float(body.amount or 0) <= 0:
+        raise HTTPException(422, "Refund amount must be greater than zero")
+    if float(body.amount or 0) > float(invoice.paid or 0):
+        raise HTTPException(422, "Refund amount cannot exceed the invoice's paid amount")
+    row = D.FinanceRefund(id=uid(), tenant_id=TENANT, invoice_id=invoice.id,
+        student_id=invoice.student_id, amount=float(body.amount), reason=body.reason or "",
+        status="pending_approval", created_by=ctx["sub"])
+    s.add(row)
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.refund.create",
+                f"invoice:{invoice.id}", "pending_approval", "created", f"Refund requested: ₹{body.amount:,.0f}")
+    return {"status": "pending_approval", "refund": {"id": row.id, "invoice_id": row.invoice_id, "student_id": row.student_id, "amount": row.amount, "status": row.status, "reason": row.reason}}
+
+
+@router.post("/finance/refunds/{refund_id}/decision")
+def decide_refund(refund_id: str, body: FinanceRefundDecisionIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "finance", "waive", amount=0)
+    require(dec)
+    refund = s.get(D.FinanceRefund, refund_id)
+    if not refund:
+        raise HTTPException(404, "Refund request not found")
+    if refund.status not in {"pending_approval"}:
+        raise HTTPException(409, "Refund request is not pending approval")
+    decision = (body.decision or "approved").strip().lower()
+    if decision not in {"approved", "rejected"}:
+        raise HTTPException(422, "Invalid refund decision")
+    refund.status = decision == "approved" and "approved" or "rejected"
+    refund.approved_by = ctx["sub"]
+    refund.approved_at = datetime.utcnow()
+    refund.remarks = body.remarks or ""
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.refund.approve",
+                f"refund:{refund.id}", "pending_approval", refund.status, refund.remarks or "Refund decision recorded")
+    return {"status": refund.status, "refund": {"id": refund.id, "status": refund.status, "remarks": refund.remarks}}
+
+
+@router.post("/finance/refunds/{refund_id}/execute")
+def execute_refund(refund_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "finance", "waive", amount=0)
+    require(dec)
+    refund = s.get(D.FinanceRefund, refund_id)
+    if not refund:
+        raise HTTPException(404, "Refund request not found")
+    if refund.status != "approved":
+        raise HTTPException(409, "Only approved refund requests can be executed")
+    invoice = s.get(D.FeeInvoice, refund.invoice_id)
+    if not invoice:
+        raise HTTPException(404, "Invoice not found")
+    amount = float(refund.amount or 0)
+    if amount <= 0:
+        raise HTTPException(422, "Refund amount must be greater than zero")
+    if amount > float(invoice.paid or 0):
+        raise HTTPException(409, "Refund amount exceeds the invoice's paid balance")
+    invoice.paid = max(float(invoice.paid or 0) - amount, 0)
+    invoice.status = "paid" if invoice.paid >= invoice.amount else ("partial" if invoice.paid > 0 else "due")
+    refund.status = "executed"
+    refund.executed_by = ctx["sub"]
+    refund.executed_at = datetime.utcnow()
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.refund.execute",
+                f"refund:{refund.id}", "approved", "executed", f"Executed refund: ₹{amount:,.0f}")
+    return {"status": "executed", "refund": {"id": refund.id, "invoice_id": refund.invoice_id, "status": refund.status, "amount": refund.amount}}
+
+
+@router.get("/finance/vendor-payments")
+def list_vendor_payments(ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "finance", "view")[0])
+    rows = s.query(D.VendorPayment).order_by(desc(D.VendorPayment.created_at)).all()
+    return {"vendor_payments": [{
+        "id": row.id,
+        "vendor_name": row.vendor_name,
+        "invoice_ref": row.invoice_ref,
+        "amount": row.amount,
+        "status": row.status,
+        "approval_reference": row.approval_reference,
+        "notes": row.notes,
+        "created_by": row.created_by,
+        "approved_by": row.approved_by,
+        "paid_by": row.paid_by,
+        "created_at": row.created_at.isoformat() if row.created_at else "",
+        "approved_at": row.approved_at.isoformat() if row.approved_at else "",
+        "paid_at": row.paid_at.isoformat() if row.paid_at else "",
+    } for row in rows]}
+
+
+@router.post("/finance/vendor-payments")
+def create_vendor_payment(body: VendorPaymentIn, ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "finance", "view")[0])
+    row = D.VendorPayment(id=uid(), tenant_id=TENANT, vendor_name=body.vendor_name.strip() or "",
+        invoice_ref=body.invoice_ref.strip() or "", amount=float(body.amount), notes=body.notes or "",
+        status="pending_approval", created_by=ctx["sub"])
+    s.add(row)
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.vendor_payment.create",
+                f"vendor:{row.id}", "pending_approval", "created", f"Vendor payment requested: ₹{body.amount:,.0f}")
+    return {"status": "pending_approval", "vendor_payment": {"id": row.id, "vendor_name": row.vendor_name, "invoice_ref": row.invoice_ref, "amount": row.amount, "status": row.status, "notes": row.notes}}
+
+
+@router.post("/finance/vendor-payments/{vendor_payment_id}/approve")
+def approve_vendor_payment(vendor_payment_id: str, body: VendorPaymentApprovalIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "finance", "waive", amount=0)
+    require(dec)
+    row = s.get(D.VendorPayment, vendor_payment_id)
+    if not row:
+        raise HTTPException(404, "Vendor payment not found")
+    if row.status not in {"pending_approval"}:
+        raise HTTPException(409, "Vendor payment is not pending approval")
+    row.status = "approved"
+    row.approval_reference = body.approval_reference.strip() or row.approval_reference or f"VP-{uid()[:8].upper()}"
+    row.approved_by = ctx["sub"]
+    row.approved_at = datetime.utcnow()
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.vendor_payment.approve",
+                f"vendor:{row.id}", "pending_approval", "approved", row.approval_reference)
+    return {"status": "approved", "vendor_payment": {"id": row.id, "status": row.status, "approval_reference": row.approval_reference}}
+
+
+@router.post("/finance/vendor-payments/{vendor_payment_id}/pay")
+def pay_vendor_payment(vendor_payment_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "finance", "waive", amount=0)
+    require(dec)
+    row = s.get(D.VendorPayment, vendor_payment_id)
+    if not row:
+        raise HTTPException(404, "Vendor payment not found")
+    if row.status != "approved":
+        raise HTTPException(409, "Only approved vendor payments can be paid")
+    row.status = "paid"
+    row.paid_by = ctx["sub"]
+    row.paid_at = datetime.utcnow()
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.vendor_payment.pay",
+                f"vendor:{row.id}", "approved", "paid", f"Vendor payment settled: ₹{row.amount:,.0f}")
+    return {"status": "paid", "vendor_payment": {"id": row.id, "status": row.status, "amount": row.amount}}
+
+
+@router.get("/finance/day-closes")
+def list_day_closes(ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "finance", "view")[0])
+    rows = s.query(D.FinanceDayClose).order_by(desc(D.FinanceDayClose.close_date)).all()
+    return {"day_closes": [{
+        "id": row.id,
+        "close_date": row.close_date.isoformat() if row.close_date else "",
+        "total_collected": row.total_collected,
+        "total_pending_verification": row.total_pending_verification,
+        "total_pending_clearance": row.total_pending_clearance,
+        "total_adjustments": row.total_adjustments,
+        "total_refunds": row.total_refunds,
+        "total_vendor_payments": row.total_vendor_payments,
+        "opening_balance": row.opening_balance,
+        "closing_balance": row.closing_balance,
+        "status": row.status,
+        "notes": row.notes,
+        "created_by": row.created_by,
+        "closed_at": row.closed_at.isoformat() if row.closed_at else "",
+    } for row in rows]}
+
+
+@router.post("/finance/day-close")
+def create_day_close(body: FinanceDayCloseIn, ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "finance", "view")[0])
+    close_date = date.today()
+    existing = s.query(D.FinanceDayClose).filter(D.FinanceDayClose.close_date == close_date).first()
+    if existing:
+        existing.notes = body.notes or existing.notes
+        existing.status = "closed"
+        existing.closed_at = datetime.utcnow()
+        s.commit()
+        return {"status": "closed", "day_close": {"id": existing.id, "close_date": existing.close_date.isoformat(), "status": existing.status}}
+
+    total_collected = float(s.query(func.coalesce(func.sum(D.Payment.amount), 0)).filter(D.Payment.status == "success").scalar() or 0)
+    total_pending_verification = float(s.query(func.coalesce(func.sum(D.Payment.amount), 0)).filter(D.Payment.status == "pending_verification").scalar() or 0)
+    total_pending_clearance = float(s.query(func.coalesce(func.sum(D.Payment.amount), 0)).filter(D.Payment.status == "pending_clearance").scalar() or 0)
+    total_adjustments = float(s.query(func.coalesce(func.sum(D.FinanceAdjustment.amount), 0)).filter(D.FinanceAdjustment.status == "approved").scalar() or 0)
+    total_refunds = float(s.query(func.coalesce(func.sum(D.FinanceRefund.amount), 0)).filter(D.FinanceRefund.status == "executed").scalar() or 0)
+    total_vendor_payments = float(s.query(func.coalesce(func.sum(D.VendorPayment.amount), 0)).filter(D.VendorPayment.status == "paid").scalar() or 0)
+    opening_balance = total_collected - total_adjustments - total_refunds - total_vendor_payments
+    closing_balance = opening_balance
+    row = D.FinanceDayClose(id=uid(), tenant_id=TENANT, close_date=close_date,
+        total_collected=total_collected, total_pending_verification=total_pending_verification,
+        total_pending_clearance=total_pending_clearance, total_adjustments=total_adjustments,
+        total_refunds=total_refunds, total_vendor_payments=total_vendor_payments,
+        opening_balance=opening_balance, closing_balance=closing_balance,
+        status="closed", notes=body.notes or "", created_by=ctx["sub"])
+    s.add(row)
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.day_close",
+                f"day_close:{row.id}", "draft", "closed", row.notes or "Closed the day")
+    return {"status": "closed", "day_close": {"id": row.id, "close_date": row.close_date.isoformat(), "status": row.status, "closing_balance": row.closing_balance}}
 
 
 @router.post("/finance/waive")

@@ -2,18 +2,139 @@ import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { Empty, Spinner } from '../modules/kit'
 
-const money = (value: number) => `â‚¹${value.toLocaleString('en-IN')}`
+const money = (value: number) => `₹${Number(value || 0).toLocaleString('en-IN')}`
 
 export default function FacultyPayroll() {
   const [data, setData] = useState<any>(null)
-  useEffect(() => { api.facultyHome().then(setData).catch(() => setData({ error: true })) }, [])
+
+  useEffect(() => {
+    api.facultyPayroll().then(setData).catch(() => setData({ error: true }))
+  }, [])
+
   if (!data) return <Spinner />
   if (data.error) return <Empty icon="!" text="Payroll details could not be loaded." />
+
   const profile = data.profile || {}
-  const base = 68000, hra = 17000, academic = 6000, transport = 2400, gross = base + hra + academic + transport, pf = 8160, tax = 3900, professionalTax = 200, net = gross - pf - tax - professionalTax
-  const earnings = [['Basic pay', base], ['House rent allowance', hra], ['Academic allowance', academic], ['Transport allowance', transport]]
-  const deductions = [['Provident fund', pf], ['Income tax', tax], ['Professional tax', professionalTax]]
-  return <main className="faculty-payroll fade-in"><section className="faculty-payroll-head"><div><h1>Payroll</h1><p>Your salary statement, earnings, deductions, and payment status.</p></div><button type="button" onClick={() => window.print()}>Print statement</button></section><section className="faculty-payroll-summary"><article><small>Net pay</small><b>{money(net)}</b><span>August 2026 Â· Credited</span></article><article><small>Gross earnings</small><b>{money(gross)}</b><span>Before deductions</span></article><article><small>Total deductions</small><b>{money(pf + tax + professionalTax)}</b><span>PF, tax &amp; professional tax</span></article><article><small>Payment status</small><b className="payroll-success">Credited</b><span>28 Aug 2026</span></article></section><section className="faculty-payroll-grid"><article className="faculty-payroll-card"><header><div><h2>Salary statement</h2><p>August 2026</p></div><span className="payroll-pill">Paid</span></header><div className="payroll-person"><i>{profile.name?.split(' ').map((part: string) => part[0]).slice(0, 2).join('') || 'F'}</i><div><b>{profile.name || 'Faculty member'}</b><span>{profile.designation || 'Faculty'} Â· Employee payroll account</span></div></div><div className="payroll-columns"><section><h3>Earnings</h3>{earnings.map(([label, amount]) => <div key={String(label)}><span>{label}</span><b>{money(Number(amount))}</b></div>)}<footer><span>Gross earnings</span><b>{money(gross)}</b></footer></section><section><h3>Deductions</h3>{deductions.map(([label, amount]) => <div key={String(label)}><span>{label}</span><b>{money(Number(amount))}</b></div>)}<footer><span>Total deductions</span><b>{money(pf + tax + professionalTax)}</b></footer></section></div><div className="payroll-net"><span>Net salary credited</span><b>{money(net)}</b></div></article><aside className="faculty-payroll-side"><article><h2>Payment details</h2><div><span>Payment date</span><b>28 Aug 2026</b></div><div><span>Payment method</span><b>Bank transfer</b></div><div><span>Bank account</span><b>â€¢â€¢â€¢â€¢ 4821</b></div><div><span>Reference</span><b>PAY-2026-008</b></div></article><article><h2>Payroll support</h2><p>For a correction in earnings, deductions, or bank details, raise an HR service request.</p><button type="button">Raise payroll query</button></article></aside></section><p className="faculty-payroll-note">Demo payroll information for the faculty portal. Final salary processing remains with HR and Finance.</p></main>
+  const entry = data.entry || {}
+  const run = data.run || {}
+  const payment = data.payment || {}
+  const earnings = data.earnings || []
+  const deductions = data.deductions || []
+
+  const gross = Number(entry.gross_salary || 0)
+  const totalDeductions = Number(entry.total_deductions || 0)
+  const net = Number(entry.net_salary || gross - totalDeductions)
+
+  const paymentDate = run.payment_date || payment.posted_at || '—'
+  const paymentStatus = entry.payment_status || 'pending'
+  const isPaid = paymentStatus === 'paid'
+
+  return (
+    <main className="faculty-payroll fade-in">
+      <section className="faculty-payroll-head">
+        <div>
+          <h1>Payroll</h1>
+          <p>Your salary statement, earnings, deductions, and payment status.</p>
+        </div>
+        <button type="button" onClick={() => window.print()}>Print statement</button>
+      </section>
+
+      <section className="faculty-payroll-summary">
+        <article>
+          <small>Net pay</small>
+          <b>{money(net)}</b>
+          <span>{run.payroll_month || 'Current month'} · {isPaid ? 'Credited' : paymentStatus}</span>
+        </article>
+        <article>
+          <small>Gross earnings</small>
+          <b>{money(gross)}</b>
+          <span>Before deductions</span>
+        </article>
+        <article>
+          <small>Total deductions</small>
+          <b>{money(totalDeductions)}</b>
+          <span>PF, tax &amp; deductions</span>
+        </article>
+        <article>
+          <small>Payment status</small>
+          <b className={isPaid ? 'payroll-success' : 'payroll-warning'}>{isPaid ? 'Credited' : paymentStatus}</b>
+          <span>{paymentDate}</span>
+        </article>
+      </section>
+<section className="faculty-payroll-grid">
+        <article className="faculty-payroll-card">
+          <header>
+            <div>
+              <h2>Salary statement</h2>
+              <p>{run.run_name || 'Latest payroll run'}</p>
+            </div>
+            <span className="payroll-pill">{paymentStatus}</span>
+          </header>
+
+          <div className="payroll-person">
+            <i>{profile.name?.split(' ').map((part: string) => part[0]).slice(0, 2).join('') || 'F'}</i>
+            <div>
+              <b>{profile.name || 'Faculty member'}</b>
+              <span>{profile.designation || 'Faculty'} · {profile.department || 'Employee payroll account'}</span>
+            </div>
+          </div>
+
+          <div className="payroll-columns">
+            <section>
+              <h3>Earnings</h3>
+              {earnings.map((item: any) => (
+                <div key={item.label}>
+                  <span>{item.label}</span>
+                  <b>{money(item.amount)}</b>
+                </div>
+              ))}
+              <footer>
+                <span>Gross earnings</span>
+                <b>{money(gross)}</b>
+              </footer>
+            </section>
+
+            <section>
+              <h3>Deductions</h3>
+              {deductions.map((item: any) => (
+                <div key={item.label}>
+                  <span>{item.label}</span>
+                  <b>{money(item.amount)}</b>
+                </div>
+              ))}
+              <footer>
+                <span>Total deductions</span>
+                <b>{money(totalDeductions)}</b>
+              </footer>
+            </section>
+          </div>
+
+          <div className="payroll-net">
+            <span>Net salary credited</span>
+            <b>{money(net)}</b>
+          </div>
+        </article>
+
+        <aside className="faculty-payroll-side">
+          <article>
+            <h2>Payment details</h2>
+            <div><span>Payment date</span><b>{paymentDate}</b></div>
+            <div><span>Payment method</span><b>{payment.payment_method || profile.pay_mode || 'Bank transfer'}</b></div>
+            <div><span>Reference</span><b>{payment.bank_ref_no || '—'}</b></div>
+            <div><span>Account</span><b>{profile.bank_account_no || '—'}</b></div>
+          </article>
+
+          <article>
+            <h2>Salary summary</h2>
+            <div><span>Present days</span><b>{entry.present_days || 0}</b></div>
+            <div><span>Paid days</span><b>{entry.paid_days || 0}</b></div>
+            <div><span>Leave days</span><b>{entry.leave_days || 0}</b></div>
+            <div><span>Employee code</span><b>{profile.employee_code || '—'}</b></div>
+          </article>
+        </aside>
+      </section>
+    </main>
+  )
 }
 
 
