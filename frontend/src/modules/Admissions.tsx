@@ -92,6 +92,7 @@ export default function Admissions({
   const [seatPool, setSeatPool] = useState<any>(null);
   const [correctionDialog, setCorrectionDialog] = useState<any>(null);
   const [paymentDialog, setPaymentDialog] = useState<any>(null);
+  const [classAllocation, setClassAllocation] = useState<any>(null);
   useEffect(() => {
     if (initialTab) setTab(initialTab);
   }, [initialTab]);
@@ -976,7 +977,7 @@ export default function Admissions({
         <div className="card">
           <div className="card-pad">
             <h3>Offers</h3>
-            <p className="hint">Allocated applicants appear here. Send offer issues it immediately. Issued offers appear in the Applicant Portal with their expiry date and Accept / Decline actions.</p>
+            <p className="hint">After an applicant accepts, assign their final preference, campus, class section, and group here. Only then are student credentials and the Finance invoice created.</p>
             <select
               className="inp"
               value={offerStatus}
@@ -1041,6 +1042,25 @@ export default function Admissions({
                             }
                           >
                             Send offer
+                          </button>
+                        )}
+                        {a.current_status === "OFFER_ACCEPTED" && (
+                          <button
+                            className="btn btn-sm btn-brass"
+                            onClick={() =>
+                              api.admissionClassAllocationOptions(a.id)
+                                .then((options: any) => setClassAllocation({
+                                  application: a,
+                                  options,
+                                  program_id: a.program_id || options.programmes?.[0]?.id || "",
+                                  campus: a.campus || options.campuses?.[0] || "",
+                                  section_id: "",
+                                  group_name: "",
+                                }))
+                                .catch((e: any) => setNotice({ outcome: "DENY", reason: e.message }))
+                            }
+                          >
+                            Allocate class
                           </button>
                         )}
                       </td>
@@ -1547,6 +1567,44 @@ export default function Admissions({
           ) : (
             <p className="hint">This file type cannot be previewed in the browser. Use Open tab to view or download it.</p>
           )}
+        </Modal>
+      )}
+      {classAllocation && (
+        <Modal
+          title={`Final class allocation: ${classAllocation.application.name}`}
+          onClose={() => setClassAllocation(null)}
+          footer={<><button className="btn btn-out" onClick={() => setClassAllocation(null)}>Cancel</button><button className="btn btn-brass" onClick={() => {
+            if (!classAllocation.program_id || !classAllocation.campus || !classAllocation.section_id || !classAllocation.group_name.trim()) {
+              setNotice({ outcome: "DENY", reason: "Select programme, campus, class section, and group before completing the allocation." });
+              return;
+            }
+            act(() => api.completeAdmissionClassAllocation(classAllocation.application.id, {
+              program_id: classAllocation.program_id,
+              campus: classAllocation.campus,
+              section_id: classAllocation.section_id,
+              group_name: classAllocation.group_name.trim(),
+              expected_status_version: classAllocation.application.status_version,
+            }), () => { setClassAllocation(null); loadOffers(); loadPhase5Status(); loadApps(); });
+          }}>Complete allocation & send credentials</button></>}
+        >
+          <p className="hint">This is the final Admission Office decision. Hostel and Transport requests update automatically with these details.</p>
+          <label>Programme preference</label>
+          <select className="inp" value={classAllocation.program_id} onChange={(e) => setClassAllocation({ ...classAllocation, program_id: e.target.value, section_id: "" })}>
+            <option value="">Select programme</option>
+            {(classAllocation.options.programmes || []).map((program: any) => <option key={program.id} value={program.id}>{program.name}</option>)}
+          </select>
+          <label>Campus</label>
+          <select className="inp" value={classAllocation.campus} onChange={(e) => setClassAllocation({ ...classAllocation, campus: e.target.value })}>
+            <option value="">Select campus</option>
+            {(classAllocation.options.campuses || []).map((campus: string) => <option key={campus}>{campus}</option>)}
+          </select>
+          <label>Class section</label>
+          <select className="inp" value={classAllocation.section_id} onChange={(e) => setClassAllocation({ ...classAllocation, section_id: e.target.value })}>
+            <option value="">Select section</option>
+            {(classAllocation.options.sections || []).filter((section: any) => section.dept_id === (classAllocation.options.programmes || []).find((program: any) => program.id === classAllocation.program_id)?.dept_id).map((section: any) => <option key={section.id} value={section.id}>Section {section.code} · {section.term}</option>)}
+          </select>
+          <label>Group</label>
+          <input className="inp" value={classAllocation.group_name} onChange={(e) => setClassAllocation({ ...classAllocation, group_name: e.target.value })} placeholder="For example: Group 1" />
         </Modal>
       )}
       {paymentDialog && (

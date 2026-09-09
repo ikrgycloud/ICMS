@@ -154,6 +154,14 @@ class OfferActionIn(BaseModel):
     expiry_days: int = Field(default=7, ge=1, le=90)
 
 
+class FinalClassAllocationIn(BaseModel):
+    program_id: str
+    campus: str
+    section_id: str
+    group_name: str = ""
+    expected_status_version: int = Field(ge=0)
+
+
 class FeeResolutionIn(BaseModel):
     expected_status_version: int = Field(ge=0)
     fee_structure_id: str | None = None

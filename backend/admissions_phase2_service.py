@@ -159,7 +159,7 @@ def application_payload(session, application):
 
 
 def document_completeness(session, application):
-    cycle_program = session.get(D.AdmissionCycleProgram, application.cycle_program_id)
+    cycle_program = session.get(D.AdmissionCycleProgram, application.cycle_program_id) if application.cycle_program_id else None
     required = (session.query(D.AdmissionDocumentRequirement)
                 .filter(D.AdmissionDocumentRequirement.tenant_id == application.tenant_id,
                         D.AdmissionDocumentRequirement.cycle_id == application.cycle_id,

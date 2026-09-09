@@ -94,14 +94,15 @@ export default function Finance({ caps, user, onOpenApprovals }: { caps: any; us
           <div style={{ display: 'grid', gridTemplateColumns: 'minmax(280px, 390px) 1fr', gap: 0 }}>
             <div className="tbl-scroll" style={{ borderRight: '1px solid #edf1f7' }}>
               <table className="tbl">
-                <thead><tr><th>Roll No</th><th>Name</th></tr></thead>
+                <thead><tr><th>Roll No</th><th>Name</th><th>Class</th></tr></thead>
                 <tbody>
                   {students.length ? students.map((student: any) => (
                     <tr key={student.id} style={{ cursor: 'pointer', background: selectedStudent?.id === student.id ? 'rgba(138,31,43,.04)' : undefined }} onClick={() => { setSelectedStudent(student); setSelectedSemester('') }}>
                       <td className="mono">{student.roll_no}</td>
                       <td><b>{student.name}</b></td>
+                      <td>{student.section || '—'}{student.group ? ` / ${student.group}` : ''}</td>
                     </tr>
-                  )) : <tr><td colSpan={2}><Empty text="No students match this search." /></td></tr>}
+                  )) : <tr><td colSpan={3}><Empty text="No students match this search." /></td></tr>}
                 </tbody>
               </table>
             </div>

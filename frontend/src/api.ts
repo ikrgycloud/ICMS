@@ -193,6 +193,7 @@ export const api = {
     if (filters.risk) params.set('risk', filters.risk)
     return req(`/students?${params.toString()}`)
   },
+  studentDashboardSummary: () => req('/students/dashboard-summary'),
   studentProfile: (id: string) => req(`/students/${encodeURIComponent(id)}/profile`),
   facultyStaff: (q = '', dept = '', kind = '', page = 1, filters: any = {}) => req(`/faculty-staff?q=${encodeURIComponent(q)}&dept=${encodeURIComponent(dept)}&kind=${encodeURIComponent(kind)}&page=${page}&designation=${encodeURIComponent(filters.designation || '')}&status=${encodeURIComponent(filters.status || '')}`),
   facultyProfile: (id: string) => req(`/faculty-staff/${encodeURIComponent(id)}`),
@@ -326,6 +327,8 @@ export const api = {
   recordCounselling: (id: string, body: any) => req(`/admissions/${id}/counselling`, { method: 'POST', body: JSON.stringify(body) }),
   admissionWaitlist: () => req('/admissions/waitlist'),
   admissionOffers: (status = '') => req(`/admissions/offers?status=${status}`),
+  admissionClassAllocationOptions: (id: string) => req(`/admissions/${id}/class-allocation-options`),
+  completeAdmissionClassAllocation: (id: string, body: any) => req(`/admissions/${id}/class-allocation`, { method: 'POST', body: JSON.stringify(body) }),
   resolveAdmissionFees: (id: string, expected_status_version: number, fee_structure_id?: string) => req(`/admissions/${id}/fees/resolve`, { method: 'POST', body: JSON.stringify({ expected_status_version, fee_structure_id }) }),
   issueAdmissionInvoice: (id: string, expected_status_version: number) => req(`/admissions/${id}/invoice`, { method: 'POST', body: JSON.stringify({ expected_status_version }) }),
   recordAdmissionPayment: (id: string, body: any) => req(`/admissions/${id}/payments`, { method: 'POST', body: JSON.stringify(body) }),

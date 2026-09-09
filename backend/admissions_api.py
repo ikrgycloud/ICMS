@@ -15,7 +15,7 @@ from sqlalchemy import desc
 
 from admissions_schemas import (AdmissionActionIn, LegacyAdmissionDecisionIn, CycleIn, CycleProgramIn,
                                 ApplicantStartIn, ApplicantLookupIn, ApplicantProfileIn, JoiningPreferencesIn, PreferenceIn, PreferenceOrderIn,
-                                DocumentIn, ApplicantSubmitIn)
+                                DocumentIn, ApplicantSubmitIn, FinalClassAllocationIn)
 from admissions_schemas import (EligibilityRuleIn, QuotaIn, EligibilityEvaluateIn, AssessmentIn,
     CounsellingSessionIn, CounsellingIn, SeatPoolIn, AllocationIn, OfferActionIn, FeeResolutionIn,
     ApplicantInvoiceIn, ApplicantPaymentIn, PaymentVerificationIn, FinalAdmissionIn, ConvertApplicantIn)
@@ -23,7 +23,8 @@ from admissions_eligibility_service import evaluate_application, SUPPORTED_RULE_
 from admissions_service import legacy_decision, transition_application
 from admissions_phase4_service import advance_eligible, record_assessment, calculate_merit, allocate, recommend_offer, issue_offer, release_allocation, expire_offers
 from admissions_phase5_service import (resolve_fees, issue_applicant_invoice, record_applicant_payment,
-    verify_payment, clear_finance, request_final_approval, complete_final_approval, checklist, convert_to_student)
+    verify_payment, clear_finance, request_final_approval, complete_final_approval, checklist, convert_to_student,
+    provision_student_after_offer_acceptance, sync_admission_service_requests)
 from admissions_phase2_service import (application_for_token, application_payload, assert_editable,
     assert_version, create_access_token, cycle_program_or_404, now_utc, parse_datetime,
     save_application, submit_application, cycle_is_open, document_completeness)
@@ -74,8 +75,8 @@ def _send_offer_acceptance_receipt(email, name, offer_no, programme, campus):
     message.set_content(
         f"Hello {name},\n\nYou accepted admission offer {offer_no}.\n\n"
         f"Programme: {programme}\nCampus: {campus}\n\n"
-        "Your seat is reserved. Submit your hostel and transport preferences in the Applicant Portal if needed. "
-        "This is not final enrollment yet: complete the fee and final approval steps to receive your roll number and student account credentials."
+        "Your seat is reserved. Your student account, roll number, and admission-fee invoice are being created now. "
+        "Submit hostel and transport preferences in the Applicant Portal if needed."
     )
     with smtplib.SMTP(host, int(os.getenv("SMTP_PORT", "587")), timeout=10) as smtp:
         if os.getenv("SMTP_TLS", "true").lower() == "true":
@@ -467,7 +468,7 @@ def applicant_detail(application_id: str, x_applicant_access_token: str = Header
         transport = s.query(D.TransportRequest).filter_by(student_id=conversion.student_id).first()
         payload["enrollment"] = {
             "student_id": conversion.student_identifier,
-            "section": section.name if section else "Section assignment pending",
+            "section": section.section_code if section else "Section assignment pending",
             "hostel_status": hostel.status.title() if hostel else "Not requested",
             "transport_status": transport.status.title() if transport else "Not requested",
         }
@@ -510,6 +511,7 @@ def save_joining_preferences(application_id: str, body: JoiningPreferencesIn,
     profile["joining_preferences"] = {"hostel_required": body.hostel_required, "transport_required": body.transport_required, "pickup_point": body.pickup_point.strip(), "submitted_at": now_utc().isoformat()}
     application.profile_json = json.dumps(profile)
     application.status_version += 1
+    sync_admission_service_requests(s, application)
     s.commit()
     write_audit(s, f"applicant:{application.id}", "Applicant", 0, "admission.joining_preferences.save", f"application:{application.id}", "", application.current_status, "Hostel and transport preferences saved")
     return application_payload(s, application)
@@ -648,7 +650,7 @@ def review_queue(cycle_id: str = "", program_id: str = "", campus: str = "", sta
     rows = query.order_by(D.Application.submitted_at.desc()).all()
     payload = []
     for application in rows:
-        cycle = s.get(D.AdmissionCycle, application.cycle_id)
+        cycle = s.get(D.AdmissionCycle, application.cycle_id) if application.cycle_id else None
         prefs = s.query(D.ApplicationPreference).filter_by(application_id=application.id).count()
         documents = document_completeness(s, application)
         payload.append({"id": application.id, "application_no": application.application_no, "applicant_name": application.applicant_name,
@@ -794,7 +796,8 @@ def eligibility_detail(application_id:str,ctx=Depends(auth),s=Depends(db)):
     checks=s.query(D.ApplicationEligibilityCheck).filter_by(application_id=app.id).order_by(D.ApplicationEligibilityCheck.evaluated_at.desc()).all()
     rules={r.id:r for r in s.query(D.AdmissionEligibilityRule).filter_by(tenant_id=ctx["tenant_id"]).all()}
     quotas={q.id:q for q in s.query(D.AdmissionQuota).filter_by(tenant_id=ctx["tenant_id"]).all()}
-    cycle=s.get(D.AdmissionCycle, app.cycle_id); program=s.get(D.Program, app.selected_program_id)
+    cycle=s.get(D.AdmissionCycle, app.cycle_id) if app.cycle_id else None
+    program=s.get(D.Program, app.selected_program_id) if app.selected_program_id else None
     preferences = (s.query(D.ApplicationPreference).filter_by(application_id=app.id)
                    .order_by(D.ApplicationPreference.preference_rank).all())
     preference_programs = {row.id: row for row in s.query(D.Program)
@@ -842,7 +845,8 @@ def eligibility_queue(cycle_id: str = "", program_id: str = "", campus: str = ""
         last=s.query(D.EligibilityEvaluationRun).filter_by(application_id=a.id).order_by(D.EligibilityEvaluationRun.started_at.desc()).first()
         evaluated_quotas = [item.get("quota") for item in json.loads(last.context_json or "{}").get("quotas", [])] if last else []
         if quota_code and (not last or quota_code not in evaluated_quotas): continue
-        cycle=s.get(D.AdmissionCycle,a.cycle_id); program=s.get(D.Program,a.selected_program_id)
+        cycle=s.get(D.AdmissionCycle,a.cycle_id) if a.cycle_id else None
+        program=s.get(D.Program,a.selected_program_id) if a.selected_program_id else None
         payload.append({"id":a.id,"application_no":a.application_no,"applicant_name":a.applicant_name,"cycle":cycle.name if cycle else "","program":program.name if program else a.program_name,"campus":a.campus,"status":a.current_status,"status_version":a.status_version,"documents":document_completeness(s,a),"last_evaluation_at":last.completed_at.isoformat() if last and last.completed_at else None,"eligibility_result":last.outcome if last else "PENDING","permitted_actions":{"evaluate":_can(ctx,"evaluate_eligibility") and a.current_status == "DOCUMENT_VERIFIED"}})
     return {"applications":payload}
 
@@ -1012,6 +1016,36 @@ def applicant_offer(application_id:str,x_applicant_access_token:str=Header(defau
     program=s.get(D.Program,offer.program_id);quota=s.get(D.AdmissionQuota,offer.quota_id) if offer.quota_id else None
     return {"offer":{"offer_no":offer.offer_no,"status":offer.status,"programme":program.name if program else app.program_name,"campus":offer.campus,"quota":quota.name if quota else None,"issued_at":offer.issued_at.isoformat() if offer.issued_at else None,"expires_at":offer.expires_at.isoformat() if offer.expires_at else None,"terms":json.loads(offer.conditions_json or "[]")},"application_status":app.current_status,"status_version":app.status_version}
 
+
+@router.get("/admissions/{application_id}/class-allocation-options")
+def class_allocation_options(application_id: str, ctx=Depends(auth), s=Depends(db)):
+    _staff(s, ctx, "view_application")
+    app = s.get(D.Application, application_id)
+    if not app or app.tenant_id != ctx["tenant_id"]: raise HTTPException(404, "Application not found")
+    _assert_application_scope(app, ctx)
+    preference_ids = [row.program_id for row in s.query(D.ApplicationPreference).filter_by(application_id=app.id).order_by(D.ApplicationPreference.preference_rank).all()]
+    if app.selected_program_id and app.selected_program_id not in preference_ids: preference_ids.insert(0, app.selected_program_id)
+    programs = [row for row in s.query(D.Program).filter(D.Program.id.in_(preference_ids)).all()] if preference_ids else []
+    sections = [row for row in s.query(D.Section).filter_by(tenant_id=app.tenant_id).all() if row.dept_id in {program.dept_id for program in programs}]
+    cycle = s.get(D.AdmissionCycle, app.cycle_id) if app.cycle_id else None
+    campuses = list(dict.fromkeys([value for value in (app.campus, cycle.campus if cycle else "") if value]))
+    return {"programmes": [{"id": row.id, "name": row.name, "dept_id": row.dept_id} for row in programs],
+            "sections": [{"id": row.id, "code": row.section_code, "dept_id": row.dept_id, "term": row.term} for row in sections],
+            "campuses": campuses}
+
+
+@router.post("/admissions/{application_id}/class-allocation")
+def complete_class_allocation(application_id: str, body: FinalClassAllocationIn, ctx=Depends(auth), s=Depends(db)):
+    _staff(s, ctx, "recommend_offer")
+    existing = s.get(D.Application, application_id)
+    if not existing or existing.tenant_id != ctx["tenant_id"]: raise HTTPException(404, "Application not found")
+    if existing.status_version != body.expected_status_version: raise HTTPException(409, "Application changed; reload")
+    app, student, email_sent, email_note = provision_student_after_offer_acceptance(
+        s, ctx, application_id, body.program_id, body.campus, body.section_id, body.group_name,
+    )
+    return {"application": application_payload(s, app), "student_id": student.id, "roll_no": student.roll_no,
+            "email_sent": email_sent, "email_note": email_note}
+
 @router.post("/admissions/applicant/{application_id}/offer/{response}")
 def respond_to_offer(application_id:str,response:str,body:EligibilityEvaluateIn,x_applicant_access_token:str=Header(default=""),s=Depends(db)):
     app,token=_token_application(s,application_id,x_applicant_access_token);expire_offers(s,{"sub":"system","tenant_id":app.tenant_id,"office_n":15,"scope_level":"global","auth_level":"system"});app=s.get(D.Application,app.id);offer=s.query(D.AdmissionOffer).filter_by(application_id=app.id,status="ISSUED").first()
@@ -1025,10 +1059,8 @@ def respond_to_offer(application_id:str,response:str,body:EligibilityEvaluateIn,
     s.commit();app=transition_application(s,ctx,app.id,action,app.status_version,f"Applicant {response}ed offer",skip_capability=True)
     email_sent = False
     if response == "accept":
-        try:
-            email_sent = _send_offer_acceptance_receipt(app.email, app.applicant_name, offer.offer_no, app.program_name, app.campus)
-        except Exception:
-            pass
+        sync_admission_service_requests(s, app)
+        s.commit()
     write_audit(s,ctx["sub"],"Applicant",0,f"admission.offer.{response}",f"application:{app.id}","OFFERED",app.current_status,offer.offer_no,"token");return {"application_status":app.current_status,"status_version":app.status_version,"email_sent":email_sent}
 
 
