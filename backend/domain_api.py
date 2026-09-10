@@ -1663,7 +1663,14 @@ class AcademicProposalTransitionIn(BaseModel):
 @router.get("/academic-calendar/proposals")
 def academic_calendar_proposals(state: str = "", ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academic_calendar", "view", governance=True)[0])
-    query = scoped_academic_query(s, D.AcademicProposal, ctx).filter(D.AcademicProposal.proposal_type == "calendar")
+    # Academic Office proposals are institution-scoped and deliberately have no
+    # department reference. Query ownership directly so a returned proposal is
+    # never hidden from the actor that must revise and resubmit it.
+    query = (s.query(D.AcademicProposal).filter(
+        D.AcademicProposal.tenant_id == ctx["tenant_id"],
+        D.AcademicProposal.proposal_type == "calendar",
+        D.AcademicProposal.submitted_by == ctx["sub"],
+    ) if ctx["office_n"] == 42 else scoped_academic_query(s, D.AcademicProposal, ctx).filter(D.AcademicProposal.proposal_type == "calendar"))
     if state:
         query = query.filter(D.AcademicProposal.state == state.upper())
     if ctx["office_n"] == 42:
@@ -1671,7 +1678,7 @@ def academic_calendar_proposals(state: str = "", ctx=Depends(auth), s=Depends(db
         # a calendar proposal with no department reference.  Its own queue is
         # therefore ownership-scoped, not artificially filtered to a missing
         # department identifier.
-        query = query.filter(D.AcademicProposal.submitted_by == ctx["sub"])
+        pass
     elif ctx["office_n"] != 6:
         query = query.filter(D.AcademicProposal.scope_ref == (actor_department_id(s, ctx) or "__no_scope__"))
     rows = query.order_by(desc(D.AcademicProposal.updated_at)).all()
@@ -2274,10 +2281,10 @@ def create_allocation_proposal(body: FacultyAllocationProposalIn, ctx=Depends(au
 def submit_allocation_proposal(proposal_id: str, body: AcademicProposalTransitionIn, ctx=Depends(auth), s=Depends(db)):
     proposal = require_academic_object(s, ctx, s.get(D.AcademicProposal, proposal_id), "submit", "Allocation proposal")
     if not proposal or proposal.proposal_type != "allocation": raise HTTPException(404, "Allocation proposal not found")
-    if proposal.submitted_by != ctx["sub"] or proposal.state != "DRAFT" or proposal.status_version != body.expected_status_version: raise HTTPException(409, "Proposal cannot be submitted")
-    proposal.state="SUBMITTED"; proposal.status_version += 1; proposal.updated_at=datetime.utcnow(); _proposal_event(s, proposal, ctx, "DRAFT", "SUBMITTED", body.reason); dean=s.query(User).filter(User.office_n==6).first()
+    if proposal.submitted_by != ctx["sub"] or proposal.state not in {"DRAFT", "RETURNED"} or proposal.status_version != body.expected_status_version: raise HTTPException(409, "Proposal cannot be submitted")
+    previous=proposal.state; proposal.state="RESUBMITTED" if previous == "RETURNED" else "SUBMITTED"; proposal.status_version += 1; proposal.updated_at=datetime.utcnow(); _proposal_event(s, proposal, ctx, previous, proposal.state, body.reason); dean=s.query(User).filter(User.office_n==6).first()
     if dean: _proposal_notice(s, dean.id, "Faculty allocation decision required", proposal.title)
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.allocation.proposal.submit", f"academic_proposal:{proposal.id}", "DRAFT", "SUBMITTED", body.reason, commit=False); s.commit(); return {"proposal": _proposal_payload(s, proposal)}
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.allocation.proposal.submit", f"academic_proposal:{proposal.id}", previous, proposal.state, body.reason, commit=False); s.commit(); return {"proposal": _proposal_payload(s, proposal)}
 
 
 @router.post("/academics/allocation/proposals/{proposal_id}/decision/{decision}")
@@ -2286,12 +2293,12 @@ def decide_allocation_proposal(proposal_id: str, decision: str, body: AcademicPr
     proposal=require_academic_object(s, ctx, s.query(D.AcademicProposal).filter(D.AcademicProposal.id == proposal_id).with_for_update().first(), "approve", "Allocation proposal")
     if proposal.submitted_by == ctx["sub"]:
         raise HTTPException(403, "Proposal submitter cannot approve or reject their own proposal")
-    if not proposal or proposal.proposal_type != "allocation" or proposal.state != "SUBMITTED": raise HTTPException(409, "Invalid allocation proposal")
+    if not proposal or proposal.proposal_type != "allocation" or proposal.state not in {"SUBMITTED", "RESUBMITTED"}: raise HTTPException(409, "Invalid allocation proposal")
     if proposal.status_version != body.expected_status_version: raise HTTPException(409, "Proposal changed; reload before deciding")
     target={"approve":"APPROVED","reject":"REJECTED","return":"RETURNED"}.get(decision.lower())
     if not target: raise HTTPException(422, "Unsupported allocation decision")
     validate_transition(s, proposal, target, body.expected_status_version, ctx, body.reason)
-    claim_proposal_transition(s, proposal, body.expected_status_version, {"SUBMITTED"})
+    claim_proposal_transition(s, proposal, body.expected_status_version, {"SUBMITTED", "RESUBMITTED"})
     previous=proposal.state; proposal.state=target; proposal.status_version += 1; proposal.updated_at=datetime.utcnow()
     if target=="APPROVED":
         payload=json.loads(_proposal_version(s, proposal).payload_json); section=s.get(D.Section,payload["section_id"]); faculty=s.get(D.StaffMember,payload["faculty_person_id"])
