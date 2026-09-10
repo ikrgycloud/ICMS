@@ -803,7 +803,11 @@ def overview(ctx=Depends(auth), s=Depends(db)):
            raise HTTPException(403, "The generic institutional overview is not available to Front Office.")
     def c(model):
         return s.query(model).count()
+    students_query = _real_students(s.query(D.Student))
     stats = {
+        "students": students_query.count(), "faculty": c(D.StaffMember),
+        "provisional_students": students_query.filter(D.Student.status == "provisional").count(),
+        "active_students": students_query.filter(D.Student.status == "active").count(),
            "students": c(D.Student), "faculty": c(D.StaffMember),
         "courses": c(D.Course), "sections": c(D.Section),
         "applications": s.query(D.Application).filter(D.Application.status.in_(["submitted", "verified"])).count(),
@@ -814,9 +818,9 @@ def overview(ctx=Depends(auth), s=Depends(db)):
         "placement_offers": s.query(func.coalesce(func.sum(D.PlacementDrive.offers), 0)).scalar() or 0,
     }
     # department distribution for charts
-    dept_counts = dict(s.query(D.Department.code, func.count(D.Student.id))
+    dept_counts = dict(_real_students(s.query(D.Department.code, func.count(D.Student.id))
                        .join(D.Student, D.Student.dept_id == D.Department.id)
-                       .group_by(D.Department.code).all())
+                       .group_by(D.Department.code)).all())
     return {"stats": stats, "dept_distribution": dept_counts}
 
 
@@ -832,6 +836,8 @@ def principal_overview(academic_year: str = "", student_semester: str = "", ctx=
         except (TypeError, ValueError): return ""
     years = sorted(set(filter(None, (academic_year_for(t) for t in terms))), reverse=True)
     selected_year = academic_year if academic_year in years else (years[0] if years else "")
+    # Class-allocated applicants are provisional students until Finance clears fees.
+    student_query = _real_students(s.query(D.Student)).filter(D.Student.status.in_(["active", "provisional"]))
     student_query = _student_scope(
         s.query(D.Student).filter(D.Student.status == "active"), ctx
     )
@@ -2043,6 +2049,7 @@ def delete_academic_calendar_entry(entry_id: str, ctx=Depends(auth), s=Depends(d
 class StudentIn(BaseModel):
     name: str
     roll_no: str = ""
+    email: str = ""
     dept_code: str = "CSE"
     batch: str = "2025"
     semester: int = 1
@@ -2058,6 +2065,11 @@ def _student_scope(query, ctx):
     return query
 
 
+def _real_students(query):
+    """Exclude development fixtures; dashboards show only real institution records."""
+    return query.filter(~D.Student.id.like("stu_%"), ~D.Student.id.like("student_app_%"))
+
+
 def _academic_year_label(batch):
     """Represent a student's admission batch as the academic-year filter label."""
     try:
@@ -2065,6 +2077,23 @@ def _academic_year_label(batch):
         return f"{start}-{str(start + 1)[-2:]}"
     except (TypeError, ValueError):
         return str(batch or "")
+
+
+def _admission_placement_map(s, student_ids):
+    """Return the final Admission Office placement for each converted student."""
+    if not student_ids:
+        return {}
+    conversions = (s.query(D.AdmissionConversion)
+                   .filter(D.AdmissionConversion.student_id.in_(student_ids)).all())
+    application_by_student = {row.student_id: row.application_id for row in conversions if row.student_id}
+    allocations = (s.query(D.AdmissionClassAllocation)
+                   .filter(D.AdmissionClassAllocation.application_id.in_(application_by_student.values())).all()
+                   if application_by_student else [])
+    allocation_by_application = {row.application_id: row for row in allocations}
+    return {
+        student_id: allocation_by_application.get(application_id)
+        for student_id, application_id in application_by_student.items()
+    }
 
 
 def _attendance_totals(s, student_ids):
@@ -2098,7 +2127,7 @@ def _backlog_summary(s, student_ids):
 @router.get("/students")
 def list_students(q: str = "", dept: str = "", program: str = "", academic_year: str = "", study_year: int = Query(0, ge=0), semester: int = Query(0, ge=0), section: str = "", risk: str = "", page: int = Query(1, ge=1), page_size: int = Query(25, ge=10, le=100), ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "students", "view")[0])
-    base_query = _student_scope(s.query(D.Student), ctx)
+    base_query = _student_scope(_real_students(s.query(D.Student)), ctx)
     scoped_students = base_query.all()
     query = base_query
     if q:
@@ -2142,6 +2171,7 @@ def list_students(q: str = "", dept: str = "", program: str = "", academic_year:
     dept_map = {d.id: d for d in s.query(D.Department).all()}
     program_map = {p.id: p for p in s.query(D.Program).all()}
     student_ids = [row.id for row in rows]
+    placement_by_student = _admission_placement_map(s, student_ids)
     backlogs = _backlog_summary(s, student_ids)
     attendance_by_student = _attendance_totals(s, student_ids)
     all_students = query.all()
@@ -2168,7 +2198,9 @@ def list_students(q: str = "", dept: str = "", program: str = "", academic_year:
     return {"students": [{
         "id": r.id, "roll_no": r.roll_no, "name": r.name, "email": r.email, "dept": dept_map.get(r.dept_id).code if r.dept_id in dept_map else "", "department_name": dept_map.get(r.dept_id).name if r.dept_id in dept_map else "",
         "program": program_map.get(r.program_id).name if r.program_id in program_map else "", "program_code": program_map.get(r.program_id).code if r.program_id in program_map else "",
-        "batch": r.batch, "semester": r.semester, "section": r.section, "cgpa": r.cgpa,
+        "batch": r.batch, "semester": r.semester, "section": r.section,
+        "group": placement_by_student.get(r.id).group_name if placement_by_student.get(r.id) else "",
+        "campus": r.campus, "cgpa": r.cgpa,
         "status": r.status, "hosteller": r.hosteller, "scholarship": r.scholarship,
         "attendance_pct": round(100 * attendance_by_student[r.id][1] / attendance_by_student[r.id][0], 1) if r.id in attendance_by_student else None,
         "current_backlogs": backlogs[r.id]["current"], "backlog_status": "Outstanding" if backlogs[r.id]["current"] else ("Cleared" if backlogs[r.id]["cleared"] else "No history"),
@@ -2186,15 +2218,45 @@ def list_students(q: str = "", dept: str = "", program: str = "", academic_year:
             {"code": code, "name": name, "count": sum(1 for student in scoped_students if student.dept_id in dept_map and dept_map[student.dept_id].code == code)}
             for code, name in sorted({(dept_map[row.dept_id].code, dept_map[row.dept_id].name) for row in scoped_students if row.dept_id in dept_map}, key=lambda item: item[1])
         ],
-        "summary": {"all_students": total, **risk_summary},
+        "summary": {"all_students": total,
+                    "provisional_students": sum(1 for student in scoped_students if student.status == "provisional"),
+                    "active_students": sum(1 for student in scoped_students if student.status == "active"),
+                    **risk_summary},
         "can_add": can(s, ctx, "students", "add"),
         "can_edit": can(s, ctx, "students", "edit")}
+
+
+@router.get("/students/dashboard-summary")
+def student_dashboard_summary(ctx=Depends(auth), s=Depends(db)):
+    """Role-safe counts for all dashboards; records require Student-module access."""
+    students_query = _student_scope(_real_students(s.query(D.Student).filter(D.Student.tenant_id == ctx["tenant_id"])), ctx)
+    payload = {
+        "total_students": students_query.count(),
+        "provisional_students": students_query.filter(D.Student.status == "provisional").count(),
+        "active_students": students_query.filter(D.Student.status == "active").count(),
+        "can_view_student_records": can(s, ctx, "students", "view"),
+        "recent_students": [],
+    }
+    if not payload["can_view_student_records"]:
+        return payload
+
+    rows = students_query.order_by(D.Student.id.desc()).limit(10).all()
+    programs = {row.id: row for row in s.query(D.Program).filter_by(tenant_id=ctx["tenant_id"]).all()}
+    placements = _admission_placement_map(s, [row.id for row in rows])
+    payload["recent_students"] = [{
+        "id": row.id, "roll_no": row.roll_no, "name": row.name,
+        "programme": programs[row.program_id].name if row.program_id in programs else "",
+        "campus": row.campus, "section": row.section,
+        "group": placements[row.id].group_name if placements.get(row.id) else "",
+        "status": row.status,
+    } for row in rows]
+    return payload
 
 
 @router.get("/students/{student_id}/profile")
 def student_profile(student_id: str, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "students", "view")[0])
-    student = _student_scope(s.query(D.Student), ctx).filter(D.Student.id == student_id).first()
+    student = _student_scope(_real_students(s.query(D.Student)), ctx).filter(D.Student.id == student_id).first()
     if not student:
         raise HTTPException(404, "Student was not found in your authorized campus")
     department = s.query(D.Department).get(student.dept_id)
@@ -2202,13 +2264,15 @@ def student_profile(student_id: str, ctx=Depends(auth), s=Depends(db)):
     attendance = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.student_id == student.id).all()
     attendance_pct = round(100 * sum(1 for row in attendance if row.present) / len(attendance), 1) if attendance else None
     enrollments = s.query(D.Enrollment).filter(D.Enrollment.student_id == student.id).all()
+    placement = _admission_placement_map(s, [student.id]).get(student.id)
     sections = {row.id: row for row in s.query(D.Section).filter(D.Section.id.in_([e.section_id for e in enrollments])).all()} if enrollments else {}
     marks = s.query(D.Mark).filter(D.Mark.student_id == student.id).all()
     backlog = _backlog_summary(s, [student.id])[student.id]
     return {"student": {"id": student.id, "name": student.name, "roll_no": student.roll_no, "email": student.email,
             "campus": student.campus, "department": department.name if department else "", "department_code": department.code if department else "",
             "program": program.name if program else "", "program_code": program.code if program else "", "semester": student.semester,
-            "study_year": (student.semester + 1) // 2, "section": student.section, "status": student.status, "cgpa": student.cgpa,
+            "study_year": (student.semester + 1) // 2, "section": student.section,
+            "group": placement.group_name if placement else "", "status": student.status, "cgpa": student.cgpa,
             "attendance_pct": attendance_pct, "current_backlogs": backlog["current"], "cleared_backlogs": backlog["cleared"]},
             "attendance": [{"date": row.on_date.isoformat(), "present": row.present} for row in attendance],
             "enrollments": [{"section": sections[e.section_id].section_code if e.section_id in sections else "", "term": sections[e.section_id].term if e.section_id in sections else "", "status": e.status, "grade": e.grade} for e in enrollments],
@@ -2229,7 +2293,7 @@ def add_student(body: StudentIn, ctx=Depends(auth), s=Depends(db)):
     sid = uid()
     roll = body.roll_no or f"{body.batch[2:]}{body.dept_code}{s.query(D.Student).count()+1:03d}"
     s.add(D.Student(id=sid, tenant_id=TENANT, roll_no=roll, name=body.name,
-                    email=f"{roll.lower()}@icms.edu", program_id=prog.id if prog else None,
+                    email=body.email.strip(), program_id=prog.id if prog else None,
                     dept_id=d.id, batch=body.batch, semester=body.semester,
                     section="A", status="active", cgpa=0.0))
     s.commit()
@@ -2499,6 +2563,45 @@ def verify_corrective_action(action_id: str, body: ActionUpdateIn, ctx=Depends(a
 
 #  ACADEMICS: courses & sections
 # --------------------------------------------------------------------------- #
+class ProgramIn(BaseModel):
+    department_id: str
+    code: str
+    name: str
+    level: str = "UG"
+    duration_years: int = Field(ge=1, le=10)
+
+
+@router.get("/academics/programmes")
+def list_programmes(ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "academics", "view")[0])
+    departments = {row.id: row for row in s.query(D.Department).filter_by(tenant_id=ctx["tenant_id"]).all()}
+    programmes = s.query(D.Program).filter_by(tenant_id=ctx["tenant_id"]).order_by(D.Program.name).all()
+    return {"programmes": [{"id": row.id, "code": row.code, "name": row.name, "level": row.level,
+             "duration_years": row.duration_years, "department_id": row.dept_id,
+             "department": departments[row.dept_id].name if row.dept_id in departments else ""} for row in programmes],
+            "departments": [{"id": row.id, "code": row.code, "name": row.name} for row in departments.values()]}
+
+
+@router.post("/academics/programmes")
+def create_programme(body: ProgramIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "academics", "create_program")
+    require(dec)
+    code, name, level = body.code.strip().upper(), body.name.strip(), body.level.strip().upper()
+    if not code or not name or level not in {"UG", "PG", "DIPLOMA", "PHD", "CERTIFICATE"}:
+        raise HTTPException(422, "Programme code, name, and a valid level are required")
+    department = s.get(D.Department, body.department_id)
+    if not department or department.tenant_id != ctx["tenant_id"]:
+        raise HTTPException(404, "Department not found")
+    if s.query(D.Program).filter(D.Program.tenant_id == ctx["tenant_id"], D.Program.code == code).first():
+        raise HTTPException(409, "A programme with this code already exists")
+    row = D.Program(id=uid(), tenant_id=ctx["tenant_id"], dept_id=department.id, code=code, name=name,
+                    level=level, duration_years=body.duration_years)
+    s.add(row); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academics.programme.create",
+                f"programme:{row.id}", "", "active", f"{row.code} - {row.name}")
+    return {"id": row.id, "decision": {"outcome": "ALLOW", "reason": "Programme created successfully"}}
+
+
 @router.get("/academics/courses")
 def list_courses(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view")[0])
@@ -4687,9 +4790,11 @@ def _auto_rollover_after_results(s, academic_year: str, semester: int | None, ac
 
 
 class ProgressionPolicyIn(BaseModel):
-    max_backlogs: int = Field(0, ge=0, le=20)
-    minimum_attendance_pct: float = Field(75, ge=0, le=100)
-    fee_policy: str = "carry_forward"
+    # Every policy update must be explicit; defaults here could overwrite a
+    # configured policy when a malformed client sends an empty object.
+    max_backlogs: int = Field(..., ge=0, le=20)
+    minimum_attendance_pct: float = Field(..., ge=0, le=100)
+    fee_policy: str
 
 
 def _progression_policy_payload(s):
@@ -4904,44 +5009,6 @@ def update_exam_timetable(schedule_id: str, body: ExamTimetableUpsertIn, ctx=Dep
         f"Updated exam timetable entry for section {section.section_code}",
     )
     return {"id": row.id, "decision": dec.as_dict()}
-
-
-# --------------------------------------------------------------------------- #
-#  ADMISSIONS
-# --------------------------------------------------------------------------- #
-@router.get("/admissions")
-def list_applications(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "admissions", "view")[0])
-    rows = s.query(D.Application).order_by(desc(D.Application.score)).all()
-    return {"applications": [{
-        "id": a.id, "name": a.applicant_name, "email": a.email,
-        "program": a.program_name, "score": a.score, "status": a.status,
-    } for a in rows],
-        "can_verify": can(s, ctx, "admissions", "verify"),
-        "can_offer": can(s, ctx, "admissions", "offer")}
-
-
-class AdmissionDecisionIn(BaseModel):
-    application_id: str
-    action: str  # verify / offer / reject
-
-
-@router.post("/admissions/decide")
-def decide_application(body: AdmissionDecisionIn, ctx=Depends(auth), s=Depends(db)):
-    action_map = {"verify": "verify", "offer": "offer", "reject": "reject"}
-    if body.action not in action_map:
-        raise HTTPException(400, "Invalid action")
-    dec, verb = gate(s, ctx, "admissions", action_map[body.action])
-    require(dec)
-    a = s.query(D.Application).get(body.application_id)
-    if not a:
-        raise HTTPException(404, "Application not found")
-    new = {"verify": "verified", "offer": "offered", "reject": "rejected"}[body.action]
-    a.status = new
-    s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], f"admission.{body.action}",
-                f"application:{a.id}", "", new, f"{body.action} {a.applicant_name}")
-    return {"status": new, "decision": dec.as_dict()}
 
 
 # --------------------------------------------------------------------------- #
@@ -6232,12 +6299,16 @@ def hostel(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "hostel", "view")[0])
     rooms = s.query(D.HostelRoom).all()
     allocs = s.query(D.HostelAllocation).filter(D.HostelAllocation.status == "requested").all()
+    admission_requests = s.query(D.AdmissionServiceRequest).filter_by(department="HOSTEL", status="requested").all()
     cap = sum(r.capacity for r in rooms)
     occ = sum(r.occupied for r in rooms)
     return {"summary": {"rooms": len(rooms), "capacity": cap, "occupied": occ,
                         "vacant": cap - occ},
-            "requests": [{"id": a.id, "student": a.student_name, "status": a.status}
-                         for a in allocs],
+            "requests": ([{"id": a.id, "student": a.student_name, "status": a.status,
+                           "source": "student", "campus": "", "section": "", "group": ""} for a in allocs] +
+                         [{"id": a.id, "student": a.applicant_name, "status": a.status,
+                           "source": "admission", "campus": a.campus, "section": a.section_code,
+                           "group": a.group_name} for a in admission_requests]),
             "can_allocate": can(s, ctx, "hostel", "allocate")}
 
 
@@ -6246,12 +6317,14 @@ def allocate_hostel(alloc_id: str, ctx=Depends(auth), s=Depends(db)):
     dec, verb = gate(s, ctx, "hostel", "allocate")
     require(dec)
     a = s.query(D.HostelAllocation).get(alloc_id)
-    if not a:
+    admission_request = None if a else s.query(D.AdmissionServiceRequest).get(alloc_id)
+    if not a and (not admission_request or admission_request.department != "HOSTEL"):
         raise HTTPException(404, "Request not found")
-    a.status = "allocated"
+    if admission_request: admission_request.status = "allocated"
+    else: a.status = "allocated"
     s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "hostel.allocate",
-                f"alloc:{alloc_id}", "requested", "allocated", f"Allocated room to {a.student_name}")
+                f"alloc:{alloc_id}", "requested", "allocated", f"Allocated room to {(a.student_name if a else admission_request.applicant_name)}")
     return {"status": "allocated", "decision": dec.as_dict()}
 
 
@@ -6351,6 +6424,19 @@ def _transport_bundle(s):
 @router.get("/transport")
 def transport(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "transport", "view")[0])
+    rows = s.query(D.TransportRoute).all()
+    return {"routes": [{"id": r.id, "name": r.name, "stops": r.stops,
+                        "vehicle": r.vehicle_no, "seats": r.seats,
+                        "taken": r.seats_taken, "free": r.seats - r.seats_taken}
+                       for r in rows],
+            "requests": ([{"id": request.id, "student": request.student_name,
+                           "pickup_point": request.pickup_point, "status": request.status,
+                           "campus": "", "section": "", "group": ""}
+                          for request in s.query(D.TransportRequest).filter(D.TransportRequest.status == "requested").all()] +
+                         [{"id": request.id, "student": request.applicant_name,
+                           "pickup_point": request.pickup_point, "status": request.status,
+                           "campus": request.campus, "section": request.section_code, "group": request.group_name}
+                          for request in s.query(D.AdmissionServiceRequest).filter_by(department="TRANSPORT", status="requested").all()])}
     return _transport_bundle(s)
 
 @router.post("/transport/routes")
