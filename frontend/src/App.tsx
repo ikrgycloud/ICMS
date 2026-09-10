@@ -124,7 +124,7 @@ const DIRECTOR_ADMISSIONS_NAV = [
   ['4. Eligibility & Quota', 'Eligibility Rules', 'director_rules'], ['4. Eligibility & Quota', 'Quotas', 'director_quotas'],
   ['5. Merit & Allocation', 'Assessment, Merit & Seats', 'director_merit'], ['5. Merit & Allocation', 'Seat Pools', 'director_seat_pools'], ['5. Merit & Allocation', 'Counselling & Waitlist', 'director_counselling'],
   ['6. Offers & Finance', 'Offer Approval & Status', 'director_offers'], ['6. Offers & Finance', 'Finance Clearance', 'director_finance'],
-  ['7. Enrollment & Student Account', 'Final Approval', 'director_final_approval'], ['7. Enrollment & Student Account', 'Ready to Admit & Conversion', 'director_ready'],
+  ['7. Enrollment & Student Account', 'Re-submitted Corrections', 'director_resubmitted_corrections'],
   ['8. Monitoring', 'Admission Reports', 'director_reports'],
 ] as const
 
@@ -133,7 +133,7 @@ const DIRECTOR_TAB: Record<string, string> = {
   director_applications: 'applications', director_review: 'review', director_corrections: 'corrections', director_document_verification: 'review', director_documents: 'document_status',
   director_eligibility: 'eligibility', director_rules: 'rules', director_assessments: 'decisions', director_merit: 'decisions', director_counselling: 'counselling', director_seat_pools: 'seatpools', director_allocation: 'decisions', director_waitlist: 'waitlist', director_recommendations: 'offers', director_offers: 'offers',
   director_ready: 'ready_to_admit', director_enrollment_queue: 'enrollment_queue', director_conversion: 'student_conversion', director_enrollment: 'enrollment_status', director_finance: 'finance_status', director_invoices: 'invoices_challans', director_payment_status: 'payment_status', director_accounts: 'accounts_verification', director_clearance: 'clearance_status',
-  director_final_approval: 'final_approval',
+  director_final_approval: 'resubmitted_corrections', director_resubmitted_corrections: 'resubmitted_corrections',
   director_offer_status: 'offers', director_scholarship: 'eligibility', director_international: 'applications', director_reports: 'reports',
 }
 
@@ -146,7 +146,6 @@ const ADMISSION_MANAGER_NAV = [
   ['4. Eligibility & Quota', 'Eligibility Rules', 'manager_rules'], ['4. Eligibility & Quota', 'Quotas', 'manager_quotas'],
   ['5. Merit & Allocation', 'Assessment, Merit & Seats', 'manager_assessments'], ['5. Merit & Allocation', 'Seat Pools', 'manager_seat_pools'], ['5. Merit & Allocation', 'Counselling & Waitlist', 'manager_counselling'],
   ['6. Offers & Finance', 'Offer Approval & Status', 'manager_offers'], ['6. Offers & Finance', 'Finance Clearance', 'manager_finance'],
-  ['7. Enrollment & Student Account', 'Ready to Admit & Conversion', 'manager_ready'],
   ['8. Monitoring', 'Admission Reports', 'manager_reports'],
 ] as const
 
@@ -157,7 +156,7 @@ const ADMISSION_MANAGER_TAB: Record<string, string> = {
   manager_seat_pools: 'seatpools', manager_allocation: 'decisions', manager_waitlist: 'waitlist',
   manager_recommendations: 'offers', manager_offers: 'offers',
   manager_finance: 'finance_status', manager_invoices: 'invoices_challans', manager_clearance: 'clearance_status',
-  manager_ready: 'ready_to_admit', manager_enrollment: 'enrollment_status', manager_reports: 'reports',
+  manager_enrollment: 'enrollment_status', manager_reports: 'reports',
 }
 
 export default function App({ onLogout }: { onLogout: () => void }) {
@@ -633,7 +632,6 @@ function NavGlyph({ moduleKey, label }: { moduleKey: string, label?: string }) {
     'Assessment, Merit & Seats': HiOutlineChartBarSquare,
     'Counselling & Waitlist': HiOutlineUserGroup,
     'Offer Approval & Status': HiOutlineGift,
-    'Ready to Admit & Conversion': HiOutlineUserPlus,
     'Admission Reports': HiOutlineChartBarSquare,
     'Programs & Intake': HiOutlineAcademicCap,
     'Quotas': HiOutlineUsers,
@@ -660,7 +658,6 @@ function NavGlyph({ moduleKey, label }: { moduleKey: string, label?: string }) {
     'Accounts Verification': HiOutlineDocumentCheck,
     'Finance Clearance': HiOutlineCheckBadge,
     'Clearance Status': HiOutlineCheckBadge,
-    'Final Approval': HiOutlineCheckBadge,
     'Ready to Admit': HiOutlineUserPlus,
     'Enrollment Queue': HiOutlineQueueList,
     'Student Conversion': HiOutlineUserPlus,

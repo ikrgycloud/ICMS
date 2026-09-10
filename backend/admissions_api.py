@@ -7,11 +7,16 @@ import smtplib
 import io
 from pathlib import Path
 from email.message import EmailMessage
-from datetime import date
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import desc
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from admissions_schemas import (AdmissionActionIn, LegacyAdmissionDecisionIn, CycleIn, CycleProgramIn,
                                 ApplicantStartIn, ApplicantLookupIn, ApplicantProfileIn, JoiningPreferencesIn, PreferenceIn, PreferenceOrderIn,
@@ -662,13 +667,15 @@ def review_queue(cycle_id: str = "", program_id: str = "", campus: str = "", sta
 
 
 @router.get("/admissions/corrections")
-def corrections_queue(ctx=Depends(auth), s=Depends(db)):
+def corrections_queue(status: str = "", ctx=Depends(auth), s=Depends(db)):
     """Applications returned to applicants, including the reviewer's latest instruction."""
     _staff(s, ctx, "view_application")
     query = s.query(D.Application).filter(
         D.Application.tenant_id == ctx["tenant_id"],
         D.Application.current_status.in_(["CORRECTION_REQUIRED", "RESUBMITTED"]),
     )
+    if status.upper() == "RESUBMITTED":
+        query = query.filter(D.Application.current_status == "RESUBMITTED")
     actor_campus = ctx.get("scope_ref", "")
     if ctx.get("scope_level") == "campus" and actor_campus and not actor_campus.startswith("scope_"):
         query = query.filter(D.Application.campus == actor_campus)
@@ -690,6 +697,41 @@ def corrections_queue(ctx=Depends(auth), s=Depends(db)):
             "requested_at": correction.created_at.isoformat() if correction and correction.created_at else None,
         })
     return {"applications": rows}
+
+
+@router.get("/admissions/reports.pdf")
+def admissions_report_pdf(ctx=Depends(auth), s=Depends(db)):
+    """Download a current, database-backed Admissions Office summary."""
+    _staff(s, ctx, "view_application")
+    applications = s.query(D.Application).filter_by(tenant_id=ctx["tenant_id"]).all()
+    groups = [
+        ("Applications received", {"SUBMITTED", "RESUBMITTED", "REVIEW_IN_PROGRESS"}),
+        ("Document verified", {"DOCUMENT_VERIFIED"}),
+        ("Eligible", {"ELIGIBLE"}),
+        ("Allocated / waitlisted", {"ALLOCATION_PENDING", "ALLOCATED", "WAITLISTED"}),
+        ("Offers issued", {"OFFERED"}),
+        ("Offers accepted", {"OFFER_ACCEPTED"}),
+        ("Enrolled", {"ENROLLED"}),
+    ]
+    output = io.BytesIO()
+    document = SimpleDocTemplate(output, pagesize=A4, rightMargin=16 * mm, leftMargin=16 * mm, topMargin=16 * mm, bottomMargin=16 * mm)
+    styles = getSampleStyleSheet()
+    story = [Paragraph("ICMS Admissions Office Report", styles["Title"]), Spacer(1, 5 * mm),
+             Paragraph(f"Generated on {datetime.utcnow().strftime('%d %b %Y, %H:%M UTC')}", styles["Normal"]), Spacer(1, 5 * mm)]
+    data = [["Metric", "Count"], ["Total applications", str(len(applications))]] + [[label, str(sum(1 for app in applications if app.current_status in states))] for label, states in groups]
+    table = Table(data, colWidths=[125 * mm, 35 * mm])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#8a1f2b")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#d8dee8")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f9fafb")]),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("PADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story.append(table)
+    document.build(story)
+    return Response(output.getvalue(), media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=ICMS-admissions-report.pdf"})
 
 
 @router.get("/admissions/{application_id}/detail")

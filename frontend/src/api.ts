@@ -43,17 +43,17 @@ async function req(path: string, opts: RequestInit = {}) {
   return data
 }
 
-async function download(path: string) {
+async function download(path: string, filename = 'ICMS-payment-receipt.pdf') {
   const headers: Record<string, string> = {}
   const t = tok()
   if (t) headers.Authorization = `Bearer ${t}`
   const res = await fetch(`${BASE}${path}`, { headers })
-  if (!res.ok) throw new Error('Could not download the receipt')
+  if (!res.ok) throw new Error('Could not download the PDF report')
 
   const url = URL.createObjectURL(await res.blob())
   const link = document.createElement('a')
   link.href = url
-  link.download = 'ICMS-payment-receipt.pdf'
+  link.download = filename
   link.click()
   URL.revokeObjectURL(url)
 }
@@ -244,7 +244,8 @@ export const api = {
     req('/admissions/decide', { method: 'POST', body: JSON.stringify({ application_id, action }) }),
   admissionAction: (id: string, action: string, expected_status_version: number, reason = '') =>
     req(`/admissions/${id}/actions`, { method: 'POST', body: JSON.stringify({ action, expected_status_version, reason }) }),
-  admissionCorrections: () => req('/admissions/corrections'),
+  admissionCorrections: (status = '') => req(`/admissions/corrections${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+  downloadAdmissionsReport: () => download('/admissions/reports.pdf', 'ICMS-admissions-report.pdf'),
   openAdmissionDocument: async (applicationId: string, documentId: string) => {
     const viewer = window.open('', '_blank')
     if (!viewer) throw new Error('Allow pop-ups to view the document.')

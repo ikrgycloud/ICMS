@@ -116,9 +116,9 @@ export default function Admissions({
       .admissionReviewQueue(search ? { search } : {})
       .then((x: any) => setQueue(x.applications || []))
       .catch((e) => setNotice({ outcome: "DENY", reason: e.message }));
-  const loadCorrections = () =>
+  const loadCorrections = (status = "") =>
     api
-      .admissionCorrections()
+      .admissionCorrections(status)
       .then((x: any) => setCorrections(x.applications || []))
       .catch((e) => setNotice({ outcome: "DENY", reason: e.message }));
   const loadEligibility = () =>
@@ -215,6 +215,7 @@ export default function Admissions({
   useEffect(() => {
     if (tab === "cycles") loadCycles();
     if (tab === "corrections") loadCorrections();
+    if (tab === "resubmitted_corrections") loadCorrections("RESUBMITTED");
     if (tab === "review") loadQueue();
     if (tab === "program_intake") loadProgramIntake();
     if (tab === "document_status") loadDocumentStatus();
@@ -526,13 +527,12 @@ export default function Admissions({
           </div>
         </div>
       )}
-      {tab === "corrections" && (
+      {["corrections", "resubmitted_corrections"].includes(tab) && (
         <div className="card">
           <div className="card-pad">
-            <h3>Corrections</h3>
+            <h3>{tab === "resubmitted_corrections" ? "Re-submitted Corrections" : "Corrections"}</h3>
             <p className="hint">
-              Applications requiring applicant correction or awaiting review
-              after resubmission.
+              {tab === "resubmitted_corrections" ? "Applicants who have uploaded the requested corrections and are ready for document review." : "Applications requiring applicant correction or awaiting review after resubmission."}
             </p>
             <div className="tbl-scroll">
               <table className="tbl">
@@ -542,6 +542,7 @@ export default function Admissions({
                     <th>Programme</th>
                     <th>Required corrections</th>
                     <th>Current status</th>
+                    <th />
                   </tr>
                 </thead>
                 <tbody>
@@ -563,6 +564,7 @@ export default function Admissions({
                               {a.current_status}
                             </span>
                           </td>
+                          <td><button className="btn btn-sm btn-out" onClick={() => api.admissionDetail(a.id).then(setDetail).catch((e: any) => setNotice({ outcome: "DENY", reason: e.message }))}>View documents</button></td>
                         </tr>
                       );
                     })}
@@ -597,6 +599,7 @@ export default function Admissions({
                     <th>Cycle</th>
                     <th>Documents</th>
                     <th>Status</th>
+                    <th />
                   </tr>
                 </thead>
                 <tbody>
@@ -626,6 +629,7 @@ export default function Admissions({
                           {a.current_status}
                         </span>
                       </td>
+                      <td><button className="btn btn-sm btn-out" onClick={(event) => { event.stopPropagation(); api.admissionDetail(a.id).then(setDetail).catch((e) => setNotice({ outcome: "DENY", reason: e.message })); }}>View documents</button></td>
                     </tr>
                   ))}
                 </tbody>
@@ -1117,7 +1121,7 @@ export default function Admissions({
         "accounts_verification",
         "clearance_status",
       ].includes(tab) && (
-        <ApplicantFinanceView rows={phase5Status} mode={tab} onAction={runPhase5Action} />
+        <ApplicantFinanceView rows={phase5Status} mode={tab} />
       )}{" "}
       {[
         "ready_to_admit",
@@ -1666,6 +1670,7 @@ export default function Admissions({
 }
 
 function AdmissionsReports({ apps, phase5 }: any) {
+  const [selectedReport, setSelectedReport] = useState<any>(null);
   const groups = [
     [
       "Applications received",
@@ -1702,33 +1707,20 @@ function AdmissionsReports({ apps, phase5 }: any) {
     (sum: number, x: any) => sum + Number(x.total_paid || x.paid || 0),
     0,
   );
+  const reportRows = selectedReport
+    ? apps.filter((app: any) => selectedReport.states.includes(app.current_status))
+    : [];
+  const openReport = (label: string, states: string[]) => setSelectedReport({ label, states });
   return (
     <div className="card">
       <div className="card-pad">
         <h3>Admissions Reports</h3>
-        <p className="hint">
-          Live admissions performance summary from the current database.
-        </p>
+        <p className="hint">Live admissions performance summary from the current database.</p>
+        <button className="btn btn-out" onClick={() => api.downloadAdmissionsReport().catch((error: any) => alert(error.message))}>Download PDF report</button>
         <div className="kpi-grid">
-          <div className="kpi">
-            <div className="kpi-val">{apps.length}</div>
-            <div className="kpi-label">Total applications</div>
-          </div>
-          <div className="kpi">
-            <div className="kpi-val">
-              {apps.filter((x: any) => x.current_status === "ENROLLED").length}
-            </div>
-            <div className="kpi-label">Enrolled students</div>
-          </div>
-          <div className="kpi">
-            <div className="kpi-val">
-              {
-                apps.filter((x: any) => x.current_status === "OFFER_ACCEPTED")
-                  .length
-              }
-            </div>
-            <div className="kpi-label">Offers accepted</div>
-          </div>
+          <button className="kpi" onClick={() => openReport("Total applications", [...new Set(apps.map((app: any) => app.current_status))])}><div className="kpi-val">{apps.length}</div><div className="kpi-label">Total applications</div></button>
+          <button className="kpi" onClick={() => openReport("Enrolled students", ["ENROLLED"])}><div className="kpi-val">{apps.filter((x: any) => x.current_status === "ENROLLED").length}</div><div className="kpi-label">Enrolled students</div></button>
+          <button className="kpi" onClick={() => openReport("Offers accepted", ["OFFER_ACCEPTED"])}><div className="kpi-val">{apps.filter((x: any) => x.current_status === "OFFER_ACCEPTED").length}</div><div className="kpi-label">Offers accepted</div></button>
           <div className="kpi">
             <div className="kpi-val">₹{finance.toLocaleString("en-IN")}</div>
             <div className="kpi-label">Recorded fee collection</div>
@@ -1741,16 +1733,17 @@ function AdmissionsReports({ apps, phase5 }: any) {
               states.includes(x.current_status),
             ).length;
             return (
-              <div key={label}>
+              <button key={label} className="admission-report-link" onClick={() => openReport(label, states)}>
                 <span>{label}</span>
                 <div>
                   <i style={{ width: `${(value / total) * 100}%` }} />
                 </div>
                 <b>{value}</b>
-              </div>
+              </button>
             );
           })}
         </div>
+        {selectedReport && <div className="tbl-scroll" style={{ marginTop: 24 }}><div className="card-h"><h4>{selectedReport.label} ({reportRows.length})</h4><button className="btn btn-sm btn-out" onClick={() => setSelectedReport(null)}>Close</button></div><table className="tbl"><thead><tr><th>Application</th><th>Applicant</th><th>Programme</th><th>Status</th></tr></thead><tbody>{reportRows.length ? reportRows.map((app: any) => <tr key={app.id}><td className="mono">{app.application_no || app.id}</td><td>{app.name}</td><td>{app.program}</td><td><span className={`pill s-${String(app.current_status).toLowerCase()}`}>{app.current_status}</span></td></tr>) : <tr><td colSpan={4} className="hint">No applications in this report count.</td></tr>}</tbody></table></div>}
       </div>
     </div>
   );
@@ -2108,7 +2101,7 @@ function DirectorMonitoring({ mode, apps, data }: any) {
     </div>
   );
 }
-function ApplicantFinanceView({ rows, mode, onAction }: any) {
+function ApplicantFinanceView({ rows, mode }: any) {
   const money = (value: any) =>
     `₹${Number(value || 0).toLocaleString("en-IN")}`;
   const titles: any = {
@@ -2165,7 +2158,40 @@ function ApplicantFinanceView({ rows, mode, onAction }: any) {
     return rows;
   };
   const data = rowsForMode();
-  if (mode === "finance_status") return <Phase5ActionQueue rows={data} onAction={onAction} />;
+  if (mode === "finance_status")
+    return (
+      <FinanceCard
+        title="Finance Clearance"
+        sub="Read-only Admission Office view of applicant invoices, payments, and Finance clearance progress."
+      >
+        <thead>
+          <tr>
+            <th>Application</th>
+            <th>Applicant / Programme</th>
+            <th>Invoice / Challan</th>
+            <th>Payable</th>
+            <th>Paid</th>
+            <th>Balance</th>
+            <th>Accounts / Finance</th>
+            <th>Current stage</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.length ? data.map((x: any) => (
+            <tr key={x.id}>
+              <td className="mono">{x.application_no}</td>
+              <td><b>{x.applicant_name}</b><div className="hint">{x.program} · {x.campus}</div></td>
+              <td><b>{x.invoice_id || "Not invoiced"}</b><div className="hint">{x.challan_no || "No challan"}</div></td>
+              <td>{money(x.total_payable || x.invoice_amount)}</td>
+              <td>{money(x.total_paid || x.paid)}</td>
+              <td><b>{money(x.balance)}</b></td>
+              <td>{x.accounts_status || "PENDING"} / {x.finance_status || "PENDING"}</td>
+              <td><span className={`pill s-${String(x.status || "pending").toLowerCase()}`}>{x.status || "PENDING"}</span></td>
+            </tr>
+          )) : <tr><td colSpan={8} className="hint">No applicant finance records are available yet.</td></tr>}
+        </tbody>
+      </FinanceCard>
+    );
   const identity = (x: any) => (
     <>
       <td className="mono">{x.application_no}</td>
