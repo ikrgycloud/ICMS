@@ -58,6 +58,17 @@ class StudentSeedAccountTests(unittest.TestCase):
         self.assertEqual(result["user"]["username"], "23cse002")
         self.assertIsNotNone(self.session.query(User).filter(User.username.ilike("23cse002")).first())
 
+    def test_payroll_employee_code_variants_can_login_with_normalized_employee_id(self):
+        employee = User(id="user_payroll_001", tenant_id="t_main", person_id="person_001",
+                        username="acct_001", password_hash=pwhash("demo123"), office_n=23,
+                        role="Accountant", status="active", scope_level="campus", scope_ref="Main Campus")
+        self.session.add(employee)
+        self.session.commit()
+
+        result = login(LoginIn(username="ACCT-001", password="demo123"), s=self.session)
+        self.assertIn("token", result)
+        self.assertEqual(result["user"]["username"], "acct_001")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -214,6 +214,23 @@ def authorize(*, ctx: dict, action: str, resource: str,
     return Decision(ALLOW, "Authorized", rbac_authority)
 
 
+def _matches_delegated_authority(authority: str, action: str) -> bool:
+    if authority in ("*", action):
+        return True
+    if not isinstance(authority, str):
+        return False
+    normalized = authority.strip()
+    if not normalized:
+        return False
+    name = normalized.lower()
+    if name == action.lower():
+        return True
+    if ":" in name:
+        granted_action, _, _ = name.partition(":")
+        return granted_action == action.lower()
+    return False
+
+
 def _delegation_valid(d: dict, action: str, target_scope_level: str,
                       amount: Optional[float]) -> bool:
     if d.get("status") != "active":
@@ -226,7 +243,8 @@ def _delegation_valid(d: dict, action: str, target_scope_level: str,
         return False
     if not (start <= now <= end):
         return False
-    if d.get("authority") and action not in ("view",) and d["authority"] not in ("*", action):
+    authority = d.get("authority")
+    if authority and action not in ("view",) and not _matches_delegated_authority(authority, action):
         return False
     if d.get("limit") is not None and amount is not None and amount > float(d["limit"]):
         return False

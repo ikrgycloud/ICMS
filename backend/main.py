@@ -12,6 +12,7 @@ import os
 import sys
 import uuid
 import time
+import re
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 
@@ -85,11 +86,11 @@ GOVERNANCE_PATHS = ("/api/academics/timetable/readiness", "/api/academics/qualit
                     "/api/academics/plans", "/api/academics/allocation/proposals",
                     "/api/programs/proposals", "/api/curriculum/proposals",
                     "/api/academic-calendar/proposals", "/api/academic-governance")
-# These are the actual source and review offices for academic governance.
+# These are the only offices allowed to access academic governance.
 # Keep this transport-level guard aligned with domain_api's authorization
 # policy; otherwise an authorized source office can see a form but every
 # mutation is rejected before its endpoint executes.
-GOVERNANCE_ROUTE_OFFICES = {6, 10, 17, 41, 42, 43}
+GOVERNANCE_ROUTE_OFFICES = {6, 10, 17}
 
 
 @app.middleware("http")
@@ -723,7 +724,20 @@ def login(body: LoginIn, s=Depends(db)):
     # The shared demo student account is the documented login name, while older
     # databases may still have the roll-number alias bound to the same row.
     requested_username = (body.username or "").strip().lower()
+    normalized_username = requested_username
+    if normalized_username:
+        normalized_username = normalized_username.replace("-", "_").replace(" ", "_")
+        normalized_username = re.sub(r"[^a-z0-9_]", "_", normalized_username)
+        normalized_username = re.sub(r"_+", "_", normalized_username).strip("_")
+
     u = s.query(User).filter(func.lower(User.username) == requested_username).first()
+    if not u and normalized_username and normalized_username != requested_username:
+        u = s.query(User).filter(func.lower(User.username) == normalized_username).first()
+    if not u and normalized_username:
+        compact_username = normalized_username.replace("_", "")
+        u = s.query(User).filter(
+            func.replace(func.lower(User.username), "_", "") == compact_username
+        ).first()
     if not u and requested_username == "student":
         u = s.query(User).filter(func.lower(User.username) == "25ece072").first()
     if not u and requested_username != "student":

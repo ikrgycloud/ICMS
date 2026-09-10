@@ -499,7 +499,7 @@ MONETARY = {("finance", "waive"): ("fee_waiver", "Vice-Chancellor"),
 # --------------------------------------------------------------------------- #
 #  Authority gate for a module action                                         #
 # --------------------------------------------------------------------------- #
-ACADEMIC_GOVERNANCE_OFFICES = {6, 10, 17, 41, 42, 43}  # governance + source owners
+ACADEMIC_GOVERNANCE_OFFICES = {6, 10, 17}
 
 
 def academic_scope_allows(ctx, *, dept_id=None, program_id=None, section_id=None) -> bool:

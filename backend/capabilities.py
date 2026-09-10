@@ -68,11 +68,12 @@ MODULES = {
     "governance":   {"label": "Governance",    "icon": "🏛", "group": "Authority"},
     "admin":        {"label": "System Admin",  "icon": "⚙", "group": "Authority"},
     "analytics":    {"label": "Analytics",     "icon": "📊", "group": "Workspace"},
+    "accountant_report": {"label": "Accountant Report", "icon": "▤", "group": "Reports"},
     "integrations": {"label": "Integrations",  "icon": "🔌", "group": "Platform"},
 }
 
 # Modules every signed-in office gets.
-BASE_MODULES = ["overview", "calendar", "academic_calendar",
+BASE_MODULES = ["overview", "calendar",
                 "workflows", "delegation", "audit", "directory", "matrices"]
 
 # Per-office module assignment (office_n -> [module keys], in addition to BASE).
@@ -83,24 +84,24 @@ OFFICE_MODULES = {
     3:  ["analytics", "academics", "finance", "hr", "approvals"],                  # Campus Head
     4:  ["my_schedule", "analytics", "academics", "students", "admissions", "attendance", "examinations", "finance", "rollover", "hr", "procurement", "assets", "hostel", "transport", "grievance", "approvals"],  # Principal: branch oversight views
     5:  ["academics", "students", "attendance", "examinations", "approvals"],      # Vice Principal
-    6:  ["academics", "students", "examinations", "rollover", "research", "approvals"],        # Dean Academics
+        6: ["academics", "students", "examinations", "rollover", "research", "academic_calendar", "approvals"],        # Dean Academics
     7:  ["hr", "procurement", "assets", "finance", "approvals"],                   # Dean Administration
     8:  ["students", "grievance", "hostel", "approvals"],                          # Dean Student Affairs
     9:  ["research", "analytics", "approvals"],                                    # Dean R&D / IQAC
-    10: ["academics", "students", "attendance", "examinations", "hr", "approvals"],# HOD
+    10: ["academics", "students", "attendance", "examinations", "hr", "academic_calendar", "approvals"],# HOD
     11: ["my_schedule", "messages", "announcements", "academics", "attendance", "assignments", "assessments", "marks_entry", "examinations", "course_materials", "mentoring", "research", "leave", "payroll", "digital_id"], # Professor
     12: ["my_schedule", "messages", "announcements", "academics", "attendance", "assignments", "assessments", "marks_entry", "examinations", "course_materials", "mentoring", "research", "leave", "payroll", "digital_id"], # Associate Professor
     13: ["my_schedule", "messages", "announcements", "academics", "attendance", "assignments", "assessments", "marks_entry", "examinations", "course_materials", "mentoring", "leave", "payroll", "digital_id"], # Assistant Professor
     14: ["my_schedule", "messages", "announcements", "academics", "attendance", "assignments", "assessments", "marks_entry", "examinations", "course_materials", "leave", "payroll", "digital_id"], # Lecturer
     15: ["admissions", "students", "approvals"],                                   # Admission Office
     16: ["examinations", "students", "approvals"],                                 # Exam Controller
-    17: ["academics", "attendance", "rollover", "approvals"],                                  # Academic Coordinator
+    17: ["academics", "attendance", "rollover", "academic_calendar", "approvals"],             # Academic Coordinator
     18: ["placements", "students", "analytics"],                                   # Placement Office
     19: ["library"],                                                              # Library
     20: ["grievance", "students"],                                                 # Grievance
     21: ["grievance", "students"],                                                 # Discipline
     22: ["finance", "students", "rollover", "approvals", "analytics"],                         # Finance Manager
-    23: ["finance", "students", "hr", "approvals"],                               # Accounts
+    23: ["finance", "students", "hr", "approvals", "accountant_report"],         # Accounts
     24: ["hr", "approvals", "analytics"],                                          # HR Manager
     25: ["hr", "approvals"],                                                       # HR Executive
     26: ["procurement", "assets", "hr", "approvals"],                              # Admin Manager
@@ -119,9 +120,9 @@ OFFICE_MODULES = {
     38: ["placements", "analytics"],                                               # Alumni
     39: ["finance", "audit", "analytics"],                                         # External Auditor
     40: ["governance", "analytics", "finance", "hr", "approvals"],                 # Governing Body
-    41: ["program_proposals", "curriculum", "approvals"],                              # Program Coordinator
-    42: ["academic_calendar", "academics", "approvals"],                              # Academic Office
-    43: ["academics", "approvals"],                                                     # Timetable Coordinator
+    41: ["program_proposals", "curriculum", "academic_calendar", "approvals"],       # Program Coordinator
+    42: ["academics", "academic_calendar", "approvals"],                              # Academic Office
+    43: ["academics", "academic_calendar", "approvals"],                              # Timetable Coordinator
 }
 
 # Which verb (from the RBAC matrix) a module's key actions require. The UI uses
@@ -197,12 +198,10 @@ ACTION_OFFICE_ALLOW = {
     ("calendar", "create"): set(range(1, 36)) | {40},
     ("calendar", "edit"): set(range(1, 36)) | {40},
     ("calendar", "delete"): set(range(1, 36)) | {40},
-    ("academic_calendar", "create"): {1, 2, 4, 5, 17},
-    ("academic_calendar", "edit"): {1, 2, 4, 5, 17},
-    ("academic_calendar", "delete"): {1, 2, 4, 5, 17},
-    ("academic_calendar", "create"): {42},
-    ("academic_calendar", "edit"): {42},
-    ("academic_calendar", "delete"): {42},
+    ("academic_calendar", "view"): {6, 10, 17},
+    ("academic_calendar", "create"): {6, 10, 17},
+    ("academic_calendar", "edit"): {6, 10, 17},
+    ("academic_calendar", "delete"): {6, 10, 17},
     ("academic_calendar", "approve_proposal"): {6},
     ("academic_calendar", "reject_proposal"): {6},
     ("students", "add"): {15},                        # Admissions owns student creation
