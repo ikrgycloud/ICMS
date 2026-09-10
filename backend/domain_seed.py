@@ -2808,22 +2808,27 @@ def _seed_payroll_demo_data(s):
     payroll_month = today.strftime("%Y-%m")
     existing_run = s.query(D.PayrollRun).filter(D.PayrollRun.payroll_month == payroll_month).first()
     if existing_run is not None:
-        s.commit()
-        return
+        run = existing_run
+    else:
+        run = D.PayrollRun(
+            id=f"payroll_run_{payroll_month.replace('-', '_')}",
+            tenant_id=TENANT,
+            payroll_month=payroll_month,
+            run_name=f"{today.strftime('%B %Y')} Payroll Run",
+            status="generated",
+            generated_by="system",
+        )
+        s.add(run)
+        s.flush()
 
-    run = D.PayrollRun(
-        id=f"payroll_run_{payroll_month.replace('-', '_')}",
-        tenant_id=TENANT,
-        payroll_month=payroll_month,
-        run_name=f"{today.strftime('%B %Y')} Payroll Run",
-        status="generated",
-        generated_by="system",
-    )
-    s.add(run)
-    s.flush()
-
+    existing_employee_ids = {
+        employee_id
+        for employee_id, in s.query(D.PayrollEntry.employee_id).filter(D.PayrollEntry.run_id == run.id).all()
+    }
     employees = s.query(D.PayrollEmployee).filter(D.PayrollEmployee.status == "active").all()
     for emp in employees:
+        if emp.id in existing_employee_ids:
+            continue
         structure = (
             s.query(D.PayrollSalaryStructure)
             .filter(D.PayrollSalaryStructure.employee_id == emp.id)
@@ -2865,6 +2870,94 @@ def _seed_payroll_demo_data(s):
             payment_status="pending",
         )
         s.add(entry)
+
+    # Keep three paid historical periods available for staff payslip demos.
+    month_cursor = datetime(today.year, today.month, 1)
+    for offset in range(1, 4):
+        month_cursor = month_cursor - timedelta(days=1)
+        historical_month = month_cursor.strftime("%Y-%m")
+        historical_run = s.query(D.PayrollRun).filter(D.PayrollRun.payroll_month == historical_month).first()
+        if historical_run is None:
+            historical_run = D.PayrollRun(
+                id=f"payroll_run_{historical_month.replace('-', '_')}",
+                tenant_id=TENANT,
+                payroll_month=historical_month,
+                run_name=f"{month_cursor.strftime('%B %Y')} Payroll Run",
+                status="paid",
+                generated_by="system",
+                payment_date=datetime(month_cursor.year, month_cursor.month, 25, 12, 0),
+            )
+            s.add(historical_run)
+            s.flush()
+
+        for emp in employees:
+            entry = s.query(D.PayrollEntry).filter(
+                D.PayrollEntry.run_id == historical_run.id,
+                D.PayrollEntry.employee_id == emp.id,
+            ).first()
+            if entry is None:
+                structure = (
+                    s.query(D.PayrollSalaryStructure)
+                    .filter(D.PayrollSalaryStructure.employee_id == emp.id)
+                    .order_by(D.PayrollSalaryStructure.effective_from.desc())
+                    .first()
+                )
+                if not structure:
+                    continue
+                gross_salary = sum((
+                    structure.basic_pay, structure.hra, structure.special_allowance,
+                    structure.conveyance_allowance, structure.medical_allowance,
+                    structure.other_earnings,
+                ))
+                total_deductions = sum((
+                    structure.pf_employee_share, structure.professional_tax,
+                    structure.income_tax, structure.loan_deduction,
+                    structure.advance_deduction, structure.other_deductions,
+                ))
+                entry = D.PayrollEntry(
+                    id=f"payroll_entry_{emp.id}_{historical_month.replace('-', '_')}",
+                    tenant_id=TENANT,
+                    run_id=historical_run.id,
+                    employee_id=emp.id,
+                    gross_salary=gross_salary,
+                    total_earnings=gross_salary,
+                    total_deductions=total_deductions,
+                    net_salary=gross_salary - total_deductions,
+                    present_days=22,
+                    paid_days=22,
+                    leave_days=0,
+                    payslip_status="generated",
+                    payment_status="paid",
+                )
+                s.add(entry)
+                s.flush()
+
+            posting = s.query(D.PayrollPaymentPosting).filter(
+                D.PayrollPaymentPosting.entry_id == entry.id
+            ).first()
+            if posting is None:
+                s.add(D.PayrollPaymentPosting(
+                    id=f"payroll_payment_{entry.id}",
+                    tenant_id=TENANT,
+                    entry_id=entry.id,
+                    payment_method=emp.pay_mode or "bank_transfer",
+                    bank_ref_no=f"PAY-{historical_month.replace('-', '')}-{emp.employee_code}",
+                    posted_by="system",
+                    posted_at=historical_run.payment_date,
+                    status="posted",
+                    remarks="Demo historical payroll payment",
+                ))
+            payslip = s.query(D.PayrollPayslip).filter(D.PayrollPayslip.entry_id == entry.id).first()
+            if payslip is None:
+                s.add(D.PayrollPayslip(
+                    id=f"payroll_payslip_{entry.id}",
+                    tenant_id=TENANT,
+                    entry_id=entry.id,
+                    pdf_url="",
+                    generated_at=historical_run.payment_date,
+                ))
+
+        month_cursor = datetime(month_cursor.year, month_cursor.month, 1)
 
     s.commit()
 

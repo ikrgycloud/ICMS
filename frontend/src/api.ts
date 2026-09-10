@@ -507,7 +507,7 @@ export const api = {
   studentAnnouncements: () => req('/portal/student/announcements'),
   studentLibraryLoans: () => req('/portal/student/library-loans'),
   facultyHome: () => req('/portal/faculty/home'),
-  facultyPayroll: () => req('/portal/payroll/me'),
+  facultyPayroll: (month?: string) => req(`/portal/payroll/me${month ? `?month=${encodeURIComponent(month)}` : ''}`),
   facultyCourseCoordination: () => req('/portal/faculty/course-coordination'),
   facultyAcademicRisk: () => req('/portal/faculty/academic-risk'),
   facultyCourseRegistrations: () => req('/portal/faculty/course-registrations'),

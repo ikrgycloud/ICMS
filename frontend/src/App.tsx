@@ -231,6 +231,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     // retained when opened from the dashboard KPI or the Principal sidebar.
     const virtualModule = ([3, 4].includes(user?.office_n) && PRINCIPAL_NAV.some(([, , key]) => key === view))
       || (user?.persona === 'faculty' && FACULTY_NAV.some(([, , key]) => key === view))
+      || (user?.persona && !['student', 'parent', 'faculty'].includes(user.persona) && view === 'my_payroll')
       || (user?.persona === 'student' && ['assignments', 'course_materials'].includes(view))
       || view.startsWith('director_') || view.startsWith('manager_') || view.startsWith('coordinator_')
     // Finance is a student self-service destination even though students do
@@ -282,6 +283,9 @@ export default function App({ onLogout }: { onLogout: () => void }) {
       .map((module: any) => ({ ...module, ...displayMeta(user, module) }))
       if (user?.persona === 'student' && !modules.some((module: any) => module.key === 'finance')) {
         modules.push({ key: 'finance', label: 'Fees & Payments', group: 'Student Services', enabled: true })
+      }
+      if (user?.persona && !['student', 'parent', 'faculty'].includes(user.persona)) {
+        modules.push({ key: 'my_payroll', label: 'My Payroll', group: 'Self Service', enabled: true })
       }
       return modules
     },
@@ -620,6 +624,8 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <HR caps={caps} />
     case 'payroll':
       return user.persona === 'faculty' ? <FacultyPayroll /> : <HR caps={caps} />
+    case 'my_payroll':
+      return <FacultyPayroll />
     case 'faculty_staff':
       return <FacultyStaff />
     case 'leave':

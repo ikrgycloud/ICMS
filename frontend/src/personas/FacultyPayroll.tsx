@@ -6,10 +6,11 @@ const money = (value: number) => `₹${Number(value || 0).toLocaleString('en-IN'
 
 export default function FacultyPayroll() {
   const [data, setData] = useState<any>(null)
+  const [selectedMonth, setSelectedMonth] = useState('')
 
   useEffect(() => {
-    api.facultyPayroll().then(setData).catch(() => setData({ error: true }))
-  }, [])
+    api.facultyPayroll(selectedMonth || undefined).then(setData).catch(() => setData({ error: true }))
+  }, [selectedMonth])
 
   if (!data) return <Spinner />
   if (data.error) return <Empty icon="!" text="Payroll details could not be loaded." />
@@ -18,6 +19,7 @@ export default function FacultyPayroll() {
   const entry = data.entry || {}
   const run = data.run || {}
   const payment = data.payment || {}
+  const lastPaidReceipt = data.last_paid_receipt
   const earnings = data.earnings || []
   const deductions = data.deductions || []
 
@@ -36,7 +38,16 @@ export default function FacultyPayroll() {
           <h1>Payroll</h1>
           <p>Your salary statement, earnings, deductions, and payment status.</p>
         </div>
-        <button type="button" onClick={() => window.print()}>Print statement</button>
+        <div className="faculty-payroll-actions">
+          <label>
+            <span>Pay period</span>
+            <select value={selectedMonth} onChange={event => setSelectedMonth(event.target.value)}>
+              <option value="">Latest payslip</option>
+              {(data.available_months || []).map((month: string) => <option key={month} value={month}>{month}</option>)}
+            </select>
+          </label>
+          <button type="button" onClick={() => window.print()}>Print statement</button>
+        </div>
       </section>
 
       <section className="faculty-payroll-summary">
@@ -61,6 +72,26 @@ export default function FacultyPayroll() {
           <span>{paymentDate}</span>
         </article>
       </section>
+      {lastPaidReceipt && (
+        <section className="faculty-payroll-receipt">
+          <header>
+            <div>
+              <small>Last paid payroll receipt</small>
+              <h2>{lastPaidReceipt.payroll_month || 'Paid payroll'}</h2>
+              <p>{lastPaidReceipt.run_name || 'Salary payment receipt'}</p>
+            </div>
+            <button type="button" onClick={() => window.print()}>Print receipt</button>
+          </header>
+          <div className="payroll-receipt-grid">
+            <div><span>Receipt reference</span><b>{lastPaidReceipt.bank_ref_no || lastPaidReceipt.receipt_no || '—'}</b></div>
+            <div><span>Payment date</span><b>{lastPaidReceipt.payment_date || '—'}</b></div>
+            <div><span>Gross salary</span><b>{money(lastPaidReceipt.gross_salary)}</b></div>
+            <div><span>Deductions</span><b>{money(lastPaidReceipt.total_deductions)}</b></div>
+            <div><span>Net salary paid</span><b>{money(lastPaidReceipt.net_salary)}</b></div>
+            <div><span>Payment method</span><b>{lastPaidReceipt.payment_method || 'Bank transfer'}</b></div>
+          </div>
+        </section>
+      )}
 <section className="faculty-payroll-grid">
         <article className="faculty-payroll-card">
           <header>

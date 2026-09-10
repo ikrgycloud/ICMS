@@ -3522,7 +3522,7 @@ def update_payroll_entry_status(entry_id: str, body: dict, ctx=Depends(auth), s=
 
 
 @router.get("/payroll/me")
-def my_payroll(ctx=Depends(auth), s=Depends(db)):
+def my_payroll(month: str = None, ctx=Depends(auth), s=Depends(db)):
     stf = _staff_or_404(s, ctx)
 
     payroll_emp = (
@@ -3541,19 +3541,47 @@ def my_payroll(ctx=Depends(auth), s=Depends(db)):
         .first()
     )
 
-    entry = (
+    payroll_entries = (
         s.query(D.PayrollEntry)
         .filter(D.PayrollEntry.employee_id == payroll_emp.id)
+        .order_by(desc(D.PayrollEntry.created_at))
+        .all()
+    )
+    runs = {run.id: run for run in s.query(D.PayrollRun).all()}
+    available_months = sorted(
+        {runs[item.run_id].payroll_month for item in payroll_entries if item.run_id in runs},
+        reverse=True,
+    )
+    entry = next(
+        (item for item in payroll_entries if not month or (runs.get(item.run_id) and runs[item.run_id].payroll_month == month)),
+        None,
+    )
+
+    paid_entry = (
+        s.query(D.PayrollEntry)
+        .filter(
+            D.PayrollEntry.employee_id == payroll_emp.id,
+            D.PayrollEntry.payment_status == "paid",
+        )
         .order_by(desc(D.PayrollEntry.created_at))
         .first()
     )
 
     run = s.query(D.PayrollRun).get(entry.run_id) if entry else None
+    paid_run = s.query(D.PayrollRun).get(paid_entry.run_id) if paid_entry else None
     posting = None
     if entry:
         posting = (
             s.query(D.PayrollPaymentPosting)
             .filter(D.PayrollPaymentPosting.entry_id == entry.id)
+            .order_by(desc(D.PayrollPaymentPosting.posted_at))
+            .first()
+        )
+    paid_posting = None
+    if paid_entry:
+        paid_posting = (
+            s.query(D.PayrollPaymentPosting)
+            .filter(D.PayrollPaymentPosting.entry_id == paid_entry.id)
             .order_by(desc(D.PayrollPaymentPosting.posted_at))
             .first()
         )
@@ -3618,6 +3646,19 @@ def my_payroll(ctx=Depends(auth), s=Depends(db)):
             "posted_at": posting.posted_at.isoformat() if posting and posting.posted_at else None,
             "status": posting.status if posting else "pending",
         },
+        "available_months": available_months,
+        "last_paid_receipt": {
+            "receipt_no": paid_posting.bank_ref_no if paid_posting else paid_entry.id if paid_entry else None,
+            "payroll_month": paid_run.payroll_month if paid_run else None,
+            "run_name": paid_run.run_name if paid_run else None,
+            "gross_salary": paid_entry.gross_salary if paid_entry else 0,
+            "total_deductions": paid_entry.total_deductions if paid_entry else 0,
+            "net_salary": paid_entry.net_salary if paid_entry else 0,
+            "payment_date": paid_posting.posted_at.isoformat() if paid_posting and paid_posting.posted_at else paid_run.payment_date.isoformat() if paid_run and paid_run.payment_date else None,
+            "payment_method": paid_posting.payment_method if paid_posting else payroll_emp.pay_mode,
+            "bank_ref_no": paid_posting.bank_ref_no if paid_posting else "",
+            "status": paid_entry.payment_status if paid_entry else None,
+        } if paid_entry else None,
         "earnings": earnings,
         "deductions": deductions,
     }
