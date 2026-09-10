@@ -39,7 +39,7 @@ from models import (User, Person, Role, RolePermission, Delegation, WorkflowInst
 
 from domain_api import router as domain_router
 from governance_api import router as governance_router
-from faculty_api import router as faculty_router
+from faculty_api import router as faculty_router, decide_attendance_correction_request
 from faculty_portal_api import router as faculty_portal_router
 from admissions_api import router as admissions_router
 from portal_api import router as portal_router
@@ -1249,6 +1249,19 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
     if not wf or wf.tenant_id != ctx.get("tenant_id", TENANT):
         raise HTTPException(404, "Workflow not found")
     proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
+    # Attendance corrections have an exact participant resolver (Coordinator,
+    # HOD, then VP) and their final decision updates the original attendance
+    # record.  Do not run this process through office 5's generic delegated
+    # approval profile: the configured reviewer acts in their own authority.
+    if wf.process_key == "attendance_correction":
+        correction = (s.query(D.AttendanceCorrectionRequest)
+                      .filter(D.AttendanceCorrectionRequest.workflow_instance_id == wf.id).first())
+        if not correction:
+            raise HTTPException(409, "Attendance correction workflow is missing its correction request")
+        row = decide_attendance_correction_request(s, correction.id, body.action, body.reason, ctx)
+        refreshed = s.query(WorkflowInstance).get(wf.id)
+        return {"decision": {"outcome": "ALLOW", "reason": "Attendance correction decision recorded", "authority": "Full", "escalate_to": None},
+                "workflow": _wf_payload(s, refreshed, proc)}
     stage_offices = _workflow_stage_offices(proc, wf.current_stage)
     if ctx["office_n"] != wf.office_n and ctx["office_n"] not in stage_offices:
         raise HTTPException(403, "Only the current workflow stage owner may act")
@@ -1365,7 +1378,7 @@ def _wf_payload(s, wf, proc):
         "scope_level": wf.scope_level,
         "request_student": request_student, "correction_id": correction_id,
         "chain": proc["chain"] if proc else [],
-        "escalation": proc["escalation"] if proc else "",
+        "escalation": "" if wf.process_key == "attendance_correction" else (proc["escalation"] if proc else ""),
         "created_at": wf.created_at.isoformat(),
         "profile": {
             "semester_key": profile.semester_key if profile else "",

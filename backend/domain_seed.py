@@ -4587,6 +4587,41 @@ def _seed_assignment_submission_demo(s):
             evaluation.submission_id = submission.id; evaluation.evaluator_id = staff.id; evaluation.status = status; evaluation.feedback = "Please revise the evidence and resubmit." if status == "returned" else "Clear analysis with supporting evidence."; evaluation.marks_awarded = None if status == "returned" else 21; evaluation.evaluated_at = now - timedelta(hours=12)
     s.commit()
 
+
+def _seed_aarav_cs404_attendance_roster(s):
+    """Ensure the checked-in CS404-A demonstration session has a real roster."""
+    professor = s.query(User).filter(User.username == "aarav_kulkarni").first()
+    staff = s.query(D.StaffMember).filter(D.StaffMember.user_id == professor.id).first() if professor else None
+    if not staff:
+        return
+    section = (s.query(D.Section)
+               .join(D.Course, D.Course.id == D.Section.course_id)
+               .filter(D.Section.id == "sec_cs404_a", D.Course.code == "CS404")
+               .first())
+    if not section or not s.query(D.TeachingAllocation).filter(
+        D.TeachingAllocation.faculty_id == staff.id,
+        D.TeachingAllocation.section_id == section.id,
+        D.TeachingAllocation.status == "active",
+    ).first():
+        return
+    if s.query(D.Enrollment).filter(D.Enrollment.section_id == section.id,
+                                    D.Enrollment.status == "enrolled").count():
+        return
+    for student_id in ("stu_1", "stu_2", "stu_3"):
+        student = s.get(D.Student, student_id)
+        if not student:
+            continue
+        enrollment = s.query(D.Enrollment).filter(D.Enrollment.section_id == section.id,
+                                                   D.Enrollment.student_id == student.id).first()
+        if not enrollment:
+            enrollment = D.Enrollment(id=f"demo_attendance_{section.id}_{student.id}",
+                                      tenant_id=TENANT, section_id=section.id,
+                                      student_id=student.id)
+            s.add(enrollment)
+        enrollment.status = "enrolled"
+    s.commit()
+
+
 def _seed_mentoring_cases_demo(s):
     """Idempotent Phase 6 cases for Aarav's real formal advisees."""
     professor = s.query(User).filter(User.username == "aarav_kulkarni").first()
@@ -4684,6 +4719,7 @@ def seed_domain():
         _seed_marks_submission_demo(s)
         _seed_faculty_leave_demo(s)
         _seed_assignment_submission_demo(s)
+        _seed_aarav_cs404_attendance_roster(s)
         _seed_mentoring_cases_demo(s)
         _seed_research_demo(s)
         legacy_published = [row[0] for row in s.query(D.Mark.assessment_id)

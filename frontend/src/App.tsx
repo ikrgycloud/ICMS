@@ -55,6 +55,7 @@ import { StudentAttendanceView, StudentCalendarView, StudentCoursesView, Student
 import FacultyHome from './personas/FacultyHome'
 import AssociateProfessorHome from './personas/AssociateProfessorHome'
 import FacultySchedule from './personas/FacultySchedule'
+import FacultyProfile from './personas/FacultyProfile'
 import FacultyExaminations from './personas/FacultyExaminations'
 import { FacultyAssignments, StudentAssignments } from './personas/AssignmentViews'
 import FacultyCommunication from './personas/FacultyCommunication'
@@ -64,6 +65,7 @@ import FacultyLeave from './personas/FacultyLeave'
 import FacultyPayroll from './personas/FacultyPayroll'
 import FacultyAssessments from './personas/FacultyAssessments'
 import FacultyAttendance from './personas/FacultyAttendance'
+import FacultyAttendanceCorrections from './personas/FacultyAttendanceCorrections'
 import FacultyMarks from './personas/FacultyMarks'
 import FacultyMentoring from './personas/FacultyMentoring'
 import FacultyStudents from './personas/FacultyStudents'
@@ -150,17 +152,17 @@ const FACULTY_NAV = [
   ['Teaching & Academics', 'Assessments & Marks', 'assessments'], ['Teaching & Academics', 'Marks', 'marks_entry'], ['Teaching & Academics', 'Examinations', 'examinations'],
   ['Teaching & Academics', 'Course Materials', 'course_materials'], ['Teaching & Academics', 'Mentoring & Advisees', 'mentoring'], ['Teaching & Academics', 'Research & Guidance', 'research'],
   ['Communication', 'Announcements', 'announcements'],
-  ['Self Service', 'My Profile', 'directory'], ['Self Service', 'Digital ID', 'digital_id'], ['Self Service', 'Leave & Requests', 'leave'], ['Self Service', 'Payroll', 'payroll'],
-  ['Workflow', 'My Requests', 'workflows'],
+  ['Self Service', 'My Profile', 'my_profile'], ['Self Service', 'Digital ID', 'digital_id'], ['Self Service', 'Leave & Requests', 'leave'], ['Self Service', 'Payroll', 'payroll'],
+  ['Workflow', 'Attendance Correction Reviews', 'attendance_corrections'], ['Workflow', 'My Requests', 'workflows'],
 ] as const
 
 const FACULTY_ACTIVE_LABEL: Record<string, string> = {
-  overview: 'Overview', my_schedule: 'My Schedule', workflows: 'My Requests',
+  overview: 'Overview', my_schedule: 'My Schedule', workflows: 'My Requests', attendance_corrections: 'Attendance Correction Reviews',
   academics: 'My Sections', attendance: 'Attendance', examinations: 'Assessments & Marks',
   assignments: 'Assignments', assessments: 'Assessments & Marks', marks_entry: 'Marks',
   course_materials: 'Course Materials', mentoring: 'Mentoring & Advisees', leave: 'Leave & Requests',
   payroll: 'Payroll', digital_id: 'Digital ID', messages: 'Messages', announcements: 'Announcements',
-  research: 'Research & Guidance', academic_calendar: 'Academic Calendar', directory: 'My Profile',
+  research: 'Research & Guidance', academic_calendar: 'Academic Calendar', my_profile: 'My Profile',
 }
 
 const COORDINATOR_NAV = [
@@ -694,6 +696,8 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       if (user.persona === 'faculty') return <FacultyAttendance />
       if (user.persona === 'student') return <StudentAttendanceView />
       return <Attendance caps={caps} />
+    case 'attendance_corrections':
+      return user.persona === 'faculty' ? <FacultyAttendanceCorrections /> : <div className="empty">Attendance correction reviews are not available for this role.</div>
     case 'examinations':
       if (user.persona === 'student') return <StudentExaminationsView go={go} />
       if (user.persona === 'faculty') return <FacultyExaminations />
@@ -795,6 +799,8 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <AuditView />
     case 'directory':
       return <Directory />
+    case 'my_profile':
+      return user.persona === 'faculty' ? <FacultyProfile /> : <div className="empty">My Profile is not available for this role.</div>
     case 'matrices':
       return <Matrices />
     case 'permissions':
