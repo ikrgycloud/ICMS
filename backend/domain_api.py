@@ -3266,10 +3266,16 @@ def _course_offering_payload(s, row):
 def _hod_department_ids(s, ctx):
     if ctx.get("office_n") != 10:
         return None
-    person = s.query(Person).join(User, User.person_id == Person.id).filter(User.id == ctx.get("sub")).first()
-    if not person:
-        return set()
-    return {d.id for d in s.query(D.Department).filter(D.Department.hod_person_id == person.id).all()}
+    user = s.get(User, ctx.get("sub"))
+    # The authenticated HOD's department boundary is persisted on the user
+    # record.  A department's hod_person_id points to a StaffMember, not the
+    # authority Person record, so comparing it with User.person_id silently
+    # removed the HOD's legitimate scope.
+    if user and user.scope_ref:
+        department = s.get(D.Department, user.scope_ref)
+        if department:
+            return {department.id}
+    return set()
 
 
 def _offering_in_academic_scope(s, offering, ctx):
@@ -3586,7 +3592,7 @@ def list_sections(ctx=Depends(auth), s=Depends(db)):
 
 class SectionIn(BaseModel):
     course_id: str
-    offering_id: str = ""
+    offering_id: str = Field(min_length=1)
     section_code: str = "A"
     faculty_id: str = ""
     room: str = ""
@@ -3600,18 +3606,21 @@ def create_section(body: SectionIn, ctx=Depends(auth), s=Depends(db)):
     c = s.query(D.Course).get(body.course_id)
     if not c:
         raise HTTPException(400, "Unknown course")
-    offering = s.query(D.CourseOffering).filter_by(id=body.offering_id, tenant_id=TENANT).first() if body.offering_id else None
-    if body.offering_id and (not offering or offering.course_id != c.id): raise HTTPException(400, "Section course does not match the selected offering")
-    if offering and not _offering_in_academic_scope(s, offering, ctx): raise HTTPException(404, "Course offering not found")
-    if offering:
-        existing = s.query(D.Section).filter_by(offering_id=offering.id, section_code=body.section_code).first()
-        if existing: raise HTTPException(409, "This section already exists for the offering")
-        if not _course_offering_payload(s, offering)["readiness"]["ready"]: raise HTTPException(409, "Complete submitted HOD input, capacity, and faculty allocation before creating sections")
+    offering = s.query(D.CourseOffering).filter_by(id=body.offering_id, tenant_id=TENANT).first()
+    if not offering or offering.course_id != c.id: raise HTTPException(400, "Section course does not match the selected offering")
+    if not _offering_in_academic_scope(s, offering, ctx): raise HTTPException(404, "Course offering not found")
+    existing = s.query(D.Section).filter_by(offering_id=offering.id, section_code=body.section_code).first()
+    if existing: raise HTTPException(409, "This section already exists for the offering")
+    hod_input = s.query(D.HODInput).filter_by(offering_id=offering.id).first()
+    if not hod_input or hod_input.status != "Submitted": raise HTTPException(409, "Submit HOD requirements before creating sections")
+    if hod_input.required_sections < 1: raise HTTPException(409, "HOD requirements must request at least one section")
+    if s.query(D.Section).filter_by(offering_id=offering.id).count() >= hod_input.required_sections:
+        raise HTTPException(409, "The required number of sections for this offering already exists")
     c = require_academic_object(s, ctx, s.get(D.Course, body.course_id), "create", "Course")
     sid = uid()
-    s.add(D.Section(id=sid, tenant_id=TENANT, course_id=c.id, offering_id=offering.id if offering else None, dept_id=c.dept_id,
-                    term=offering.term if offering else "2025-Odd", section_code=body.section_code,
-                    faculty_person_id=body.faculty_id or None, room=body.room,
+    s.add(D.Section(id=sid, tenant_id=TENANT, course_id=c.id, offering_id=offering.id, dept_id=c.dept_id,
+                    term=offering.term, section_code=body.section_code,
+                    faculty_person_id=None, room=body.room,
                     schedule=body.schedule, capacity=60, scope_ref=c.dept_id))
     s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "section.create",

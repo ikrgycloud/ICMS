@@ -16,6 +16,7 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
   const [tab, setTab] = useState<'sections' | 'courses'>('sections')
   const [sections, setSections] = useState<any>(null)
   const [courses, setCourses] = useState<any>(null)
+  const [offerings, setOfferings] = useState<any>({ offerings: [] })
   const [programmes, setProgrammes] = useState<any>(null)
   const [showAdd, setShowAdd] = useState(false)
   const [showProgrammeAdd, setShowProgrammeAdd] = useState(false)
@@ -25,7 +26,7 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
   const [selectedSection, setSelectedSection] = useState<any>(null)
   const [timetable, setTimetable] = useState<any>({ entries: [] })
   const [editingEntry, setEditingEntry] = useState<any>(null)
-  const [form, setForm] = useState({ course_id: '', section_code: 'B', room: 'LH-5', schedule: 'Mon/Wed 10:00' })
+  const [form, setForm] = useState({ course_id: '', offering_id: '', section_code: 'B', room: 'LH-5', schedule: 'Mon/Wed 10:00' })
   const [programmeForm, setProgrammeForm] = useState({ department_id: '', code: '', name: '', level: 'UG', duration_years: 4 })
   const [timetableForm, setTimetableForm] = useState({
     day_of_week: 0,
@@ -47,6 +48,7 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
     api.sections().then(setSections).catch(() => {})
     api.courses().then(setCourses).catch(() => {})
     api.academicProgrammes().then(setProgrammes).catch(() => {})
+    api.courseOfferings().then((response) => setOfferings(response ?? { offerings: [] })).catch(() => setOfferings({ offerings: [] }))
     // Some endpoints may return an empty response while the database is still
     // starting.  Keep the view renderable until a later refresh succeeds.
     api.sections().then((response) => setSections(response ?? { sections: [] })).catch(() => setSections({ sections: [] }))
@@ -174,7 +176,7 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
       <PageHead
         title="Academics"
         sub="Course catalog, sections, timetable management, and targeted student notices"
-        right={tab === 'programmes' ? <GatedBtn can={!!caps.create_program} onClick={() => { setProgrammeForm({ ...programmeForm, department_id: programmes.departments[0]?.id || '' }); setShowProgrammeAdd(true) }}>+ Create programme</GatedBtn> : <GatedBtn can={!!caps.create_section} onClick={() => { setForm({ ...form, course_id: courses.courses[0]?.id || '' }); setShowAdd(true) }}>+ Create section</GatedBtn>}
+        right={tab === 'programmes' ? <GatedBtn can={!!caps.create_program} onClick={() => { setProgrammeForm({ ...programmeForm, department_id: programmes.departments[0]?.id || '' }); setShowProgrammeAdd(true) }}>+ Create programme</GatedBtn> : <GatedBtn can={!!caps.create_section} onClick={() => { const offering = offerings.offerings?.[0]; setForm({ ...form, course_id: offering?.course_id || '', offering_id: offering?.id || '' }); setShowAdd(true) }}>+ Create section</GatedBtn>}
       />
 
       <div className="tabs">

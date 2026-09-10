@@ -77,7 +77,7 @@ export default function AcademicCoordinatorTimetable() {
     if (!selectedOffering) return setError("Select a course offering first");
     setBusy(true);
     try {
-      await api.createSection({ course_id: selectedOffering.course_id, ...sectionForm, faculty_id: sectionForm.faculty_id || offeringFaculty });
+      await api.createSection({ course_id: selectedOffering.course_id, ...sectionForm, faculty_id: "" });
       setSectionModal(false); setMessage("Section created."); await load();
     } catch (e: any) { setError(e.message || "Unable to create section"); }
     finally { setBusy(false); }

@@ -593,6 +593,23 @@ def _ensure_student_portal_demo_sections(s, dept_id: str):
         course.credits = spec["credits"]
         course.semester = spec["semester"]
         course.description = f"{spec['title']} core course for semester {spec['semester']}."
+        if not course.program_id:
+            program = (s.query(D.Program).filter(D.Program.tenant_id == TENANT,
+                                                 D.Program.dept_id == dept_id)
+                       .order_by(D.Program.id).first())
+            if program:
+                course.program_id = program.id
+
+        offering_id = f"offering_{course.id}_{term.replace('-', '_').lower()}"
+        offering = _ensure(
+            s, D.CourseOffering, offering_id,
+            lambda: D.CourseOffering(
+                id=offering_id, tenant_id=TENANT, course_id=course.id,
+                program_id=course.program_id, academic_year=f"{DEMO_ATTENDANCE_TODAY.year}-{str(DEMO_ATTENDANCE_TODAY.year + 1)[-2:]}",
+                term=term, semester=course.semester, status="Published",
+                created_by="seed", updated_by="seed",
+            ),
+        ) if course.program_id else None
 
         faculty = _ensure(
             s, D.StaffMember, spec["faculty_id"],
@@ -633,6 +650,7 @@ def _ensure_student_portal_demo_sections(s, dept_id: str):
             ),
         )
         section.course_id = course.id
+        section.offering_id = offering.id if offering else None
         section.dept_id = dept_id
         section.term = term
         section.section_code = spec["section_code"]
@@ -1670,13 +1688,24 @@ def _seed_core_domain(s):
     # so persist courses and faculty before creating sections and students.
     s.flush()
 
+    offering_ids = {}
+    for cid, did, code, sem in course_rows:
+        offering_id = f"offering_{cid}_{today.year}_odd"
+        offering_ids[cid] = offering_id
+        s.add(D.CourseOffering(
+            id=offering_id, tenant_id=TENANT, course_id=cid,
+            program_id=f"prog_{code.lower()}_btech", academic_year=fiscal_year,
+            term=term, semester=sem, status="Published", created_by="seed", updated_by="seed",
+        ))
+    s.flush()
+
     section_rows = []
     for cid, did, code, sem in course_rows:
         for sec_code in (["A", "B"] if R.random() > 0.5 else ["A"]):
             fid, _ = R.choice(faculty_by_dept[code])
             sid = f"sec_{cid.split('_')[1]}_{sec_code.lower()}"
             section_rows.append((sid, cid, did, code, sem, fid, sec_code))
-            s.add(D.Section(id=sid, tenant_id=TENANT, course_id=cid, dept_id=did,
+            s.add(D.Section(id=sid, tenant_id=TENANT, course_id=cid, offering_id=offering_ids[cid], dept_id=did,
                             term=term, section_code=sec_code,
                             faculty_person_id=fid, room=f"LH-{R.randint(1, 20)}",
                             schedule=R.choice(["Mon/Wed 10:00", "Tue/Thu 11:00",
