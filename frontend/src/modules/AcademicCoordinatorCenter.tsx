@@ -44,12 +44,12 @@ export default function AcademicCoordinatorCenter({
       .then(
         ([sections, courses, calendar, offerings, conflicts, execution]) =>
           setData({
-            sections,
-            courses,
-            calendar,
-            offerings,
-            conflicts,
-            execution,
+            sections: sections ?? { sections: [] },
+            courses: courses ?? { courses: [] },
+            calendar: calendar ?? { entries: [] },
+            offerings: offerings ?? { offerings: [] },
+            conflicts: conflicts ?? { conflicts: [] },
+            execution: execution ?? { items: [] },
           }),
       )
       .catch(() =>
@@ -65,10 +65,10 @@ export default function AcademicCoordinatorCenter({
   }, []);
   const stats = useMemo(() => {
     if (!data) return [];
-    const sections = data.sections.sections || [],
-      courses = data.courses.courses || [],
+    const sections = data.sections?.sections || [],
+      courses = data.courses?.courses || [],
       cal = data.calendar?.entries || [];
-    const offerings = data.offerings.offerings || [], conflicts = data.conflicts.conflicts || [], execution = data.execution.items || [];
+    const offerings = data.offerings?.offerings || [], conflicts = data.conflicts?.conflicts || [], execution = data.execution?.items || [];
     const coverage = sections.length
       ? Math.round(
           (sections.filter((x: any) => x.schedule && x.schedule !== "TBD")
@@ -104,7 +104,7 @@ export default function AcademicCoordinatorCenter({
     ];
   }, [data]);
   if (!data) return <Spinner />;
-  const sections = data.sections.sections || [],
+  const sections = data.sections?.sections || [],
     coverage = stats[3]?.[1] || "0%";
   return (
     <div className="coordinator-center fade-in">
@@ -178,7 +178,7 @@ export default function AcademicCoordinatorCenter({
             <div className="coordinator-readiness">
               <div>
                 <span>Offering ready?</span>
-                <b className={data.offerings.offerings.some((x: any) => x.readiness?.ready) ? "ok" : "warn"}>{data.offerings.offerings.some((x: any) => x.readiness?.ready) ? "YES" : "NO"}</b>
+                <b className={(data.offerings?.offerings || []).some((x: any) => x.readiness?.ready) ? "ok" : "warn"}>{(data.offerings?.offerings || []).some((x: any) => x.readiness?.ready) ? "YES" : "NO"}</b>
               </div>
               <div>
                 <span>Scheduling ready?</span>
@@ -194,7 +194,7 @@ export default function AcademicCoordinatorCenter({
               </div>
             </div>
             <div className="coordinator-issue">
-              {data.offerings.offerings.some((x: any) => x.readiness?.ready)
+              {(data.offerings?.offerings || []).some((x: any) => x.readiness?.ready)
                 ? "Track execution across active sections and timetable coverage."
                 : "Create a gap / issue and route it to the HOD, then Dean Academics."}
             </div>
@@ -215,11 +215,11 @@ export default function AcademicCoordinatorCenter({
               </div>
               <div>
                 <span>Open scheduling conflicts</span>
-                <b>{data.conflicts.conflicts.filter((x: any) => !['Resolved', 'resolved'].includes(x.status)).length}</b>
+                <b>{(data.conflicts?.conflicts || []).filter((x: any) => !['Resolved', 'resolved'].includes(x.status)).length}</b>
               </div>
               <div>
                 <span>Open curriculum issues</span>
-                <b>{data.execution.items.reduce((n: number, x: any) => n + (x.execution_issues || []).filter((i: any) => i.status !== 'Resolved').length, 0)}</b>
+                <b>{(data.execution?.items || []).reduce((n: number, x: any) => n + (x.execution_issues || []).filter((i: any) => i.status !== 'Resolved').length, 0)}</b>
               </div>
             </div>
           </article>

@@ -11,6 +11,7 @@ export default function DirectorAdmissionsDashboard({ user, go }: { user: any; g
   const activeSeats = (monitoring.seat_pools || []).reduce((n: number, row: any) => n + Number(row.active || 0), 0)
   const availableSeats = (monitoring.seat_pools || []).reduce((n: number, row: any) => n + Number(row.available || 0), 0)
   const offered = stage(apps, ['OFFERED']), accepted = stage(apps, ['OFFER_ACCEPTED'])
+  const offerPending = stage(apps, ['OFFER_RECOMMENDATION_PENDING', 'OFFER_APPROVAL_PENDING'])
   const rows = [
     ['Applications received', stage(apps, ['SUBMITTED', 'RESUBMITTED', 'REVIEW_IN_PROGRESS']), 'director_review'],
     ['Document & eligibility', stage(apps, ['DOCUMENT_VERIFIED', 'ELIGIBILITY_PENDING', 'ELIGIBLE']), 'director_eligibility'],
@@ -31,7 +32,8 @@ export default function DirectorAdmissionsDashboard({ user, go }: { user: any; g
       <Metric label="In active pipeline" value={apps.filter(x => !['ENROLLED', 'INELIGIBLE', 'OFFER_DECLINED', 'OFFER_EXPIRED'].includes(x.current_status)).length} note="Across all active admissions stages" />
       <Metric label="Awaiting review" value={stage(apps, ['SUBMITTED', 'RESUBMITTED', 'REVIEW_IN_PROGRESS', 'CORRECTION_REQUIRED'])} note="Review, correction and documents" tone="#c7902d" />
       <Metric label="Seats committed" value={activeSeats} note={`${availableSeats} seats currently available`} tone="#167d70" />
-      <Metric label="Offer conversion" value={`${accepted} / ${offered || 0}`} note="Accepted / currently offered" tone="#6b4ea8" />
+      <Metric label="Offers awaiting response" value={offered} note={`${offerPending} recommendation / approval actions pending`} tone="#6b4ea8" />
+      <Metric label="Offers accepted" value={accepted} note="Applicants who accepted their allocated seat" tone="#6b4ea8" />
       <Metric label="Ready to enroll" value={stage(apps, ['READY_TO_ADMIT'])} note={`${stage(apps, ['ENROLLED'])} already enrolled`} tone="#9d2330" />
     </div>
     <div className="grid-2" style={{ marginTop: 20 }}>

@@ -528,6 +528,13 @@ function StudentAssignedTransport({
           )}
         </section>
       </div>
+      <div className="card" style={{ marginTop: 20 }}>
+        <div className="card-h"><h3>Pending transport requests</h3></div>
+        <div className="tbl-scroll"><table className="tbl"><thead><tr><th>Applicant / Student</th><th>Preferred pickup point</th><th>Academic placement</th><th>Status</th></tr></thead><tbody>
+          {(data.requests || []).map((request: any) => <tr key={request.id}><td><b>{request.student}</b></td><td>{request.pickup_point || 'Not provided'}</td><td>{request.section ? `${request.campus} · Section ${request.section}${request.group ? ` · ${request.group}` : ''}` : 'Awaiting Admission Office allocation'}</td><td><span className={`pill s-${request.status}`}>{request.status}</span></td></tr>)}
+          {!(data.requests || []).length && <tr><td colSpan={4}><div className="empty">No pending transport requests</div></td></tr>}
+        </tbody></table></div>
+      </div>
     </div>
   );
 }

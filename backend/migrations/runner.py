@@ -6,6 +6,7 @@ from migrations import (v0001_admissions_foundation, v0002_repair_legacy_applica
 from migrations import v0005_admissions_eligibility
 from migrations import v0006_admissions_phase4
 from migrations import v0007_admissions_phase5
+from migrations import v0008_admission_class_allocation
 from migrations import v0008_academic_governance
 from migrations import v0009_faculty_allocation_readiness
 from migrations import v0010_quality_corrective_actions
@@ -37,6 +38,8 @@ from migrations import v0035_administration_approval_delegation
 from migrations import v0036_administration_finance_controls
 from migrations import v0037_administration_outbox_lease
 from migrations import v0038_dean_scope_assignments
+from migrations import v0039_allocation_resubmission_policy
+from migrations import v0040_course_offering_lineage
 from migrations import v0008_transport_route_status
 from migrations import v0009_course_offerings
 from migrations import v0010_offering_workflow
@@ -58,6 +61,7 @@ MIGRATIONS = [v0001_admissions_foundation, v0002_repair_legacy_application_statu
 MIGRATIONS.append(v0005_admissions_eligibility)
 MIGRATIONS.append(v0006_admissions_phase4)
 MIGRATIONS.append(v0007_admissions_phase5)
+MIGRATIONS.append(v0008_admission_class_allocation)
 MIGRATIONS.append(v0008_academic_governance)
 MIGRATIONS.append(v0009_faculty_allocation_readiness)
 MIGRATIONS.append(v0010_quality_corrective_actions)
@@ -89,6 +93,8 @@ MIGRATIONS.append(v0035_administration_approval_delegation)
 MIGRATIONS.append(v0036_administration_finance_controls)
 MIGRATIONS.append(v0037_administration_outbox_lease)
 MIGRATIONS.append(v0038_dean_scope_assignments)
+MIGRATIONS.append(v0039_allocation_resubmission_policy)
+MIGRATIONS.append(v0040_course_offering_lineage)
 MIGRATIONS.append(v0008_transport_route_status)
 MIGRATIONS.append(v0009_course_offerings)
 MIGRATIONS.append(v0010_offering_workflow)

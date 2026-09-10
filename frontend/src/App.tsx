@@ -55,6 +55,7 @@ import { StudentAttendanceView, StudentCalendarView, StudentCoursesView, Student
 import FacultyHome from './personas/FacultyHome'
 import AssociateProfessorHome from './personas/AssociateProfessorHome'
 import FacultySchedule from './personas/FacultySchedule'
+import FacultyProfile from './personas/FacultyProfile'
 import FacultyExaminations from './personas/FacultyExaminations'
 import { FacultyAssignments, StudentAssignments } from './personas/AssignmentViews'
 import FacultyCommunication from './personas/FacultyCommunication'
@@ -64,6 +65,7 @@ import FacultyLeave from './personas/FacultyLeave'
 import FacultyPayroll from './personas/FacultyPayroll'
 import FacultyAssessments from './personas/FacultyAssessments'
 import FacultyAttendance from './personas/FacultyAttendance'
+import FacultyAttendanceCorrections from './personas/FacultyAttendanceCorrections'
 import FacultyMarks from './personas/FacultyMarks'
 import FacultyMentoring from './personas/FacultyMentoring'
 import FacultyStudents from './personas/FacultyStudents'
@@ -71,6 +73,7 @@ import { FacultyMaterials } from './personas/CourseMaterials'
 import FacultyConditionalView from './personas/FacultyConditionalViews'
 import ParentHome from './personas/ParentHome'
 import FrontDeskWorkspace from './frontdesk/FrontDeskWorkspace'
+import ApplicantPortal from './admissions/ApplicantPortal'
 import DeanAdministration from './modules/DeanAdministration'
 import SpecialistQueue from './modules/SpecialistQueue'
 import { PageHead } from './modules/kit'
@@ -151,17 +154,17 @@ const FACULTY_NAV = [
   ['Teaching & Academics', 'Assessments & Marks', 'assessments'], ['Teaching & Academics', 'Marks', 'marks_entry'], ['Teaching & Academics', 'Examinations', 'examinations'],
   ['Teaching & Academics', 'Course Materials', 'course_materials'], ['Teaching & Academics', 'Mentoring & Advisees', 'mentoring'], ['Teaching & Academics', 'Research & Guidance', 'research'],
   ['Communication', 'Announcements', 'announcements'],
-  ['Self Service', 'My Profile', 'directory'], ['Self Service', 'Digital ID', 'digital_id'], ['Self Service', 'Leave & Requests', 'leave'], ['Self Service', 'Payroll', 'payroll'],
-  ['Workflow', 'My Requests', 'workflows'],
+  ['Self Service', 'My Profile', 'my_profile'], ['Self Service', 'Digital ID', 'digital_id'], ['Self Service', 'Leave & Requests', 'leave'], ['Self Service', 'Payroll', 'payroll'],
+  ['Workflow', 'Attendance Correction Reviews', 'attendance_corrections'], ['Workflow', 'My Requests', 'workflows'],
 ] as const
 
 const FACULTY_ACTIVE_LABEL: Record<string, string> = {
-  overview: 'Overview', my_schedule: 'My Schedule', workflows: 'My Requests',
+  overview: 'Overview', my_schedule: 'My Schedule', workflows: 'My Requests', attendance_corrections: 'Attendance Correction Reviews',
   academics: 'My Sections', attendance: 'Attendance', examinations: 'Assessments & Marks',
   assignments: 'Assignments', assessments: 'Assessments & Marks', marks_entry: 'Marks',
   course_materials: 'Course Materials', mentoring: 'Mentoring & Advisees', leave: 'Leave & Requests',
   payroll: 'Payroll', digital_id: 'Digital ID', messages: 'Messages', announcements: 'Announcements',
-  research: 'Research & Guidance', academic_calendar: 'Academic Calendar', directory: 'My Profile',
+  research: 'Research & Guidance', academic_calendar: 'Academic Calendar', my_profile: 'My Profile',
 }
 
 const COORDINATOR_NAV = [
@@ -176,37 +179,36 @@ const COORDINATOR_NAV = [
 
 const DIRECTOR_ADMISSIONS_NAV = [
   ['Overview', 'Overview', 'overview'],
-  ['Admissions Planning', 'Admission Cycles', 'director_cycles'], ['Admissions Planning', 'Programs & Intake', 'director_programs'], ['Admissions Planning', 'Quotas', 'director_quotas'],
-  ['Applications', 'All Applications', 'director_applications'], ['Applications', 'Corrections', 'director_corrections'], ['Applications', 'Document Verification', 'director_document_verification'], ['Applications', 'Document Status', 'director_documents'],
-  ['Eligibility & Selection', 'Eligibility Queue', 'director_eligibility'], ['Eligibility & Selection', 'Eligibility Rules', 'director_rules'], ['Eligibility & Selection', 'Merit & Rankings', 'director_merit'], ['Eligibility & Selection', 'Counselling', 'director_counselling'],
-  ['Seat Management', 'Seat Pools', 'director_seat_pools'], ['Seat Management', 'Seat Allocation', 'director_allocation'], ['Seat Management', 'Waitlist', 'director_waitlist'],
-  ['Offers', 'Offer Recommendations', 'director_recommendations'], ['Offers', 'Approval Inbox', 'approvals'], ['Offers', 'Issued Offers', 'director_offers'], ['Offers', 'Offer Status', 'director_offer_status'],
-  ['Applicant Finance', 'Finance Status', 'director_finance'], ['Applicant Finance', 'Invoices & Challans', 'director_invoices'], ['Applicant Finance', 'Payment Status', 'director_payment_status'], ['Applicant Finance', 'Accounts Verification', 'director_accounts'], ['Applicant Finance', 'Finance Clearance', 'director_clearance'],
-  ['Final Admission', 'Final Approval', 'director_final_approval'], ['Final Admission', 'Ready to Admit', 'director_ready'], ['Final Admission', 'Enrollment Queue', 'director_enrollment_queue'], ['Final Admission', 'Student Conversion', 'director_conversion'], ['Final Admission', 'Enrollment Status', 'director_enrollment'],
-  ['Special Admissions', 'Scholarship Admissions', 'director_scholarship'], ['Special Admissions', 'International Admissions', 'director_international'],
-  ['Applicant Support', 'Application Status', 'director_applications'], ['Applicant Support', 'Helpdesk / Support', 'workflows'],
-  ['Reports', 'Reports', 'director_reports'], ['Calendar', 'Calendar', 'calendar'],
+  ['1. Setup', 'Admission Cycles & Intake', 'director_cycles'],
+  ['1. Setup', 'Eligibility Evaluation', 'director_eligibility'],
+  ['2. Applicant Journey', 'Applications', 'director_applications'],
+  ['3. Review & Verification', 'Review Queue', 'director_review'], ['3. Review & Verification', 'Corrections', 'director_corrections'], ['3. Review & Verification', 'Document Status', 'director_documents'],
+  ['4. Eligibility & Quota', 'Eligibility Rules', 'director_rules'], ['4. Eligibility & Quota', 'Quotas', 'director_quotas'],
+  ['5. Merit & Allocation', 'Assessment, Merit & Seats', 'director_merit'], ['5. Merit & Allocation', 'Seat Pools', 'director_seat_pools'], ['5. Merit & Allocation', 'Counselling & Waitlist', 'director_counselling'],
+  ['6. Offers & Finance', 'Offer Approval & Status', 'director_offers'], ['6. Offers & Finance', 'Finance Clearance', 'director_finance'],
+  ['7. Enrollment & Student Account', 'Re-submitted Corrections', 'director_resubmitted_corrections'],
+  ['8. Monitoring', 'Admission Reports', 'director_reports'],
 ] as const
 
 const DIRECTOR_TAB: Record<string, string> = {
   director_cycles: 'cycles', director_programs: 'program_intake', director_quotas: 'quotas',
   director_applications: 'applications', director_review: 'review', director_corrections: 'corrections', director_document_verification: 'review', director_documents: 'document_status',
-  director_eligibility: 'eligibility', director_rules: 'rules', director_assessments: 'decisions', director_merit: 'decisions', director_counselling: 'counselling', director_seat_pools: 'seatpools', director_allocation: 'decisions', director_waitlist: 'waitlist', director_recommendations: 'offers', director_offers: 'issued_offers',
+  director_eligibility: 'eligibility', director_rules: 'rules', director_assessments: 'decisions', director_merit: 'decisions', director_counselling: 'counselling', director_seat_pools: 'seatpools', director_allocation: 'decisions', director_waitlist: 'waitlist', director_recommendations: 'offers', director_offers: 'offers',
   director_ready: 'ready_to_admit', director_enrollment_queue: 'enrollment_queue', director_conversion: 'student_conversion', director_enrollment: 'enrollment_status', director_finance: 'finance_status', director_invoices: 'invoices_challans', director_payment_status: 'payment_status', director_accounts: 'accounts_verification', director_clearance: 'clearance_status',
-  director_final_approval: 'final_approval',
+  director_final_approval: 'resubmitted_corrections', director_resubmitted_corrections: 'resubmitted_corrections',
   director_offer_status: 'offers', director_scholarship: 'eligibility', director_international: 'applications', director_reports: 'reports',
 }
 
 const ADMISSION_MANAGER_NAV = [
   ['Overview', 'Overview', 'overview'],
-  ['Admissions Planning', 'Admission Cycles', 'manager_cycles'], ['Admissions Planning', 'Programs & Intake', 'manager_programs'], ['Admissions Planning', 'Quotas', 'manager_quotas'],
-  ['Applications', 'All Applications', 'manager_applications'], ['Applications', 'Corrections', 'manager_corrections'], ['Applications', 'Document Status', 'manager_documents'],
-  ['Eligibility & Selection', 'Eligibility Queue', 'manager_eligibility'], ['Eligibility & Selection', 'Eligibility Rules', 'manager_rules'], ['Eligibility & Selection', 'Assessments & Merit', 'manager_assessments'], ['Eligibility & Selection', 'Counselling', 'manager_counselling'],
-  ['Seat Management', 'Seat Pools', 'manager_seat_pools'], ['Seat Management', 'Allocation', 'manager_allocation'], ['Seat Management', 'Waitlist', 'manager_waitlist'],
-  ['Offers', 'Offer Recommendations', 'manager_recommendations'], ['Offers', 'Offer Status', 'manager_offers'],
-  ['Applicant Finance', 'Finance Status', 'manager_finance'], ['Applicant Finance', 'Invoices & Challans', 'manager_invoices'], ['Applicant Finance', 'Clearance Status', 'manager_clearance'],
-  ['Final Admission', 'Ready to Admit', 'manager_ready'], ['Final Admission', 'Enrollment Status', 'manager_enrollment'],
-  ['Reports', 'Reports', 'manager_reports'], ['Calendar', 'Calendar', 'calendar'],
+  ['1. Setup', 'Admission Cycles & Intake', 'manager_cycles'],
+  ['1. Setup', 'Eligibility Evaluation', 'manager_eligibility'],
+  ['2. Applicant Journey', 'Applications', 'manager_applications'],
+  ['3. Review & Verification', 'Review Queue', 'manager_review'], ['3. Review & Verification', 'Corrections', 'manager_corrections'], ['3. Review & Verification', 'Document Status', 'manager_documents'],
+  ['4. Eligibility & Quota', 'Eligibility Rules', 'manager_rules'], ['4. Eligibility & Quota', 'Quotas', 'manager_quotas'],
+  ['5. Merit & Allocation', 'Assessment, Merit & Seats', 'manager_assessments'], ['5. Merit & Allocation', 'Seat Pools', 'manager_seat_pools'], ['5. Merit & Allocation', 'Counselling & Waitlist', 'manager_counselling'],
+  ['6. Offers & Finance', 'Offer Approval & Status', 'manager_offers'], ['6. Offers & Finance', 'Finance Clearance', 'manager_finance'],
+  ['8. Monitoring', 'Admission Reports', 'manager_reports'],
 ] as const
 
 const ADMISSION_MANAGER_TAB: Record<string, string> = {
@@ -214,9 +216,9 @@ const ADMISSION_MANAGER_TAB: Record<string, string> = {
   manager_applications: 'applications', manager_review: 'review', manager_corrections: 'corrections', manager_documents: 'document_status',
   manager_eligibility: 'eligibility', manager_rules: 'rules', manager_assessments: 'decisions', manager_counselling: 'counselling',
   manager_seat_pools: 'seatpools', manager_allocation: 'decisions', manager_waitlist: 'waitlist',
-  manager_recommendations: 'recommendations', manager_offers: 'issued_offers',
+  manager_recommendations: 'offers', manager_offers: 'offers',
   manager_finance: 'finance_status', manager_invoices: 'invoices_challans', manager_clearance: 'clearance_status',
-  manager_ready: 'ready_to_admit', manager_enrollment: 'enrollment_status', manager_reports: 'reports',
+  manager_enrollment: 'enrollment_status', manager_reports: 'reports',
 }
 
 export default function App({ onLogout }: { onLogout: () => void }) {
@@ -346,7 +348,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
       if (user?.persona === 'student' && !modules.some((module: any) => module.key === 'finance')) {
         modules.push({ key: 'finance', label: 'Fees & Payments', group: 'Student Services', enabled: true })
       }
-      if (user?.persona && !['student', 'parent', 'faculty'].includes(user.persona)) {
+      if (user?.persona && !['student', 'parent', 'faculty'].includes(user.persona) && !modules.some((module: any) => module.key === 'my_payroll')) {
         modules.push({ key: 'my_payroll', label: 'My Payroll', group: 'Self Service', enabled: true })
       }
       return modules
@@ -356,6 +358,10 @@ export default function App({ onLogout }: { onLogout: () => void }) {
 
   if (!user || !ws) {
     return <div className="center-load"><div className="spinner" /></div>
+  }
+
+  if (user.persona === 'applicant') {
+    return <ApplicantPortal authenticated onBack={doLogout} />
   }
 
   const color = LEVEL_COLORS[user.level] || '#c9a24a'
@@ -696,6 +702,8 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       if (user.persona === 'faculty') return <FacultyAttendance />
       if (user.persona === 'student') return <StudentAttendanceView />
       return <Attendance caps={caps} />
+    case 'attendance_corrections':
+      return user.persona === 'faculty' ? <FacultyAttendanceCorrections /> : <div className="empty">Attendance correction reviews are not available for this role.</div>
     case 'examinations':
       if (user.persona === 'student') return <StudentExaminationsView go={go} />
       if (user.persona === 'faculty') return <FacultyExaminations />
@@ -807,6 +815,8 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <AuditView />
     case 'directory':
       return <Directory />
+    case 'my_profile':
+      return user.persona === 'faculty' ? <FacultyProfile /> : <div className="empty">My Profile is not available for this role.</div>
     case 'matrices':
       return <Matrices />
     case 'permissions':
@@ -879,6 +889,15 @@ function NavGlyph({ moduleKey, label }: { moduleKey: string, label?: string }) {
   const admissionIcons: Record<string, any> = {
     'Overview': HiOutlineSquares2X2,
     'Admission Cycles': HiOutlineCalendarDays,
+    'Admission Cycles & Intake': HiOutlineCalendarDays,
+    'Eligibility & Quotas': HiOutlineScale,
+    'Applications': HiOutlineClipboardDocumentList,
+    'Review Queue': HiOutlineDocumentCheck,
+    'Rules & Quotas': HiOutlineScale,
+    'Assessment, Merit & Seats': HiOutlineChartBarSquare,
+    'Counselling & Waitlist': HiOutlineUserGroup,
+    'Offer Approval & Status': HiOutlineGift,
+    'Admission Reports': HiOutlineChartBarSquare,
     'Programs & Intake': HiOutlineAcademicCap,
     'Quotas': HiOutlineUsers,
     'All Applications': HiOutlineClipboardDocumentList,
@@ -904,7 +923,6 @@ function NavGlyph({ moduleKey, label }: { moduleKey: string, label?: string }) {
     'Accounts Verification': HiOutlineDocumentCheck,
     'Finance Clearance': HiOutlineCheckBadge,
     'Clearance Status': HiOutlineCheckBadge,
-    'Final Approval': HiOutlineCheckBadge,
     'Ready to Admit': HiOutlineUserPlus,
     'Enrollment Queue': HiOutlineQueueList,
     'Student Conversion': HiOutlineUserPlus,
