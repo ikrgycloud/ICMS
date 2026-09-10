@@ -74,6 +74,7 @@ import FrontDeskWorkspace from './frontdesk/FrontDeskWorkspace'
 import DeanAdministration from './modules/DeanAdministration'
 import SpecialistQueue from './modules/SpecialistQueue'
 import { PageHead } from './modules/kit'
+import AccountantReport from './modules/AccountantReport'
 
 const LEVEL_COLORS: Record<number, string> = {
   1: '#d92d3a',
@@ -127,7 +128,7 @@ const CHAIRMAN_DISPLAY: Record<string, { label: string; group: string }> = {
 // not imply that an unavailable backend workflow can be opened.
 const PRINCIPAL_NAV = [
   ['Workspace', 'Dashboard', 'overview'], ['Workspace', 'My Schedule', 'my_schedule'],
-  ['Academics', 'Academic Calendar', 'academic_calendar'], ['Academics', 'Curriculum', 'curriculum'],
+  ['Academics', 'Curriculum', 'curriculum'],
   ['Academics', 'Courses & Subjects', 'courses_subjects'], ['Academics', 'Timetable', 'calendar'],
   ['Academics', 'Academic Performance', 'analytics'],
   ['Students', 'Students', 'students'], ['Students', 'Admissions', 'admissions'], ['Students', 'Attendance', 'attendance'],
@@ -224,7 +225,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const [view, setView] = useState(() => {
     const currentUser = getUser()
     if (currentUser?.office_n === 31) return 'transport'
-    if (currentUser?.office_n === 23) return 'finance'
+    if (currentUser?.office_n === 23) return 'overview'
     return 'overview'
   })
   const [sideOpen, setSideOpen] = useState(false)
@@ -291,6 +292,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
       || ([3, 4].includes(user?.office_n) && PRINCIPAL_NAV.some(([, , key]) => key === view))
       || (user?.persona === 'faculty' && FACULTY_NAV.some(([, , key]) => key === view))
       || (user?.persona && !['student', 'parent', 'faculty'].includes(user.persona) && view === 'my_payroll')
+      || (user?.office_n === 23 && ['finance_fees', 'finance_payments', 'finance_students', 'finance_payroll'].includes(view))
       || (user?.persona === 'student' && ['assignments', 'course_materials'].includes(view))
       || view.startsWith('director_') || view.startsWith('manager_') || view.startsWith('coordinator_')
     // Finance is a student self-service destination even though students do
@@ -713,10 +715,20 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <Examinations caps={caps} />
     case 'admissions':
       return <Admissions caps={caps} />
+    case 'finance_fees':
+      return <Finance caps={caps} user={user} onOpenApprovals={() => go('approvals')} initialTab="fees" />
+    case 'finance_payments':
+      return <Finance caps={caps} user={user} onOpenApprovals={() => go('approvals')} initialTab="payments" />
+    case 'finance_students':
+      return <Finance caps={caps} user={user} onOpenApprovals={() => go('approvals')} initialTab="students" />
+    case 'finance_payroll':
+      return <Finance caps={caps} user={user} onOpenApprovals={() => go('approvals')} initialTab="payroll" />
     case 'finance':
       if (user.persona === 'student') return <StudentFeesView />
       if (user.persona === 'parent') return <ParentHome user={user} />
       return <Finance caps={caps} user={user} onOpenApprovals={() => go('approvals')} />
+    case 'accountant_report':
+      return user.office_n === 23 ? <AccountantReport /> : <Analytics user={user} go={go} />
     case 'library':
       if (user.persona === 'student') return <StudentLibraryView />
       return <Library caps={caps} />

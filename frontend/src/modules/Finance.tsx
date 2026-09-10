@@ -10,9 +10,9 @@ function hasFeeCategory(invoice: any, category: string) {
   return actualCats.includes(category.toUpperCase())
 }
 
-export default function Finance({ caps, user, onOpenApprovals }: { caps: any; user: any; onOpenApprovals: () => void }) {
+export default function Finance({ caps, user, onOpenApprovals, overviewOnly = false, onNavigate, initialTab }: { caps: any; user: any; onOpenApprovals: () => void; overviewOnly?: boolean; onNavigate?: (view: string) => void; initialTab?: 'fees' | 'payments' | 'students' | 'payroll' }) {
   // Start with live financial records; fee setup is an occasional configuration task.
-  const [tab, setTab] = useState<'fees' | 'payments' | 'setup' | 'students' | 'payroll'>(() => user?.office_n === 23 ? 'payroll' : 'fees')
+  const [tab, setTab] = useState<'overview' | 'fees' | 'payments' | 'setup' | 'students' | 'payroll'>(() => overviewOnly ? 'overview' : initialTab || (user?.office_n === 23 ? 'payroll' : 'fees'))
   const [data, setData] = useState<any>(null)
   const [decision, setDecision] = useState<any>(null)
   const [modal, setModal] = useState<{ kind: string; inv: any; method?: string; reference?: string } | null>(null)
@@ -53,7 +53,12 @@ export default function Finance({ caps, user, onOpenApprovals }: { caps: any; us
     if (vendorPaymentsResult.status === 'fulfilled') setVendorPayments(vendorPaymentsResult.value.vendor_payments || [])
     if (dayClosesResult.status === 'fulfilled') setDayCloses(dayClosesResult.value.day_closes || [])
   }
-  useEffect(() => { load() }, [])
+  useEffect(() => {
+    load()
+    if (user?.office_n !== 23) return
+    const timer = window.setInterval(load, 30000)
+    return () => window.clearInterval(timer)
+  }, [user?.office_n])
   useEffect(() => { if (tab === 'payments') api.pendingPayments().then((r:any) => setPendingPayments(r.payments || [])).catch(() => setPendingPayments([])) }, [tab])
   async function decideOffline(payment:any, action:string) {
     const remarks = ['bounced', 'rejected'].includes(action) ? window.prompt('Reason (required):') || '' : ''
@@ -273,24 +278,54 @@ export default function Finance({ caps, user, onOpenApprovals }: { caps: any; us
     return matchesSearch && matchesCategory
   })
 
+  const paymentRows = data.payments || []
+  const totalCollected = Number(sm.total_collected || 0)
+  const todayKey = new Date().toISOString().slice(0, 10)
+  const todayPayments = paymentRows.filter((row: any) => String(row.at || '').slice(0, 10) === todayKey)
+  const todayCollected = todayPayments.reduce((sum: number, row: any) => sum + Number(row.amount || 0), 0)
+  const pendingVerification = pendingPayments.length + paymentRows.filter((row: any) => ['pending_clearance', 'pending_verification'].includes(row.status)).length
+  const refundsReady = refunds.filter((row: any) => row.status === 'approved').length
+  const vendorDue = vendorPayments.filter((row: any) => ['pending_approval', 'approved'].includes(row.status))
+  const reconciliation = reconciliations[0]
+  const paymentModes = paymentRows.reduce((out: Record<string, number>, row: any) => {
+    const method = String(row.method || 'other').replace('_', ' ')
+    out[method] = (out[method] || 0) + Number(row.amount || 0)
+    return out
+  }, {})
+  const openDashboardTab = overviewOnly && onNavigate ? (next: string) => onNavigate(next === 'overview' ? 'overview' : `finance_${next}`) : setTab
+
   return (
     <div className="fade-in finance-workspace">
-      <PageHead title="Finance Manager" sub="Fee setup, invoices, and payments recorded in ICMS." />
+      {!overviewOnly && <PageHead title={user?.office_n === 23 ? 'Accounts Office' : 'Finance Manager'} sub="Fee setup, invoices, and payments recorded in ICMS." />}
 
-      <section className="finance-summary">
+      {!overviewOnly && <section className="finance-summary">
         <div className="finance-summary-main"><span>Fee operations dashboard</span><strong>{money(sm.total_collected)}</strong><small>Collected from recorded payments</small></div>
         <div className="finance-stat"><span>Total billed</span><b>{money(sm.total_billed)}</b></div>
         <div className="finance-stat outstanding"><span>Outstanding</span><b>{money(sm.outstanding)}</b></div>
         <div className="finance-stat"><span>Collection rate</span><b>{Math.round(100 * sm.total_collected / (sm.total_billed || 1))}%</b></div>
-      </section>
+      </section>}
 
-      <div className="tabs finance-tabs">
-        <button className={`tab ${tab === 'setup' ? 'on' : ''}`} onClick={() => setTab('setup')}>Fee setup</button>
+      {!overviewOnly && <div className="tabs finance-tabs">
         <button className={`tab ${tab === 'fees' ? 'on' : ''}`} onClick={() => setTab('fees')}>Student invoices</button>
         <button className={`tab ${tab === 'students' ? 'on' : ''}`} onClick={() => setTab('students')}>Students</button>
         <button className={`tab ${tab === 'payments' ? 'on' : ''}`} onClick={() => setTab('payments')}>Payment records</button>
         {user?.office_n === 23 && <button className={`tab ${tab === 'payroll' ? 'on' : ''}`} onClick={() => setTab('payroll')}>Payroll payments</button>}
-      </div>
+      </div>}
+
+      {overviewOnly && tab === 'overview' && user?.office_n === 23 && (
+        <AccountsOfficeOverview
+          totalCollected={totalCollected}
+          todayCollected={todayCollected}
+          pendingVerification={pendingVerification}
+          refundsReady={refundsReady}
+          vendorDue={vendorDue}
+          reconciliation={reconciliation}
+          paymentModes={paymentModes}
+          paymentRows={paymentRows}
+          todayPayments={todayPayments}
+          onOpen={openDashboardTab}
+        />
+      )}
 
       {tab === 'payroll' && user?.office_n === 23 && <PayrollPanel />}
 
@@ -569,6 +604,46 @@ export default function Finance({ caps, user, onOpenApprovals }: { caps: any; us
     </div>
   )
 }
+
+function AccountsOfficeOverview({ totalCollected, todayCollected, pendingVerification, refundsReady, vendorDue, reconciliation, paymentModes, paymentRows, todayPayments, onOpen }: any) {
+  const modeRows = Object.entries(paymentModes).sort(([, left]: any, [, right]: any) => right - left)
+  const maxMode = Math.max(1, ...modeRows.map(([, value]: any) => Number(value)))
+  const recentActivity = todayPayments.slice(0, 5)
+  const formatAmount = (value: number) => `₹${Number(value || 0).toLocaleString('en-IN')}`
+
+  return (
+    <section className="accounts-dashboard fade-in">
+      <header className="accounts-dashboard-head">
+        <div><span className="accounts-eyebrow">Accounts Office</span><h2>Dashboard</h2><p>Live collections, verification queues, reconciliation, and payment execution.</p></div>
+        <span className="accounts-live"><i /> Live database data</span>
+      </header>
+
+      <div className="accounts-kpis">
+        <article><span className="accounts-kpi-icon green">₹</span><div><small>Collected today</small><b>{formatAmount(todayCollected)}</b><em>{todayPayments.length} recorded payments</em></div></article>
+        <article><span className="accounts-kpi-icon blue">▣</span><div><small>Total collected</small><b>{formatAmount(totalCollected)}</b><em>Confirmed fee payments</em></div></article>
+        <article><span className="accounts-kpi-icon orange">◷</span><div><small>Pending verification</small><b>{pendingVerification}</b><em>Payments awaiting clearance</em></div></article>
+        <article><span className="accounts-kpi-icon purple">↗</span><div><small>Unmatched entries</small><b>{reconciliation ? Math.max(0, Number(reconciliation.total_adjustments || 0)) : '—'}</b><em>From latest reconciliation</em></div></article>
+        <article><span className="accounts-kpi-icon pink">↩</span><div><small>Refunds ready</small><b>{refundsReady}</b><em>Approved for execution</em></div></article>
+        <article><span className="accounts-kpi-icon gold">▰</span><div><small>Vendor payments due</small><b>{vendorDue.length}</b><em>Awaiting approval or payment</em></div></article>
+      </div>
+
+      <div className="accounts-dashboard-grid accounts-dashboard-grid-top">
+        <section className="accounts-panel"><header><h3>Today's collection by payment mode</h3><span>{formatAmount(todayCollected)} total</span></header><div className="accounts-mode-list">{modeRows.length ? modeRows.map(([method, value]: any) => <div className="accounts-mode-row" key={method}><span>{method}</span><div><i style={{ width: `${(Number(value) / maxMode) * 100}%` }} /></div><b>{formatAmount(value)}</b></div>) : <Empty text="No payments recorded today." />}</div></section>
+        <section className="accounts-panel"><header><h3>Pending verification</h3><button onClick={() => onOpen('payments')}>View all →</button></header><div className="accounts-queue"><div><span>Bank transfers / UTR pending</span><b>{paymentRowsCount(paymentRowsByStatus(paymentRows, 'pending_verification'))}</b></div><div><span>Cheques and DDs pending</span><b>{paymentRowsCount(paymentRowsByStatus(paymentRows, 'pending_clearance'))}</b></div><div><span>All pending records</span><b>{pendingVerification}</b></div></div></section>
+        <section className="accounts-panel"><header><h3>Reconciliation status</h3><button onClick={() => onOpen('fees')}>View details →</button></header><div className="accounts-recon"><strong>{reconciliation?.status || 'Not started'}</strong><span>{reconciliation ? formatAmount(reconciliation.total_collected) : formatAmount(totalCollected)} collected in latest close</span><small>{reconciliation?.period_end ? `Closed ${String(reconciliation.period_end).slice(0, 10)}` : 'No reconciliation has been closed yet'}</small></div></section>
+      </div>
+
+      <div className="accounts-dashboard-grid accounts-dashboard-grid-bottom">
+        <section className="accounts-panel"><header><h3>Execution queue</h3><button onClick={() => onOpen('fees')}>Open finance →</button></header><div className="accounts-execution"><button onClick={() => onOpen('payments')}><b>{pendingVerification}</b><span>Payment verification</span></button><button onClick={() => onOpen('fees')}><b>{vendorDue.length}</b><span>Vendor payments due</span></button><button onClick={() => onOpen('fees')}><b>{refundsReady}</b><span>Refunds ready</span></button></div></section>
+        <section className="accounts-panel"><header><h3>Recent activity</h3><span>Today</span></header><div className="accounts-activity">{recentActivity.length ? recentActivity.map((row: any) => <div key={row.id}><time>{String(row.at || '').slice(11, 16) || '—'}</time><span>{row.name || row.roll_no || 'Student payment'}<small>{row.method || 'payment'} · {row.reference || 'No reference'}</small></span><b>{formatAmount(row.amount)}</b></div>) : <Empty text="No activity recorded today." />}</div></section>
+        <section className="accounts-panel"><header><h3>Quick actions</h3></header><div className="accounts-actions"><button onClick={() => onOpen('students')}>▣<span>Record payment</span></button><button onClick={() => onOpen('payments')}>✓<span>Verify payment</span></button><button onClick={() => onOpen('fees')}>↔<span>Reconcile</span></button><button onClick={() => onOpen('payroll')}>₹<span>Payroll</span></button></div></section>
+      </div>
+    </section>
+  )
+}
+
+function paymentRowsByStatus(rows: any[], status: string) { return rows.filter((row: any) => row.status === status) }
+function paymentRowsCount(rows: any[]) { return rows.length }
 
 const blankHead = { code: '', name: '', category: 'OTHER', description: '', is_mandatory: true, display_order: 0 }
 const blankLine = { fee_head_id: '', fee_head_category: 'all', amount: '', installment_no: 1, installment_name: '', due_date: '', is_mandatory: true, description: '' }

@@ -186,7 +186,9 @@ def _active_approval_delegation(s,row,ctx,pending):
         if scope.get("department_id") and scope["department_id"]!=row.department_id: continue
         if scope.get("category") and scope["category"]!=row.category: continue
         if scope.get("priority") and scope["priority"]!=row.priority: continue
-        if delegation.authority not in {"*","approve:administration","approve"}: continue
+        auth_name=(delegation.authority or "").strip().lower()
+        if auth_name not in {"*", "approve", "approve:administration"} and not auth_name.startswith("approve:"):
+            continue
         return delegation
     return None
 

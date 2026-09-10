@@ -85,11 +85,11 @@ GOVERNANCE_PATHS = ("/api/academics/timetable/readiness", "/api/academics/qualit
                     "/api/academics/plans", "/api/academics/allocation/proposals",
                     "/api/programs/proposals", "/api/curriculum/proposals",
                     "/api/academic-calendar/proposals", "/api/academic-governance")
-# These are the actual source and review offices for academic governance.
+# These are the only offices allowed to access academic governance.
 # Keep this transport-level guard aligned with domain_api's authorization
 # policy; otherwise an authorized source office can see a form but every
 # mutation is rejected before its endpoint executes.
-GOVERNANCE_ROUTE_OFFICES = {6, 10, 17, 41, 42, 43}
+GOVERNANCE_ROUTE_OFFICES = {6, 10, 17}
 
 
 @app.middleware("http")
