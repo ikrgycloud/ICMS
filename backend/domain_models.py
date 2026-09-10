@@ -2394,6 +2394,48 @@ class TransportTrip(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class TransportRequest(Base):
+    """A transport-department work item created from an accepted applicant request."""
+    __tablename__ = "transport_requests"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    student_id = Column(String, default="")
+    student_name = Column(String, default="")
+    pickup_point = Column(String, default="")
+    status = Column(String, default="requested")  # requested/assigned/cancelled
+
+
+class AdmissionServiceRequest(Base):
+    """Hostel/Transport work raised when an offer is accepted, before enrollment."""
+    __tablename__ = "admission_service_requests"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), index=True)
+    student_id = Column(String, ForeignKey("students.id"), nullable=True, index=True)
+    department = Column(String, index=True)  # HOSTEL / TRANSPORT
+    applicant_name = Column(String, default="")
+    pickup_point = Column(String, default="")
+    program_id = Column(String, ForeignKey("programs.id"), nullable=True)
+    campus = Column(String, default="")
+    section_code = Column(String, default="")
+    group_name = Column(String, default="")
+    status = Column(String, default="requested")  # requested/allocated/cancelled
+
+
+class AdmissionClassAllocation(Base):
+    """The final academic placement selected by the Admission Office."""
+    __tablename__ = "admission_class_allocations"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    application_id = Column(String, ForeignKey("applications.id"), unique=True, index=True)
+    program_id = Column(String, ForeignKey("programs.id"))
+    campus = Column(String, default="")
+    section_id = Column(String, ForeignKey("sections.id"))
+    group_name = Column(String, default="")
+    assigned_by_user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    assigned_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Asset(Base):
     __tablename__ = "assets"
     id = Column(String, primary_key=True)

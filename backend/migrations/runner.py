@@ -6,6 +6,7 @@ from migrations import (v0001_admissions_foundation, v0002_repair_legacy_applica
 from migrations import v0005_admissions_eligibility
 from migrations import v0006_admissions_phase4
 from migrations import v0007_admissions_phase5
+from migrations import v0008_admission_class_allocation
 from migrations import v0008_academic_governance
 from migrations import v0009_faculty_allocation_readiness
 from migrations import v0010_quality_corrective_actions
@@ -58,6 +59,7 @@ MIGRATIONS = [v0001_admissions_foundation, v0002_repair_legacy_application_statu
 MIGRATIONS.append(v0005_admissions_eligibility)
 MIGRATIONS.append(v0006_admissions_phase4)
 MIGRATIONS.append(v0007_admissions_phase5)
+MIGRATIONS.append(v0008_admission_class_allocation)
 MIGRATIONS.append(v0008_academic_governance)
 MIGRATIONS.append(v0009_faculty_allocation_readiness)
 MIGRATIONS.append(v0010_quality_corrective_actions)

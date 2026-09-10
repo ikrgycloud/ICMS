@@ -231,6 +231,31 @@ def seed():
                 s.add(UserRole(id=urid, user_id=uid, role_id=f"role_{n}_0",
                                org_scope_id="scope_global"))
 
+        # A public-facing applicant account demonstrates the admissions portal.
+        # It is deliberately distinct from a Student Portal account: it can only
+        # access its own pre-enrollment application, never student services.
+        if not s.get(Person, "person_applicant_demo"):
+            s.add(Person(id="person_applicant_demo", tenant_id=TENANT,
+                         name="Aarav Sharma", email="phase2.draft@example.test",
+                         contact="9000000001"))
+        s.flush()
+        if not s.get(User, "user_applicant_demo"):
+            s.add(User(id="user_applicant_demo", tenant_id=TENANT,
+                       person_id="person_applicant_demo", username="applicant_demo",
+                       password_hash=pwhash("demo123"), mfa_enabled=False,
+                       office_n=36, role="Applicant", scope_level="individual",
+                       scope_ref=""))
+        if not s.get(UserRole, "ur_applicant_demo"):
+            s.add(UserRole(id="ur_applicant_demo", user_id="user_applicant_demo",
+                           role_id="role_36_0", org_scope_id="scope_global"))
+
+        # The demo Principal is a campus role.  Older databases were seeded
+        # with the global scope for every demo account, which let this account
+        # see students belonging to other campuses.  Keep the scope explicit
+        # and in the same human-readable form used by Student.campus.
+        principal = s.get(User, "user_4")
+        if principal and principal.scope_ref == "scope_global":
+            principal.scope_ref = CAMPUS_SCOPES[0]
         # Branch leadership must be scoped to its campus. Older databases were
         # seeded with the global scope for every demo account.
         for leadership_id in ("user_3", "user_4"):
