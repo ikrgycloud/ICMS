@@ -16,4 +16,4 @@ EXPOSE 8000
 
 # main.py applies additive migrations at startup. Development fixture seeding is
 # explicitly gated by DEMO_DATA_ENABLED and is disabled by docker-compose.
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "if [ \"$PROVISION_PAYROLL_DATA\" = \"true\" ]; then python -c 'from database import SessionLocal, ensure_additive_schema, ensure_versioned_migrations; from domain_seed import _ensure_payroll_staff_logins, _seed_core_domain, _seed_non_teaching_staff_records, _seed_payroll_demo_data; ensure_versioned_migrations(); ensure_additive_schema(); s=SessionLocal(); _seed_core_domain(s); _seed_non_teaching_staff_records(s); _seed_payroll_demo_data(s); _ensure_payroll_staff_logins(s); s.close()'; fi; exec uvicorn main:app --host 0.0.0.0 --port 8000"]
