@@ -165,6 +165,17 @@ export default function DeanAcademicWorkspaces({
       setSaving(false);
     }
   }
+  async function resubmitAllocation(p: any) {
+    setSaving(true);
+    try {
+      await api.submitAllocationProposal(p.id, p.status_version);
+      await load();
+    } catch (e: any) {
+      setError(e.message || "Unable to resubmit faculty allocation proposal");
+    } finally {
+      setSaving(false);
+    }
+  }
   async function verify(a: any) {
     setSaving(true);
     try {
@@ -387,6 +398,11 @@ export default function DeanAcademicWorkspaces({
                 p.submitted_by === currentUserId() && (
                   <span className="hint">Awaiting independent approval</span>
                 )}
+              {p.state === "RETURNED" && p.submitted_by === currentUserId() && (
+                <button className="btn btn-sm btn-crimson" disabled={saving} onClick={() => resubmitAllocation(p)}>
+                  Resubmit
+                </button>
+              )}
             </div>
           ))}
           {!filteredAllocationRows.length && (
