@@ -774,6 +774,21 @@ def workspace(ctx=Depends(auth), s=Depends(db)):
         for act in MODULE_ACTIONS.get(key, {}):
             actions[act] = can(s, ctx, key, act)
         mods.append({**meta, "actions": actions})
+    staff = s.query(D.StaffMember).filter(D.StaffMember.user_id == ctx["sub"]).first()
+    if staff and staff.status == "active":
+        payroll = (
+            s.query(D.PayrollEmployee)
+            .filter(D.PayrollEmployee.staff_member_id == staff.id, D.PayrollEmployee.status == "active")
+            .first()
+        )
+        if payroll and not any(item["key"] == "my_payroll" for item in mods):
+            mods.append({
+                "key": "my_payroll",
+                "label": "My Payroll",
+                "icon": "Pay",
+                "group": "Self Service",
+                "actions": {"view": True},
+            })
     return {"office_n": ctx["office_n"], "office": o.get("name"),
             "level": o.get("level"), "scope_level": ctx.get("scope_level"),
             "modules": mods}

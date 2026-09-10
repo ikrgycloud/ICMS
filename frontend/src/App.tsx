@@ -344,7 +344,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
       if (user?.persona === 'student' && !modules.some((module: any) => module.key === 'finance')) {
         modules.push({ key: 'finance', label: 'Fees & Payments', group: 'Student Services', enabled: true })
       }
-      if (user?.persona && !['student', 'parent', 'faculty'].includes(user.persona)) {
+      if (user?.persona && !['student', 'parent', 'faculty'].includes(user.persona) && !modules.some((module: any) => module.key === 'my_payroll')) {
         modules.push({ key: 'my_payroll', label: 'My Payroll', group: 'Self Service', enabled: true })
       }
       return modules
