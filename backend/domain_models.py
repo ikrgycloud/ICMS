@@ -2356,12 +2356,15 @@ class TransportDriver(Base):
 
 
 class TransportRequest(Base):
+    """A transport request raised by a student or during admission."""
     __tablename__ = "transport_requests"
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
     student_id = Column(String, index=True)
-    route_id = Column(String)
-    stop_id = Column(String)
+    student_name = Column(String, default="")
+    pickup_point = Column(String, default="")
+    route_id = Column(String, nullable=True)
+    stop_id = Column(String, nullable=True)
     status = Column(String, default="pending")
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -2392,17 +2395,6 @@ class TransportTrip(Base):
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-
-class TransportRequest(Base):
-    """A transport-department work item created from an accepted applicant request."""
-    __tablename__ = "transport_requests"
-    id = Column(String, primary_key=True)
-    tenant_id = Column(String, index=True)
-    student_id = Column(String, default="")
-    student_name = Column(String, default="")
-    pickup_point = Column(String, default="")
-    status = Column(String, default="requested")  # requested/assigned/cancelled
 
 
 class AdmissionServiceRequest(Base):

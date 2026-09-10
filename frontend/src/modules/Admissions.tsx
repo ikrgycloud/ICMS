@@ -1667,6 +1667,9 @@ export default function Admissions({
       )}
     </div>
   );
+}
+
+/* Obsolete duplicate component left by a previous merge.
 type PermissionCaps = {
   view_eligibility?: boolean
   manage_cycle?: boolean
@@ -2737,6 +2740,8 @@ function Phase5Status({ rows, mode }: any) {
   );
 }
 
+*/
+
 function EligibilityQueue({
   eligibility,
   filters,
@@ -2888,6 +2893,7 @@ function EligibilityQueue({
   );
 }
 
+/* Continuation of the obsolete duplicate component.
 function ConfigList({
   title,
   items,
@@ -3229,6 +3235,7 @@ function CycleModal({
     </Modal>
   );
 }
+*/
 
 function RuleModal({ rule, setRule, cycles, programmes, quotas, save }: any) {
   return (

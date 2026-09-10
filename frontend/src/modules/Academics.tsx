@@ -181,12 +181,6 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
         <button className={`tab ${tab === 'programmes' ? 'on' : ''}`} onClick={() => setTab('programmes')} type="button">Programmes ({programmes.programmes.length})</button>
         <button className={`tab ${tab === 'sections' ? 'on' : ''}`} onClick={() => setTab('sections')} type="button">Sections ({sections.sections.length})</button>
         <button className={`tab ${tab === 'courses' ? 'on' : ''}`} onClick={() => setTab('courses')} type="button">Course catalog ({courses.courses.length})</button>
-        right={<><GatedBtn can={!!caps.create_section} onClick={() => { setForm({ ...form, course_id: courseRows[0]?.id || '' }); setShowAdd(true) }}>+ Create section</GatedBtn>{caps.assign_faculty && <button className="btn btn-out" type="button" onClick={() => go?.('source_allocation')}>Faculty allocation</button>}</>}
-      />
-
-      <div className="tabs">
-        <button className={`tab ${tab === 'sections' ? 'on' : ''}`} onClick={() => setTab('sections')} type="button">Sections ({sectionRows.length})</button>
-        <button className={`tab ${tab === 'courses' ? 'on' : ''}`} onClick={() => setTab('courses')} type="button">Course catalog ({courseRows.length})</button>
       </div>
 
       {tab === 'programmes' && <div className="card"><div className="card-pad"><p className="hint">Create the programme master here, then the Admissions Office can add it to an admission cycle.</p></div><div className="tbl-scroll"><table className="tbl"><thead><tr><th>Code</th><th>Programme</th><th>Department</th><th>Level</th><th>Duration</th></tr></thead><tbody>{programmes.programmes.map((programme: any) => <tr key={programme.id}><td className="mono"><b>{programme.code}</b></td><td>{programme.name}</td><td>{programme.department}</td><td>{programme.level}</td><td>{programme.duration_years} years</td></tr>)}</tbody></table></div></div>}

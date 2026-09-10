@@ -48,6 +48,13 @@ def ensure_additive_schema():
     Base.metadata.create_all(engine)
     additions = {
         "students": [("blood_group", "VARCHAR DEFAULT ''"), ("student_type", "VARCHAR DEFAULT 'Regular'")],
+        "transport_requests": [
+            ("student_name", "VARCHAR DEFAULT ''"),
+            ("pickup_point", "VARCHAR DEFAULT ''"),
+            ("route_id", "VARCHAR"),
+            ("stop_id", "VARCHAR"),
+            ("created_at", "TIMESTAMP"),
+        ],
         "attendance_records": [("status", "VARCHAR DEFAULT 'present'"), ("note", "VARCHAR DEFAULT ''"), ("updated_at", "TIMESTAMP")],
         "academic_rollovers": [("executed_by", "VARCHAR DEFAULT ''"), ("executed_at", "TIMESTAMP"), ("remarks", "TEXT DEFAULT ''")],
         "academic_rollover_decisions": [("academic_status", "VARCHAR DEFAULT 'PENDING'"), ("finance_status", "VARCHAR DEFAULT 'CLEAR'"), ("outstanding_amount", "FLOAT DEFAULT 0"), ("carry_forward_amount", "FLOAT DEFAULT 0"), ("processed_at", "TIMESTAMP")],

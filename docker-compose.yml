@@ -24,7 +24,7 @@ services:
       # Local development/demo profile. Production deployments must override
       # this to production and inject a non-placeholder JWT_SECRET.
       ICMS_ENVIRONMENT: development
-      DEMO_DATA_ENABLED: "false"
+      DEMO_DATA_ENABLED: "true"
       PROVISION_PAYROLL_DATA: "true"
     depends_on:
       db:
@@ -45,7 +45,7 @@ services:
       DATABASE_URL: postgresql://icms:icms_secret@db:5432/icms
       JWT_SECRET: change-me-in-production
       ICMS_ENVIRONMENT: development
-      DEMO_DATA_ENABLED: "false"
+      DEMO_DATA_ENABLED: "true"
       PROVISION_PAYROLL_DATA: "true"
     depends_on:
       db:
