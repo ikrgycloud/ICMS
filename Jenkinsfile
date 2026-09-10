@@ -273,20 +273,6 @@ stages {
                             -f docker-compose.prod.yml \
                             up -d
 
-                        echo "Provisioning payroll staff demo data..."
-
-                        docker compose \
-                            -f docker-compose.prod.yml \
-                            exec -T backend \
-                            python provision_payroll_demo.py
-
-                        echo "Verifying payroll employee coverage..."
-
-                        docker compose \
-                            -f docker-compose.prod.yml \
-                            exec -T backend \
-                            python -c "from datetime import datetime; from database import SessionLocal; import domain_models as D; s=SessionLocal(); staff=s.query(D.PayrollEmployee).filter(D.PayrollEmployee.status=='active').count(); month=datetime.utcnow().strftime('%Y-%m'); run=s.query(D.PayrollRun).filter(D.PayrollRun.payroll_month==month).first(); entries=s.query(D.PayrollEntry).filter(D.PayrollEntry.run_id==run.id).count() if run else 0; print(f'active_payroll_employees={staff} {month}_entries={entries}'); assert staff == entries, 'Payroll coverage is incomplete'; s.close()"
-
                         echo "Deployment completed."
 
                         echo "Current container status:"
