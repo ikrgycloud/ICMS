@@ -2,104 +2,69 @@ import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { Empty, Spinner } from '../modules/kit'
 
+const validStatuses = ['present', 'absent', 'late', 'excused']
+const presentStatuses = new Set(['present', 'late', 'excused'])
+const statusLabel = (value = '') => value.replaceAll('_', ' ')
+const correctionLabel = (item: any) => item.status === 'applied' ? 'Applied' : item.status === 'returned' ? 'Returned' : item.status === 'rejected' ? 'Rejected' : ({ 1: 'Class Coordinator Review', 2: 'HOD Review', 3: 'Vice Principal Review' } as Record<number, string>)[item.current_stage] || statusLabel(item.status)
+
 export default function FacultyAttendance() {
-  const [home, setHome] = useState<any>(null)
-  const [sessions, setSessions] = useState<any[]>([])
-  const [selected, setSelected] = useState<any>(null)
-  const [roster, setRoster] = useState<any[]>([])
-  const [present, setPresent] = useState<Set<string>>(new Set())
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10))
-  const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState('')
+  const [home, setHome] = useState<any>(null), [sessions, setSessions] = useState<any[]>([]), [selected, setSelected] = useState<any>(null)
+  const [roster, setRoster] = useState<any[]>([]), [statuses, setStatuses] = useState<Record<string, string>>({}), [corrections, setCorrections] = useState<Record<string, any>>({})
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10)), [saving, setSaving] = useState(false), [message, setMessage] = useState('')
+  const [correctionTarget, setCorrectionTarget] = useState<any>(null), [requestedStatus, setRequestedStatus] = useState('absent'), [reason, setReason] = useState('')
 
-  const load = async (targetDate = date) => {
-    try {
-      const [faculty, sessionData] = await Promise.all([api.facultyHome(), api.facultyClassSessions(targetDate)])
-      setHome(faculty)
-      setSessions(sessionData.sessions || [])
-    } catch { setHome({ error: true }) }
-  }
-
+  const load = async (onDate = date) => { try { const [faculty, sessionData] = await Promise.all([api.facultyHome(), api.facultyClassSessions(onDate)]); setHome(faculty); setSessions(sessionData.sessions || []) } catch { setHome({ error: true }) } }
   useEffect(() => { load() }, [])
-
-  const open = async (session: any) => {
-    try {
-      const result = await api.attendanceRoster(session.section_id, session.id)
-      setRoster(result.roster || [])
-      setPresent(new Set((result.roster || []).map((student: any) => student.student_id)))
-      setSelected(session)
-      setMessage('')
-    } catch (error: any) { setMessage(error.message || 'Could not load the class roster.') }
+  const updateSession = (session: any) => { setSelected(session); setSessions(current => current.map(item => item.id === session.id ? session : item)) }
+  const loadCorrections = async () => { const data = await api.attendanceCorrections('mine'); setCorrections(Object.fromEntries((data.corrections || []).map((item: any) => [item.attendance_record_id, item]))) }
+  const loadRoster = async (session: any) => {
+    const result = await api.attendanceRoster(session.section_id, session.id), loaded = result.roster || []
+    setRoster(loaded)
+    setStatuses(Object.fromEntries(loaded.map((student: any) => [student.student_id, validStatuses.includes(student.session_status) ? student.session_status : ''])))
+    if (session.status === 'attendance_finalized') await loadCorrections()
   }
-
+  const open = async (session: any) => {
+    setMessage(''); setRoster([]); setStatuses({}); setSelected(session)
+    if (session.checked_in_at || session.status === 'attendance_finalized') try { await loadRoster(session) } catch (error: any) { setMessage(error.message || 'Could not load the class roster.') }
+  }
   const checkIn = async () => {
     if (!selected) return
-    setSaving(true)
-    try {
-      await api.checkInClassSession(selected.id)
-      setSelected({ ...selected, status: 'checked_in', checked_in_at: new Date().toISOString() })
-      await load()
-    } catch (error: any) { setMessage(error.message || 'Could not check into this class session.') }
-    finally { setSaving(false) }
+    setSaving(true); setMessage('')
+    try { const response = await api.checkInClassSession(selected.id); updateSession(response.session); await loadRoster(response.session) }
+    catch (error: any) { setMessage(error.message || 'Could not check into this class session.') } finally { setSaving(false) }
   }
-
   const save = async () => {
-    if (!selected) return
-    setSaving(true)
-    try {
-      const ids = roster.map(student => student.student_id)
-      await api.markAttendance({ section_id: selected.section_id, class_session_id: selected.id, present_ids: ids.filter(id => present.has(id)), absent_ids: ids.filter(id => !present.has(id)), on_date: date })
-      setMessage('Attendance saved. Finalize the session when the register is complete.')
-    } catch (error: any) { setMessage(error.message || 'Could not save attendance.') }
-    finally { setSaving(false) }
+    if (!selected) return false
+    const presentIds = roster.filter(student => presentStatuses.has(statuses[student.student_id])).map(student => student.student_id)
+    const absentIds = roster.filter(student => statuses[student.student_id] === 'absent').map(student => student.student_id)
+    await api.markAttendance({ section_id: selected.section_id, class_session_id: selected.id, present_ids: presentIds, absent_ids: absentIds, on_date: selected.session_date || date })
+    await loadRoster(selected); return true
   }
-
+  const saveDraft = async () => { setSaving(true); setMessage(''); try { await save(); setMessage('Attendance draft saved. Finalize only when the register is complete.') } catch (error: any) { setMessage(error.message || 'Could not save attendance.') } finally { setSaving(false) } }
+  const fullyMarked = roster.length > 0 && roster.every(student => validStatuses.includes(statuses[student.student_id]))
+  const finalized = selected?.status === 'attendance_finalized', checkedIn = Boolean(selected?.checked_in_at) || selected?.status === 'checked_in' || finalized
   const finalize = async () => {
-    if (!selected) return
-    setSaving(true)
-    try { await api.finalizeClassSessionAttendance(selected.id); setSelected(null); setMessage('Attendance finalized.'); await load() }
-    catch (error: any) { setMessage(error.message || 'Could not finalize attendance.') }
-    finally { setSaving(false) }
+    if (!selected || !fullyMarked) return
+    setSaving(true); setMessage('')
+    try { await save(); const response = await api.finalizeClassSessionAttendance(selected.id); updateSession(response.session); await loadRoster(response.session); await load(date); setMessage('Attendance finalized. Use Attendance Corrections for any later change.') }
+    catch (error: any) { setMessage(error.message || 'Could not finalize attendance.') } finally { setSaving(false) }
   }
-
-  /*
+  const submitCorrection = async () => {
+    if (!correctionTarget) return
+    setSaving(true); setMessage('')
+    try { const existing = corrections[correctionTarget.attendance_record_id]; if (existing?.status === 'returned') { await api.updateAttendanceCorrection(existing.id, { attendance_record_id: correctionTarget.attendance_record_id, requested_status: requestedStatus, reason }); await api.resubmitAttendanceCorrection(existing.id) } else await api.createAttendanceCorrection({ attendance_record_id: correctionTarget.attendance_record_id, requested_status: requestedStatus, reason }); await loadCorrections(); setCorrectionTarget(null); setMessage('Attendance correction submitted for the configured approval workflow.') }
+    catch (error: any) { setMessage(error.message || 'Could not submit the attendance correction.') } finally { setSaving(false) }
+  }
   if (!home) return <Spinner />
   if (home.error) return <Empty icon="!" text="Attendance data could not be loaded." />
-  if (classSessions) return <SessionAttendance sessions={classSessions} refresh={() => api.facultyClassSessions().then(r => setClassSessions(r.sessions || []))} />
-  const all = home.sections || [], kpis = home.kpis || {}, students = kpis.students ?? all.reduce((total: number, item: any) => total + (item.enrolled || 0), 0)
-  const courses = Array.from(new Set<string>(all.map((item: any) => `${item.course_code} · ${item.title}`))).sort()
-  const filtered = all.filter((item: any) => (!query || `${item.course_code} ${item.title} ${item.section}`.toLowerCase().includes(query.toLowerCase())) && (sectionFilter === 'all' || item.id === sectionFilter) && (courseFilter === 'all' || `${item.course_code} · ${item.title}` === courseFilter))
-  const average = kpis.average_attendance, low = all.filter((item: any) => item.attendance_pct != null && item.attendance_pct < 75)
-  const cards = [['▣', all.length, 'Total Sections'], ['♧', students, 'Total Students'], ['◔', average == null ? '—' : `${Math.round(average)}%`, 'Average Attendance'], ['▧', kpis.classes_this_week ?? 0, 'Classes This Week']]
-  return <main className="attendance-workspace fade-in"><section className="att-heading"><h1>Attendance</h1><p>Check in first, then record attendance for students in your assigned sections.</p></section>
-    <section className="faculty-checkin-card"><div><span>Step 1 · Faculty self check-in</span><h2>{checkIn?.checked_in ? 'You are checked in for today' : 'Check in before taking a class'}</h2><p>{checkIn?.checked_in_at ? `Recorded at ${new Date(checkIn.checked_in_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Your self check-in unlocks student attendance for today.'}</p></div><button className={checkIn?.checked_in ? 'done' : ''} onClick={selfCheckIn} disabled={checkingIn || checkIn?.checked_in} type="button">{checkingIn ? 'Checking in…' : checkIn?.checked_in ? '✓ Checked in' : 'Check in now'}</button></section>
-    <section className="att-kpis">{cards.map(([icon, value, label], index) => <article className={`att-kpi a${index}`} key={String(label)}><i>{icon}</i><div><b>{value}</b><small>{label}</small></div></article>)}</section>
-    <div className="att-notice">ⓘ Student attendance is available after faculty self check-in and is recorded only for your assigned sections.</div><section className="att-layout"><div><div className="att-filters"><label>Section<select value={sectionFilter} onChange={event => setSectionFilter(event.target.value)}><option value="all">All Sections</option>{all.map((item: any) => <option key={item.id} value={item.id}>{item.course_code} · Section {item.section}</option>)}</select></label><label>Course<select value={courseFilter} onChange={event => setCourseFilter(event.target.value)}><option value="all">All Courses</option>{courses.map(course => <option key={course} value={course}>{course}</option>)}</select></label><label>Date<input type="date" value={attendanceDate} onChange={event => setAttendanceDate(event.target.value)} /></label><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search by course or section..." /></div><article className="att-register"><header><h2>Step 2 · Student Attendance</h2><button onClick={() => filtered[0] && open(filtered[0])} disabled={!checkIn?.checked_in} type="button">♧ Mark Student Attendance</button></header><div className="att-table-wrap"><table className="att-table"><thead><tr><th>Course</th><th>Section</th><th>Schedule</th><th>Room</th><th>Students</th><th>Avg Attendance</th><th>Action</th></tr></thead><tbody>{filtered.map((item: any) => <tr key={item.id}><td><b>{item.course_code}</b> · {item.title}</td><td>{item.section}</td><td>{item.schedule || 'TBD'}</td><td>{item.room || 'TBD'}</td><td>{item.enrolled || 0}</td><td><span className="att-progress"><i style={{ width: `${item.attendance_pct || 0}%` }} /></span><em>{item.attendance_pct == null ? '—' : `${Math.round(item.attendance_pct)}%`}</em></td><td><button onClick={() => open(item)} disabled={!checkIn?.checked_in} type="button">Open roster</button></td></tr>)}{!filtered.length && <tr><td colSpan={7}>No assigned sections found.</td></tr>}</tbody></table></div></article></div><aside className="att-aside"><article><header><h2>⚠ Attendance Alerts</h2></header>{low.slice(0, 4).map((item: any) => <div className="att-side-row" key={item.id}><p><b>{item.course_code}-{item.section}</b><small>{Math.round(item.attendance_pct)}% average attendance</small></p><button onClick={() => open(item)} disabled={!checkIn?.checked_in} type="button">View roster</button></div>)}{!low.length && <p className="att-empty">No low-attendance alerts.</p>}</article><article><header><h2>Attendance flow</h2></header><ol className="attendance-flow"><li className={checkIn?.checked_in ? 'done' : 'active'}>Faculty self check-in</li><li className={checkIn?.checked_in ? 'active' : ''}>Select course and section</li><li>Mark student attendance</li><li>Save the class register</li></ol></article></aside></section>{message && !selected && <p className="att-message">{message}</p>}{selected && <div className="att-modal-backdrop"><section className="att-modal"><header><div><h2>Mark Student Attendance</h2><p>{selected.course_code} · Section {selected.section} · {attendanceDate}</p></div><button onClick={() => setSelected(null)} type="button">×</button></header><div className="att-modal-body">{roster.map(student => <label key={student.student_id}><input type="checkbox" checked={present.has(student.student_id)} onChange={event => setPresent(current => { const next = new Set(current); event.target.checked ? next.add(student.student_id) : next.delete(student.student_id); return next })} /><span><b>{student.roll_no}</b> · {student.name}<small>Overall attendance: {student.pct == null ? '—' : `${student.pct}%`}</small></span></label>)}{!roster.length && <p>No enrolled students found.</p>}</div>{message && <p className="att-message">{message}</p>}<footer><button onClick={() => setSelected(null)} type="button">Cancel</button><button disabled={saving || !roster.length} onClick={save} type="button">{saving ? 'Saving…' : 'Save Student Attendance'}</button></footer></section></div>}</main>
-  */
-  if (!home) return <Spinner />
-  if (home.error) return <Empty icon="!" text="Attendance data could not be loaded." />
-
-  const sections = home.sections || []
-  const cards = [['Sections', sections.length], ['Students', home.kpis?.students || 0], ['Sessions', sessions.length], ['Pending', sessions.filter(item => item.status !== 'attendance_finalized').length]]
-
+  const sections = home.sections || [], cards = [['Sections', sections.length], ['Students', home.kpis?.students || 0], ['Sessions', sessions.length], ['Pending', sessions.filter(item => item.status !== 'attendance_finalized').length]]
+  const rosterStep = finalized || fullyMarked ? 'done' : checkedIn ? 'active' : ''
   return <main className="attendance-workspace fade-in">
-    <section className="att-heading"><h1>Attendance</h1><p>Select a scheduled class session, check in, and record its roster.</p></section>
-    <section className="att-kpis">{cards.map(([label, value], index) => <article className={`att-kpi a${index}`} key={String(label)}><div><b>{value}</b><small>{label}</small></div></article>)}</section>
-    <section className="att-layout"><div><div className="att-filters"><label>Date<input type="date" value={date} onChange={event => { setDate(event.target.value); setSelected(null); load(event.target.value) }} /></label></div>
-      <article className="att-register"><header><h2>Class Sessions</h2></header><div className="att-table-wrap"><table className="att-table"><thead><tr><th>Course</th><th>Section</th><th>Time</th><th>Room</th><th>Status</th><th>Action</th></tr></thead><tbody>{sessions.map(session => <tr key={session.id}><td><b>{session.course_code}</b> {session.course_title}</td><td>{session.section}</td><td>{session.scheduled_start ? new Date(session.scheduled_start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-'}</td><td>{session.room || '-'}</td><td><em>{session.status.replace('_', ' ')}</em></td><td><button onClick={() => open(session)} type="button">Open roster</button></td></tr>)}{!sessions.length && <tr><td colSpan={6}>No active timetable sessions for this date.</td></tr>}</tbody></table></div></article>
-    </div><aside className="att-aside"><article><header><h2>Attendance Flow</h2></header><ol className="attendance-flow"><li>Select class session</li><li>Check in to the session</li><li>Mark active roster</li><li>Finalize attendance</li></ol></article></aside></section>
+    <section className="att-heading"><h1>Attendance</h1><p>Select a scheduled class session, check in to that session, and record its roster.</p></section>
+    <section className="att-kpis">{cards.map(([name, value], index) => <article className={`att-kpi a${index}`} key={String(name)}><div><b>{value}</b><small>{name}</small></div></article>)}</section>
+    <section className="att-layout"><div><div className="att-filters"><label>Date<input type="date" value={date} onChange={event => { setDate(event.target.value); setSelected(null); setRoster([]); load(event.target.value) }} /></label></div><article className="att-register"><header><h2>Class Sessions</h2></header><div className="att-table-wrap"><table className="att-table"><thead><tr><th>Course</th><th>Section</th><th>Time</th><th>Room</th><th>Status</th><th>Action</th></tr></thead><tbody>{sessions.map(session => <tr key={session.id}><td><b>{session.course_code}</b> {session.course_title}</td><td>{session.section}</td><td>{session.scheduled_start ? new Date(session.scheduled_start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-'}</td><td>{session.room || '-'}</td><td><em>{statusLabel(session.status)}</em></td><td><button onClick={() => open(session)} type="button">Open roster</button></td></tr>)}{!sessions.length && <tr><td colSpan={6}>No active timetable sessions for this date.</td></tr>}</tbody></table></div></article></div><aside className="att-aside"><article><header><h2>Attendance Flow</h2></header><ol className="attendance-flow"><li className={selected ? 'done' : 'active'}>Select class session</li><li className={checkedIn ? 'done' : selected ? 'active' : ''}>Check in to the session</li><li className={rosterStep}>Mark active roster</li><li className={finalized ? 'done' : fullyMarked ? 'active' : ''}>Finalize attendance</li></ol></article></aside></section>
     {message && !selected && <p className="att-message">{message}</p>}
-    {selected && <div className="att-modal-backdrop"><section className="att-modal"><header><h2>{selected.course_code} - Section {selected.section}</h2><button onClick={() => setSelected(null)} type="button">x</button></header>
-      {!selected.checked_in_at && selected.status === 'scheduled' ? <div className="att-modal-body"><p>Attendance is locked until you check in to this class session.</p><button disabled={saving} onClick={checkIn} type="button">{saving ? 'Checking in...' : 'Check in to session'}</button></div> : <><div className="att-modal-body">{roster.map(student => <label key={student.student_id}><input type="checkbox" checked={present.has(student.student_id)} onChange={event => setPresent(current => { const next = new Set(current); event.target.checked ? next.add(student.student_id) : next.delete(student.student_id); return next })} /><span><b>{student.roll_no}</b> {student.name}<small>Overall attendance: {student.pct == null ? '-' : `${student.pct}%`}</small></span></label>)}{!roster.length && <p>No enrolled students found.</p>}</div>{message && <p className="att-message">{message}</p>}<footer><button onClick={() => setSelected(null)} type="button">Cancel</button><button disabled={saving || !roster.length} onClick={save} type="button">{saving ? 'Saving...' : 'Save attendance'}</button><button disabled={saving} onClick={finalize} type="button">Finalize</button></footer></>}
-    </section></div>}
+    {selected && <div className="att-modal-backdrop"><section className="att-modal" role="dialog" aria-modal="true"><header><div><h2>{selected.course_code} - Section {selected.section}</h2><p>{selected.session_date || date} · {statusLabel(selected.status)}</p></div><button onClick={() => setSelected(null)} type="button" aria-label="Close attendance roster">×</button></header>{!checkedIn ? <div className="att-modal-body att-locked"><p>Attendance is locked until you check in to this class session.</p><button disabled={saving} onClick={checkIn} type="button">{saving ? 'Checking in...' : 'Check in to session'}</button></div> : <><div className="att-roster-summary"><span>Total Students <b>{roster.length}</b></span><span>Present <b>{roster.filter(student => presentStatuses.has(statuses[student.student_id])).length}</b></span><span>Absent <b>{roster.filter(student => statuses[student.student_id] === 'absent').length}</b></span><span>Not Marked <b>{roster.filter(student => !validStatuses.includes(statuses[student.student_id])).length}</b></span></div><div className="att-modal-body"><table className="att-roster-table"><thead><tr><th>Roll No</th><th>Student Name</th><th>Attendance</th></tr></thead><tbody>{roster.map(student => { const correction = corrections[student.attendance_record_id]; return <tr key={student.student_id}><td>{student.roll_no}</td><td>{student.name}<small>Overall attendance: {student.pct == null ? '—' : `${student.pct}%`}</small></td><td>{finalized ? <>{statusLabel(student.session_status || 'Not marked')}{student.attendance_record_id && <div>{correction ? <small className="att-correction-status">{correctionLabel(correction)}</small> : <button type="button" onClick={() => { setCorrectionTarget(student); setRequestedStatus(student.session_status === 'present' ? 'absent' : 'present'); setReason('') }}>Request correction</button>}</div>}</> : <div className="att-status-controls"><button type="button" className={statuses[student.student_id] === 'present' ? 'selected' : ''} onClick={() => setStatuses(current => ({ ...current, [student.student_id]: 'present' }))}>Present</button><button type="button" className={statuses[student.student_id] === 'absent' ? 'selected' : ''} onClick={() => setStatuses(current => ({ ...current, [student.student_id]: 'absent' }))}>Absent</button></div>}</td></tr> })}</tbody></table>{!roster.length && <p>No active students found for this section.</p>}</div>{message && <p className="att-message">{message}</p>}<footer><button onClick={() => setSelected(null)} type="button">Cancel</button>{!finalized && <><button disabled={saving || !roster.length} onClick={() => setStatuses(Object.fromEntries(roster.map(student => [student.student_id, 'present'])))} type="button">Mark All Present</button><button disabled={saving || !fullyMarked} onClick={saveDraft} type="button">{saving ? 'Saving...' : 'Save attendance'}</button><button disabled={saving || !fullyMarked} onClick={finalize} type="button">Finalize</button></>}</footer></>}</section></div>}
+    {correctionTarget && <div className="att-modal-backdrop"><section className="att-modal att-correction-modal" role="dialog" aria-modal="true"><header><div><h2>Request correction</h2><p>{selected?.course_code} · Section {selected?.section} · {correctionTarget.name}</p></div><button type="button" onClick={() => setCorrectionTarget(null)}>×</button></header><div className="att-modal-body"><p>Current attendance: <b>{statusLabel(correctionTarget.session_status)}</b></p><label>Requested attendance<select value={requestedStatus} onChange={event => setRequestedStatus(event.target.value)}>{validStatuses.filter(status => status !== correctionTarget.session_status).map(status => <option key={status} value={status}>{statusLabel(status)}</option>)}</select></label><label>Reason<textarea value={reason} onChange={event => setReason(event.target.value)} /></label></div><footer><button type="button" onClick={() => setCorrectionTarget(null)}>Cancel</button><button type="button" disabled={saving || !reason.trim()} onClick={submitCorrection}>{saving ? 'Submitting...' : 'Submit correction'}</button></footer></section></div>}
   </main>
-}
-
-function SessionAttendance({ sessions, refresh }: { sessions: any[]; refresh: () => void }) {
-  const [selected, setSelected] = useState<any>(null), [roster, setRoster] = useState<any[]>([]), [present, setPresent] = useState<Set<string>>(new Set()), [message, setMessage] = useState(''), [busy, setBusy] = useState(false)
-  async function checkIn(session: any) { setBusy(true); try { const r = await api.checkInClassSession(session.id); setMessage(r.message || 'Session checked in successfully.'); refresh() } catch (e: any) { setMessage(e.message || 'Unable to check in') } finally { setBusy(false) } }
-  async function open(session: any) { setSelected(session); const r = await api.attendanceRoster(session.section_id); setRoster(r.roster || []); setPresent(new Set((r.roster || []).map((x: any) => x.student_id))) }
-  async function save() { if (!selected) return; setBusy(true); try { await api.markAttendance({ session_id: selected.id, section_id: selected.section_id, present_ids: roster.filter(x => present.has(x.student_id)).map(x => x.student_id), absent_ids: roster.filter(x => !present.has(x.student_id)).map(x => x.student_id), on_date: selected.session_date }); setMessage('Attendance saved for this session.'); refresh() } catch (e: any) { setMessage(e.message || 'Unable to save attendance') } finally { setBusy(false) } }
-  async function complete(session: any) { setBusy(true); try { await api.completeClassSession(session.id); setMessage('Class session completed.'); refresh() } catch (e: any) { setMessage(e.message || 'Unable to complete session') } finally { setBusy(false) } }
-  return <main className="attendance-workspace fade-in"><section className="att-heading"><h1>Attendance</h1><p>Published class sessions assigned to you.</p></section>{message && <p className="att-message">{message}</p>}<section className="att-register"><header><h2>Class Sessions</h2></header><div className="att-table-wrap"><table className="att-table"><thead><tr><th>Course</th><th>Section</th><th>Room</th><th>Date</th><th>Time</th><th>Session</th><th>Check-in / Attendance</th></tr></thead><tbody>{sessions.map(s => <tr key={s.id}><td>{s.course_code || s.offering_id}<br /><small>{s.course_title || ''}</small></td><td>{s.section_code || s.section_id}</td><td>{s.room || '—'}</td><td>{s.session_date}</td><td>{s.start_time}–{s.end_time}</td><td>{s.status}</td><td>{s.status === 'Planned' && <span>Not Started</span>}{s.status === 'Open' && <button onClick={() => checkIn(s)} disabled={busy}>Check In</button>}{s.status === 'In Progress' && <><button onClick={() => open(s)}>Mark Attendance</button><button onClick={() => complete(s)} disabled={busy}>Complete Session</button></>}{s.status === 'Completed' && <button onClick={() => open(s)}>View Attendance</button>}{s.status === 'Cancelled' && <span>Cancelled</span>}</td></tr>)}</tbody></table></div>{!sessions.length && <Empty text="No assigned class sessions." />}</section>{selected && <div className="att-modal-backdrop"><section className="att-modal"><header><h2>Session Attendance</h2><button onClick={() => setSelected(null)}>×</button></header><div className="att-modal-body">{roster.map(x => <label key={x.student_id}><input type="checkbox" checked={present.has(x.student_id)} disabled={selected.status === 'Completed'} onChange={e => setPresent(current => { const n = new Set(current); e.target.checked ? n.add(x.student_id) : n.delete(x.student_id); return n })} /><span>{x.roll_no} · {x.name}</span></label>)}</div><footer><button onClick={() => setSelected(null)}>Close</button>{selected.status === 'In Progress' && <button onClick={save} disabled={busy}>Save Attendance</button>}</footer></section></div>}</main>
 }

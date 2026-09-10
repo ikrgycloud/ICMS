@@ -615,22 +615,22 @@ def resubmit_attendance_correction(correction_id: str, ctx=Depends(auth), s=Depe
     return {"correction": _correction_payload(s, row)}
 
 
-@router.post("/attendance/corrections/{correction_id}/decide")
-def decide_attendance_correction(correction_id: str, body: CorrectionDecisionIn, ctx=Depends(auth), s=Depends(db)):
+def decide_attendance_correction_request(s, correction_id: str, action_value: str, comment: str, ctx):
+    """Apply a correction decision through its configured per-stage reviewer."""
     row = s.query(D.AttendanceCorrectionRequest).get(correction_id)
     if not row: raise HTTPException(404, "Correction request not found")
     wf = s.query(WorkflowInstance).get(row.workflow_instance_id)
     if row.status not in {"submitted", "under_review"} or not wf: raise HTTPException(409, "Correction is not awaiting review")
     if _correction_reviewer(s, row, wf.current_stage) != ctx["sub"]: raise HTTPException(403, "You are not the eligible reviewer for the current correction stage")
-    action = body.action.lower()
+    action = action_value.lower()
     if action not in {"approve", "return", "reject"}: raise HTTPException(422, "Choose approve, return, or reject")
-    if action in {"return", "reject"} and not body.comment.strip(): raise HTTPException(422, "A comment is required when returning or rejecting a correction")
+    if action in {"return", "reject"} and not comment.strip(): raise HTTPException(422, "A comment is required when returning or rejecting a correction")
     who = actor_name(s, ctx); stage_names = {1: "Class Coordinator", 2: "HOD", 3: "Vice Principal"}
     s.add(Approval(id=uid(), tenant_id=TENANT, workflow_id=wf.id, actor_id=ctx["sub"], actor_name=who, stage=wf.current_stage,
-                   stage_label=stage_names[wf.current_stage], decision=action.upper(), authority="FULL", reason=body.comment.strip()))
+                    stage_label=stage_names[wf.current_stage], decision=action.upper(), authority="FULL", reason=comment.strip()))
     before = row.status
-    if action == "return": row.status = "returned"; wf.state = "returned"; notify(s, row.requested_by, "Attendance correction returned", body.comment, severity="action")
-    elif action == "reject": row.status = "rejected"; wf.state = "rejected"; notify(s, row.requested_by, "Attendance correction rejected", body.comment, severity="info")
+    if action == "return": row.status = "returned"; wf.state = "returned"; notify(s, row.requested_by, "Attendance correction returned", comment, severity="action")
+    elif action == "reject": row.status = "rejected"; wf.state = "rejected"; notify(s, row.requested_by, "Attendance correction rejected", comment, severity="info")
     elif wf.current_stage < 3:
         wf.current_stage += 1; wf.state = "under_review"; row.status = "under_review"; notify(s, _correction_reviewer(s, row, wf.current_stage), "Attendance correction review", "A correction request awaits your review", severity="action")
     else:
@@ -639,7 +639,13 @@ def decide_attendance_correction(correction_id: str, body: CorrectionDecisionIn,
         record.status = row.requested_status; record.present = row.requested_status in {"present", "late", "excused"}; record.version_no = (record.version_no or 0) + 1; record.updated_at = datetime.utcnow()
         row.status = "applied"; row.applied_at = datetime.utcnow(); row.applied_by = ctx["sub"]; wf.state = "approved"; wf.current_stage = 4
     row.updated_at = datetime.utcnow(); wf.updated_at = datetime.utcnow(); s.commit()
-    write_audit(s, ctx["sub"], who, ctx["office_n"], "attendance.correction.decide", f"correction:{row.id}", before, row.status, body.comment or f"{row.original_status} -> {row.requested_status}")
+    write_audit(s, ctx["sub"], who, ctx["office_n"], "attendance.correction.decide", f"correction:{row.id}", before, row.status, comment or f"{row.original_status} -> {row.requested_status}")
+    return row
+
+
+@router.post("/attendance/corrections/{correction_id}/decide")
+def decide_attendance_correction(correction_id: str, body: CorrectionDecisionIn, ctx=Depends(auth), s=Depends(db)):
+    row = decide_attendance_correction_request(s, correction_id, body.action, body.comment, ctx)
     return {"correction": _correction_payload(s, row)}
 class PublishMarksIn(BaseModel):
     assessment_id: str

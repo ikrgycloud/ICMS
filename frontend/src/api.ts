@@ -421,7 +421,7 @@ export const api = {
 
   // ---- attendance ----
   attendanceSections: () => req('/attendance/sections'),
-  attendanceRoster: (sid: string) => req(`/attendance/roster/${sid}`),
+  attendanceRoster: (sid: string, classSessionId = '') => req(`/attendance/roster/${sid}${classSessionId ? `?class_session_id=${encodeURIComponent(classSessionId)}` : ''}`),
   markAttendance: (b: any) => req('/attendance/mark', { method: 'POST', body: JSON.stringify(b) }),
   createAttendanceCorrection: (b: any) => req('/attendance/corrections', { method: 'POST', body: JSON.stringify(b) }),
   attendanceCorrections: (scope = 'mine') => req(`/attendance/corrections?scope=${encodeURIComponent(scope)}`),
@@ -741,6 +741,8 @@ export const api = {
   studentAnnouncements: () => req('/portal/student/announcements'),
   studentLibraryLoans: () => req('/portal/student/library-loans'),
   facultyHome: () => req('/portal/faculty/home'),
+  facultySelfProfile: () => req('/portal/faculty/profile'),
+  updateFacultySelfProfile: (body: any) => req('/portal/faculty/profile', { method: 'PUT', body: JSON.stringify(body) }),
   facultyPayroll: (month?: string) => req(`/portal/payroll/me${month ? `?month=${encodeURIComponent(month)}` : ''}`),
   facultyCourseCoordination: () => req('/portal/faculty/course-coordination'),
   facultyAcademicRisk: () => req('/portal/faculty/academic-risk'),
@@ -748,7 +750,7 @@ export const api = {
   facultyAnnouncements: () => req('/portal/faculty/announcements'),
   facultySelfCheckIn: () => req('/portal/faculty/self-check-in'),
   checkInFaculty: (body: any = {}) => req('/portal/faculty/self-check-in', { method: 'POST', body: JSON.stringify(body) }),
-  facultySchedule: () => req('/portal/faculty/schedule'),
+  facultySchedule: (weekStart = '') => req(`/portal/faculty/schedule${weekStart ? `?week_start=${encodeURIComponent(weekStart)}` : ''}`),
   facultySections: () => req('/portal/faculty/sections'),
   facultyMentees: () => req('/portal/faculty/mentees'),
   facultyMentee: (id: string) => req(`/portal/faculty/mentees/${id}`),

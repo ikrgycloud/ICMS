@@ -4173,9 +4173,16 @@ def attendance_sections(ctx=Depends(auth), s=Depends(db)):
 
 
 @router.get("/attendance/roster/{section_id}")
-def attendance_roster(section_id: str, ctx=Depends(auth), s=Depends(db)):
+def attendance_roster(section_id: str, class_session_id: str = "", ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "attendance", "view")[0])
     require_academic_object(s, ctx, _section_or_404(s, section_id), "read", "Section")
+    session = _session_or_404(s, class_session_id) if class_session_id else None
+    if session:
+        staff = _faculty_or_403(s, ctx)
+        if session.section_id != section_id or session.faculty_id != staff.id or not faculty_owns_section(s, staff.id, section_id, session.session_date):
+            raise HTTPException(403, "You are not assigned to this class session")
+        if not session.checked_in_at:
+            raise HTTPException(409, "Check in to this class session before opening its roster")
     enr = s.query(D.Enrollment).filter(D.Enrollment.tenant_id == ctx["tenant_id"], D.Enrollment.section_id == section_id,
                                        D.Enrollment.status == "enrolled").all()
     stu_map = {st.id: st for st in s.query(D.Student).all()}
@@ -4189,9 +4196,12 @@ def attendance_roster(section_id: str, ctx=Depends(auth), s=Depends(db)):
         present = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.section_id == section_id,
                                                      D.AttendanceRecord.student_id == st.id,
                                                      D.AttendanceRecord.present == True).count()
+        record = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.class_session_id == session.id, D.AttendanceRecord.student_id == st.id).first() if session else None
         out.append({"student_id": st.id, "roll_no": st.roll_no, "name": st.name,
                     "present": present, "total": total,
-                    "pct": round(100 * present / total) if total else None})
+                    "pct": round(100 * present / total) if total else None,
+                    "attendance_record_id": record.id if record else "",
+                    "session_status": record.status if record else ""})
     return {"roster": out, "can_mark": can(s, ctx, "attendance", "mark")}
 
 
