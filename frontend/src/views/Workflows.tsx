@@ -1,19 +1,39 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { Spinner, StatePill, Empty, money } from './ui'
 
-export default function Workflows({ user, onChange }: { user: any; onChange: () => void }) {
-  const [tab, setTab] = useState<'inbox' | 'mine' | 'all'>('inbox')
+export default function Workflows({ user, onChange, initialTab = 'inbox' }: { user: any; onChange: () => void; initialTab?: 'inbox' | 'mine' | 'all' }) {
+  const [tab, setTab] = useState<'inbox' | 'mine' | 'all'>(initialTab)
   const [wfs, setWfs] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [showStart, setShowStart] = useState(false)
   const [selected, setSelected] = useState<any>(null)
+  const [timetablePlans, setTimetablePlans] = useState<any[]>([])
+  const requestVersion = useRef(0)
 
   function load() {
+    const version = ++requestVersion.current
     setLoading(true)
-    api.workflows(tab).then(r => { setWfs(r.workflows); setLoading(false) }).catch(() => setLoading(false))
+    api.workflows(tab).then(r => {
+      if (version !== requestVersion.current) return
+      setWfs(Array.isArray(r?.workflows) ? r.workflows : [])
+      setLoading(false)
+    }).catch(() => {
+      if (version === requestVersion.current) setLoading(false)
+    })
   }
-  useEffect(load, [tab])
+  useEffect(() => { load() }, [tab])
+  useEffect(() => { if ([5, 10, 17].includes(user.office_n)) { Promise.all([api.timetablePlans(), api.sections(), api.courseOfferings(), api.academicConflicts()]).then(async ([p, s, o, c]) => { const entries = (await Promise.all((s.sections || []).map(async (x: any) => ({ x, t: (await api.sectionTimetable(x.id)).entries || [] })))).flatMap((z: any) => z.t.map((t: any) => ({ ...t, section: z.x }))); setTimetablePlans((p.plans || []).map((plan: any) => { const e = entries.find((x: any) => x.id === plan.timetable_entry_id), off = (o.offerings || []).find((x: any) => x.id === plan.offering_id); return { ...plan, entry: e, offering: off, conflict: (c.conflicts || []).some((x: any) => x.left.entry_id === plan.timetable_entry_id || x.right.entry_id === plan.timetable_entry_id) } })) }).catch(() => {}) } }, [user.office_n])
+
+  async function timetableDecision(plan: any, action: string) {
+    const reason = action === 'return' ? window.prompt('Return reason (required)') || '' : ''
+    if (action === 'return' && !reason.trim()) return
+    try {
+      if (user.office_n === 10) await api.timetableHodDecision(plan.id, action === 'approve' ? 'approve' : 'return', reason)
+      else if (user.office_n === 5) await api.timetableVpDecision(plan.id, action === 'approve' ? 'approve' : 'return', reason)
+      const next = await api.timetablePlans(); setTimetablePlans(next.plans || [])
+    } catch (e: any) { window.alert(e.message || 'Unable to update timetable workflow') }
+  }
 
   return (
     <div className="fade-in">
@@ -30,6 +50,8 @@ export default function Workflows({ user, onChange }: { user: any; onChange: () 
           <button key={id} className={`btn ${tab === id ? 'btn-solid' : 'btn-out'}`} onClick={() => setTab(id)}>{lbl}</button>
         ))}
       </div>
+
+      {[5, 10].includes(user.office_n) && tab === 'inbox' && <TimetablePlans plans={timetablePlans} office={user.office_n} onDecision={timetableDecision} />}
 
       {loading ? <Spinner /> : (
         <div className="card">
@@ -64,6 +86,12 @@ export default function Workflows({ user, onChange }: { user: any; onChange: () 
       {selected && <DetailModal wf={selected} user={user} onClose={() => setSelected(null)} onDone={() => { load(); onChange() }} />}
     </div>
   )
+}
+
+function TimetablePlans({ plans, office, onDecision }: any) {
+  const [detail, setDetail] = useState<any>(null)
+  const visible = plans.filter((p: any) => office === 10 ? p.status === 'HOD Review' : office === 5 ? p.status === 'VP Review' : Boolean(p.submitted_by))
+  return <><section className="card" style={{ marginBottom: 18 }}><div className="card-h"><h3>{office === 17 ? 'My Timetable Requests' : 'Timetable Reviews'}</h3></div>{!visible.length ? <Empty text={office === 17 ? 'No timetable submissions yet.' : 'No timetable plans are awaiting your review.'} /> : <div className="tbl-scroll"><table className="tbl"><thead><tr><th>Course</th><th>Offering / Section</th><th>Faculty</th><th>Room / Schedule</th><th>Conflict</th><th>Status</th><th>Submitted / Updated</th><th /></tr></thead><tbody>{visible.map((p: any) => { const e=p.entry, s=e?.section, o=p.offering; return <tr key={p.id}><td><b>{s?.course_code || '—'}</b><small>{s?.course_title || '—'}</small></td><td>{o?.program_code || p.offering_id || '—'}<br />{s?.section || p.section_id}</td><td>{s?.faculty || '—'}</td><td>{e?.room || s?.room || '—'}<br />{e ? `${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][e.day_of_week]} ${e.start_time}–${e.end_time}` : '—'}</td><td><StatePill s={p.conflict ? 'Conflict' : 'Clear'} /></td><td><StatePill s={p.status} /></td><td>{p.submitted_by || '—'}<br />{p.updated_at ? new Date(p.updated_at).toLocaleString() : '—'}</td><td><button className="btn btn-out" onClick={() => setDetail(p)}>Details</button>{office === 10 && p.status === 'HOD Review' && <><button className="btn btn-out" onClick={() => onDecision(p, 'approve')}>Forward to VP</button><button className="btn btn-out" onClick={() => onDecision(p, 'return')}>Return</button></>}{office === 5 && p.status === 'VP Review' && <><button className="btn btn-out" onClick={() => onDecision(p, 'approve')}>Approve</button><button className="btn btn-out" onClick={() => onDecision(p, 'return')}>Return</button></>}</td></tr>})}</tbody></table></div>}</section>{detail && <div className="modal-bg" onClick={() => setDetail(null)}><div className="modal" onClick={e => e.stopPropagation()}><div className="modal-h"><h3>Timetable Details</h3><button className="close-x" onClick={() => setDetail(null)}>×</button></div><div className="modal-b"><p><b>{detail.entry?.section?.course_code}</b> · {detail.entry?.section?.course_title}</p><p>Offering: {detail.offering?.program_code || detail.offering_id} · Section: {detail.entry?.section?.section || detail.section_id}</p><p>Faculty: {detail.entry?.section?.faculty || '—'} · Room: {detail.entry?.room || '—'}</p><p>Schedule: {detail.entry ? `${['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'][detail.entry.day_of_week]} ${detail.entry.start_time}–${detail.entry.end_time}` : '—'}</p><p>Conflict: {detail.conflict ? 'Conflict' : 'Clear'} · Status: {detail.status}</p><p>Submitted by: {detail.submitted_by || '—'} · Updated: {detail.updated_at ? new Date(detail.updated_at).toLocaleString() : '—'}</p><p>Reason: {detail.reason || '—'}</p></div></div></div>}</>
 }
 
 function StartModal({ user, onClose, onDone }: any) {

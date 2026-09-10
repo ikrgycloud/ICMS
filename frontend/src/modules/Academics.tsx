@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { DecisionToast, GatedBtn, Modal, PageHead, Spinner } from './kit'
 
@@ -11,7 +12,7 @@ const DAY_OPTIONS = [
   { value: 5, label: 'Saturday' },
 ]
 
-export default function Academics({ caps }: { caps: any }) {
+export default function Academics({ caps, go }: { caps: any, go?: (view: string) => void }) {
   const [tab, setTab] = useState<'sections' | 'courses'>('sections')
   const [sections, setSections] = useState<any>(null)
   const [courses, setCourses] = useState<any>(null)
@@ -95,6 +96,14 @@ export default function Academics({ caps }: { caps: any }) {
 
   async function saveTimetable() {
     if (!selectedSection) return
+    if (!timetableForm.start_time || !timetableForm.end_time || timetableForm.end_time <= timetableForm.start_time) {
+      setDecision({ outcome: 'DENY', reason: 'End time must be later than start time.' })
+      return
+    }
+    if (timetableForm.effective_from && timetableForm.effective_to && timetableForm.effective_to < timetableForm.effective_from) {
+      setDecision({ outcome: 'DENY', reason: 'Effective end date cannot be earlier than the start date.' })
+      return
+    }
     try {
       const response = editingEntry
         ? await api.updateTimetableEntry(editingEntry.id, timetableForm)
@@ -138,7 +147,7 @@ export default function Academics({ caps }: { caps: any }) {
       <PageHead
         title="Academics"
         sub="Course catalog, sections, timetable management, and targeted student notices"
-        right={<GatedBtn can={!!caps.create_section} onClick={() => { setForm({ ...form, course_id: courses.courses[0]?.id || '' }); setShowAdd(true) }}>+ Create section</GatedBtn>}
+        right={<><GatedBtn can={!!caps.create_section} onClick={() => { setForm({ ...form, course_id: courses.courses[0]?.id || '' }); setShowAdd(true) }}>+ Create section</GatedBtn>{caps.assign_faculty && <button className="btn btn-out" type="button" onClick={() => go?.('source_allocation')}>Faculty allocation</button>}</>}
       />
 
       <div className="tabs">
@@ -238,18 +247,14 @@ export default function Academics({ caps }: { caps: any }) {
               </div>
             </div>
 
-            <div className="card">
-              <div className="card-h"><h3>Current slots</h3></div>
+            <div className="card timetable-week-grid">
+              <div className="card-h"><h3>Weekly timetable</h3><span className="hint">{(timetable.entries || []).length} active slots</span></div>
               <div className="card-pad">
-                {(timetable.entries || []).map((entry: any) => (
-                  <div className="snap" key={entry.id}>
-                    <span>{DAY_OPTIONS.find(day => day.value === entry.day_of_week)?.label || entry.day_of_week} • {entry.slot} • {entry.room}</span>
-                    <span className="row-actions">
-                      <button className="btn btn-sm btn-out" onClick={() => startEditEntry(entry)} type="button">Edit</button>
-                      <button className="btn btn-sm btn-rose" onClick={() => deactivateEntry(entry.id)} type="button">Deactivate</button>
-                    </span>
-                  </div>
-                ))}
+                <div className="timetable-grid-head"><span>Day</span><span>Slots</span></div>
+                {DAY_OPTIONS.map(day => {
+                  const dayEntries = (timetable.entries || []).filter((entry: any) => entry.day_of_week === day.value)
+                  return <div className="timetable-grid-row" key={day.value}><strong>{day.label}</strong><div>{dayEntries.length ? dayEntries.map((entry: any) => <div className="timetable-slot" key={entry.id}><span><b>{entry.slot}</b> · {entry.room || 'Room TBD'}</span><span className="row-actions"><button className="btn btn-sm btn-out" onClick={() => startEditEntry(entry)} type="button">Edit</button><button className="btn btn-sm btn-rose" onClick={() => deactivateEntry(entry.id)} type="button">Deactivate</button></span></div>) : <span className="hint">No class scheduled</span>}</div></div>
+                })}
                 {(!timetable.entries || timetable.entries.length === 0) && <div className="empty">No timetable entries yet</div>}
               </div>
             </div>
