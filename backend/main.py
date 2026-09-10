@@ -12,6 +12,7 @@ import os
 import sys
 import uuid
 import time
+import re
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 
@@ -723,7 +724,20 @@ def login(body: LoginIn, s=Depends(db)):
     # The shared demo student account is the documented login name, while older
     # databases may still have the roll-number alias bound to the same row.
     requested_username = (body.username or "").strip().lower()
+    normalized_username = requested_username
+    if normalized_username:
+        normalized_username = normalized_username.replace("-", "_").replace(" ", "_")
+        normalized_username = re.sub(r"[^a-z0-9_]", "_", normalized_username)
+        normalized_username = re.sub(r"_+", "_", normalized_username).strip("_")
+
     u = s.query(User).filter(func.lower(User.username) == requested_username).first()
+    if not u and normalized_username and normalized_username != requested_username:
+        u = s.query(User).filter(func.lower(User.username) == normalized_username).first()
+    if not u and normalized_username:
+        compact_username = normalized_username.replace("_", "")
+        u = s.query(User).filter(
+            func.replace(func.lower(User.username), "_", "") == compact_username
+        ).first()
     if not u and requested_username == "student":
         u = s.query(User).filter(func.lower(User.username) == "25ece072").first()
     if not u and requested_username != "student":
