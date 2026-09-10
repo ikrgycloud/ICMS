@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { DecisionToast, GatedBtn, Modal, PageHead, Spinner } from './kit'
 
@@ -11,8 +12,8 @@ const DAY_OPTIONS = [
   { value: 5, label: 'Saturday' },
 ]
 
-export default function Academics({ caps }: { caps: any }) {
-  const [tab, setTab] = useState<'programmes' | 'sections' | 'courses'>('programmes')
+export default function Academics({ caps, go }: { caps: any, go?: (view: string) => void }) {
+  const [tab, setTab] = useState<'sections' | 'courses'>('sections')
   const [sections, setSections] = useState<any>(null)
   const [courses, setCourses] = useState<any>(null)
   const [programmes, setProgrammes] = useState<any>(null)
@@ -46,6 +47,10 @@ export default function Academics({ caps }: { caps: any }) {
     api.sections().then(setSections).catch(() => {})
     api.courses().then(setCourses).catch(() => {})
     api.academicProgrammes().then(setProgrammes).catch(() => {})
+    // Some endpoints may return an empty response while the database is still
+    // starting.  Keep the view renderable until a later refresh succeeds.
+    api.sections().then((response) => setSections(response ?? { sections: [] })).catch(() => setSections({ sections: [] }))
+    api.courses().then((response) => setCourses(response ?? { courses: [] })).catch(() => setCourses({ courses: [] }))
   }
 
   useEffect(() => {
@@ -115,6 +120,14 @@ export default function Academics({ caps }: { caps: any }) {
 
   async function saveTimetable() {
     if (!selectedSection) return
+    if (!timetableForm.start_time || !timetableForm.end_time || timetableForm.end_time <= timetableForm.start_time) {
+      setDecision({ outcome: 'DENY', reason: 'End time must be later than start time.' })
+      return
+    }
+    if (timetableForm.effective_from && timetableForm.effective_to && timetableForm.effective_to < timetableForm.effective_from) {
+      setDecision({ outcome: 'DENY', reason: 'Effective end date cannot be earlier than the start date.' })
+      return
+    }
     try {
       const response = editingEntry
         ? await api.updateTimetableEntry(editingEntry.id, timetableForm)
@@ -153,6 +166,9 @@ export default function Academics({ caps }: { caps: any }) {
 
   if (!sections || !courses || !programmes) return <Spinner />
 
+  const sectionRows = Array.isArray(sections.sections) ? sections.sections : []
+  const courseRows = Array.isArray(courses.courses) ? courses.courses : []
+
   return (
     <div className="fade-in">
       <PageHead
@@ -165,6 +181,12 @@ export default function Academics({ caps }: { caps: any }) {
         <button className={`tab ${tab === 'programmes' ? 'on' : ''}`} onClick={() => setTab('programmes')} type="button">Programmes ({programmes.programmes.length})</button>
         <button className={`tab ${tab === 'sections' ? 'on' : ''}`} onClick={() => setTab('sections')} type="button">Sections ({sections.sections.length})</button>
         <button className={`tab ${tab === 'courses' ? 'on' : ''}`} onClick={() => setTab('courses')} type="button">Course catalog ({courses.courses.length})</button>
+        right={<><GatedBtn can={!!caps.create_section} onClick={() => { setForm({ ...form, course_id: courseRows[0]?.id || '' }); setShowAdd(true) }}>+ Create section</GatedBtn>{caps.assign_faculty && <button className="btn btn-out" type="button" onClick={() => go?.('source_allocation')}>Faculty allocation</button>}</>}
+      />
+
+      <div className="tabs">
+        <button className={`tab ${tab === 'sections' ? 'on' : ''}`} onClick={() => setTab('sections')} type="button">Sections ({sectionRows.length})</button>
+        <button className={`tab ${tab === 'courses' ? 'on' : ''}`} onClick={() => setTab('courses')} type="button">Course catalog ({courseRows.length})</button>
       </div>
 
       {tab === 'programmes' && <div className="card"><div className="card-pad"><p className="hint">Create the programme master here, then the Admissions Office can add it to an admission cycle.</p></div><div className="tbl-scroll"><table className="tbl"><thead><tr><th>Code</th><th>Programme</th><th>Department</th><th>Level</th><th>Duration</th></tr></thead><tbody>{programmes.programmes.map((programme: any) => <tr key={programme.id}><td className="mono"><b>{programme.code}</b></td><td>{programme.name}</td><td>{programme.department}</td><td>{programme.level}</td><td>{programme.duration_years} years</td></tr>)}</tbody></table></div></div>}
@@ -175,7 +197,7 @@ export default function Academics({ caps }: { caps: any }) {
             <table className="tbl">
               <thead><tr><th>Course</th><th>Sec</th><th>Faculty</th><th>Schedule</th><th>Room</th><th>Enrolled</th><th>Manage</th></tr></thead>
               <tbody>
-                {sections.sections.map((section: any) => (
+                {sectionRows.map((section: any) => (
                   <tr key={section.id}>
                     <td><b className="mono">{section.course_code}</b> • {section.course_title}</td>
                     <td>{section.section}</td>
@@ -203,7 +225,7 @@ export default function Academics({ caps }: { caps: any }) {
             <table className="tbl">
               <thead><tr><th>Code</th><th>Title</th><th>Dept</th><th>Credits</th><th>Semester</th></tr></thead>
               <tbody>
-                {courses.courses.map((course: any) => (
+                {courseRows.map((course: any) => (
                   <tr key={course.id}>
                     <td className="mono"><b>{course.code}</b></td>
                     <td>{course.title}</td>
@@ -226,7 +248,7 @@ export default function Academics({ caps }: { caps: any }) {
         >
           <div className="form-row"><label>Course</label>
             <select className="select" value={form.course_id} onChange={e => setForm({ ...form, course_id: e.target.value })}>
-              {courses.courses.map((course: any) => <option key={course.id} value={course.id}>{course.code} — {course.title}</option>)}
+              {courseRows.map((course: any) => <option key={course.id} value={course.id}>{course.code} — {course.title}</option>)}
             </select>
           </div>
           <div className="grid-2">
@@ -263,18 +285,14 @@ export default function Academics({ caps }: { caps: any }) {
               </div>
             </div>
 
-            <div className="card">
-              <div className="card-h"><h3>Current slots</h3></div>
+            <div className="card timetable-week-grid">
+              <div className="card-h"><h3>Weekly timetable</h3><span className="hint">{(timetable.entries || []).length} active slots</span></div>
               <div className="card-pad">
-                {(timetable.entries || []).map((entry: any) => (
-                  <div className="snap" key={entry.id}>
-                    <span>{DAY_OPTIONS.find(day => day.value === entry.day_of_week)?.label || entry.day_of_week} • {entry.slot} • {entry.room}</span>
-                    <span className="row-actions">
-                      <button className="btn btn-sm btn-out" onClick={() => startEditEntry(entry)} type="button">Edit</button>
-                      <button className="btn btn-sm btn-rose" onClick={() => deactivateEntry(entry.id)} type="button">Deactivate</button>
-                    </span>
-                  </div>
-                ))}
+                <div className="timetable-grid-head"><span>Day</span><span>Slots</span></div>
+                {DAY_OPTIONS.map(day => {
+                  const dayEntries = (timetable.entries || []).filter((entry: any) => entry.day_of_week === day.value)
+                  return <div className="timetable-grid-row" key={day.value}><strong>{day.label}</strong><div>{dayEntries.length ? dayEntries.map((entry: any) => <div className="timetable-slot" key={entry.id}><span><b>{entry.slot}</b> · {entry.room || 'Room TBD'}</span><span className="row-actions"><button className="btn btn-sm btn-out" onClick={() => startEditEntry(entry)} type="button">Edit</button><button className="btn btn-sm btn-rose" onClick={() => deactivateEntry(entry.id)} type="button">Deactivate</button></span></div>) : <span className="hint">No class scheduled</span>}</div></div>
+                })}
                 {(!timetable.entries || timetable.entries.length === 0) && <div className="empty">No timetable entries yet</div>}
               </div>
             </div>

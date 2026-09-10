@@ -260,6 +260,20 @@ class Notification(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class NotificationDelivery(Base):
+    __tablename__ = "notification_deliveries"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    notification_id = Column(String, ForeignKey("notifications.id"), index=True)
+    channel = Column(String, default="in_app")
+    status = Column(String, default="pending")
+    attempts = Column(Integer, default=0)
+    last_error = Column(Text, default="")
+    delivered_at = Column(DateTime, nullable=True)
+    next_attempt_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class AuditLog(Base):
     """Append-only, hash-chained (Document §2, §12)."""
     __tablename__ = "audit_logs"
@@ -279,3 +293,77 @@ class AuditLog(Base):
     prev_hash = Column(String)
     hash = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class GovernancePolicy(Base):
+    __tablename__ = "governance_policies"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    proposal_type = Column(String, unique=True, index=True)
+    allowed_transitions_json = Column(Text, default="{}")
+    required_reason_states_json = Column(Text, default="[]")
+    reviewer_office_n = Column(Integer, nullable=True)
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class GovernanceDocument(Base):
+    __tablename__ = "governance_documents"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    owner_entity_type = Column(String, index=True)
+    owner_entity_id = Column(String, index=True)
+    file_name = Column(String)
+    mime_type = Column(String, default="application/octet-stream")
+    size_bytes = Column(Integer, default=0)
+    object_storage_key = Column(String)
+    checksum = Column(String, unique=True)
+    version = Column(Integer, default=1)
+    access_scope = Column(String, default="governance")
+    uploaded_by = Column(String)
+    uploaded_at = Column(DateTime, default=datetime.utcnow)
+    immutable = Column(Boolean, default=True)
+
+
+class GovernanceNotification(Base):
+    __tablename__ = "governance_notification_outcomes"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    notification_id = Column(String, nullable=True)
+    workflow_id = Column(String, index=True)
+    recipient_id = Column(String)
+    event = Column(String)
+    outcome = Column(String, default="queued")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ControlledAcademicRecord(Base):
+    __tablename__ = "controlled_academic_records"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    record_type = Column(String, index=True)
+    entity_ref = Column(String, index=True)
+    version = Column(Integer, default=1)
+    status = Column(String, default="effective")
+    effective_from = Column(DateTime, nullable=True)
+    effective_to = Column(DateTime, nullable=True)
+    payload_json = Column(Text, default="{}")
+    source_proposal_id = Column(String, index=True)
+    created_by = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TimetableExceptionWorkflow(Base):
+    __tablename__ = "timetable_exception_workflows"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    exception_id = Column(String, index=True)
+    state = Column(String, default="detected")
+    assigned_to = Column(String, default="")
+    evidence_document_ids = Column(Text, default="[]")
+    status_version = Column(Integer, default=0)
+    reason = Column(Text, default="")
+    updated_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)

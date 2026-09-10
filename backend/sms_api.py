@@ -5,8 +5,15 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
-from twilio.base.exceptions import TwilioRestException
-from twilio.rest import Client
+try:
+    from twilio.base.exceptions import TwilioRestException
+    from twilio.rest import Client
+except ImportError:  # Allows all non-SMS application tests to run without an external SDK.
+    Client = None
+
+    class TwilioRestException(Exception):
+        status = None
+        code = None
 
 from core import auth, db, write_audit
 
@@ -48,7 +55,7 @@ def _twilio_client() -> tuple[Client, str]:
     account_sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
     auth_token = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
     from_number = os.getenv("TWILIO_FROM_NUMBER", "").strip()
-    if not account_sid or not auth_token or not from_number:
+    if Client is None or not account_sid or not auth_token or not from_number:
         raise HTTPException(503, "SMS service is not configured")
     return Client(account_sid, auth_token), from_number
 

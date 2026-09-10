@@ -14,7 +14,7 @@ applies uniformly.
 """
 from datetime import datetime, date
 from sqlalchemy import (Column, Integer, String, Boolean, Float, DateTime,
-                        Date, Text, ForeignKey, UniqueConstraint)
+                        Date, Text, ForeignKey, Index, UniqueConstraint)
 from models import Base
 
 
@@ -28,6 +28,7 @@ class Department(Base):
     code = Column(String)              # CSE, ECE, MEC, ...
     name = Column(String)
     campus = Column(String)            # scope_ref (campus)
+    school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True)
     hod_person_id = Column(String, nullable=True)
 
 
@@ -46,6 +47,7 @@ class Program(Base):
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
     dept_id = Column(String, ForeignKey("departments.id"))
+    school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True)
     code = Column(String)              # BTECH-CSE, MTECH-CSE, PHD-CSE
     name = Column(String)
     level = Column(String)             # UG / PG / Doctoral
@@ -58,6 +60,7 @@ class Course(Base):
     tenant_id = Column(String, index=True)
     dept_id = Column(String, ForeignKey("departments.id"))
     program_id = Column(String, ForeignKey("programs.id"), nullable=True)
+    school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True)
     code = Column(String)              # CS101
     title = Column(String)
     credits = Column(Integer, default=3)
@@ -71,13 +74,118 @@ class Course(Base):
     status = Column(String, default="Active")
 
 
+class CourseOffering(Base):
+    """A course from the catalog offered for a specific academic term."""
+    __tablename__ = "course_offerings"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    course_id = Column(String, ForeignKey("courses.id"), index=True)
+    program_id = Column(String, ForeignKey("programs.id"), index=True)
+    academic_year = Column(String, index=True)
+    term = Column(String, index=True)
+    semester = Column(Integer)
+    status = Column(String, default="Draft", index=True)
+    created_by = Column(String, default="")
+    updated_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    expected_completion_date = Column(Date, nullable=True)
+    actual_completion_date = Column(Date, nullable=True)
+    execution_status = Column(String, default="Not Started", index=True)
+    execution_remarks = Column(Text, default="")
+    course_start_date = Column(Date, nullable=True)
+    execution_duration_months = Column(Integer, nullable=True)
+    execution_completed_by = Column(String, default="")
+    execution_completed_at = Column(DateTime, nullable=True)
+    lab_marks = Column(Integer, nullable=True)
+    mid_marks = Column(Integer, nullable=True)
+    semester_marks = Column(Integer, nullable=True)
+    mid1_completion_percentage = Column(Integer, nullable=True)
+    mid2_remaining_syllabus_percentage = Column(Integer, nullable=True)
+
+
+class HODInput(Base):
+    __tablename__ = "course_offering_hod_inputs"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    offering_id = Column(String, ForeignKey("course_offerings.id"), unique=True, index=True)
+    required_faculty_count = Column(Integer, default=0)
+    required_sections = Column(Integer, default=0)
+    expected_capacity = Column(Integer, default=0)
+    delivery_type = Column(String, default="theory")
+    remarks = Column(Text, default="")
+    status = Column(String, default="Pending")
+    created_by = Column(String, default="")
+    updated_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TimetablePlanWorkflow(Base):
+    __tablename__ = "timetable_plan_workflows"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    offering_id = Column(String, ForeignKey("course_offerings.id"), index=True)
+    section_id = Column(String, ForeignKey("sections.id"), index=True)
+    timetable_entry_id = Column(String, ForeignKey("timetable_entries.id"), index=True)
+    status = Column(String, default="Draft", index=True)
+    last_action = Column(String, default="")
+    reason = Column(Text, default="")
+    submitted_by = Column(String, default="")
+    updated_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TimetableConflict(Base):
+    __tablename__ = "timetable_conflicts"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    conflict_key = Column(String, unique=True, index=True)
+    conflict_type = Column(String, index=True)
+    severity = Column(String, default="Medium", index=True)
+    status = Column(String, default="Active", index=True)
+    left_entry_id = Column(String, ForeignKey("timetable_entries.id"), index=True)
+    right_entry_id = Column(String, ForeignKey("timetable_entries.id"), index=True)
+    resolution_note = Column(Text, default="")
+    resolved_by = Column(String, default="")
+    resolved_at = Column(DateTime, nullable=True)
+    detected_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CurriculumExecutionIssue(Base):
+    __tablename__ = "curriculum_execution_issues"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    offering_id = Column(String, ForeignKey("course_offerings.id"), index=True)
+    issue_type = Column(String)
+    description = Column(Text, default="")
+    status = Column(String, default="Open", index=True)
+    responsible_role = Column(String, default="Curriculum Officer")
+    created_by = Column(String, default="")
+    updated_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ClassSessionCheckIn(Base):
+    __tablename__ = "class_session_checkins"
+    id = Column(String, primary_key=True); tenant_id = Column(String, index=True)
+    session_id = Column(String, ForeignKey("class_sessions.id"), unique=True, index=True)
+    faculty_id = Column(String, ForeignKey("staff_members.id"), index=True)
+    checked_in_at = Column(DateTime, default=datetime.utcnow); created_by = Column(String, default="")
+
+
 class Section(Base):
     """A running class: a course offered in a term by a faculty member."""
     __tablename__ = "sections"
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
     course_id = Column(String, ForeignKey("courses.id"))
+    offering_id = Column(String, ForeignKey("course_offerings.id"), nullable=True, index=True)
     dept_id = Column(String, ForeignKey("departments.id"))
+    school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True)
     term = Column(String)              # 2025-Odd
     section_code = Column(String)      # A / B
     faculty_person_id = Column(String, nullable=True)
@@ -85,6 +193,50 @@ class Section(Base):
     schedule = Column(String, default="")   # "Mon 10:00, Wed 10:00"
     capacity = Column(Integer, default=60)
     scope_ref = Column(String, default="")  # department scope
+
+
+class TeachingAllocation(Base):
+    """Authoritative, time-bound faculty ownership of a teaching section."""
+    __tablename__ = "teaching_allocations"
+    __table_args__ = (
+        Index("ix_teaching_allocations_faculty_status", "faculty_id", "status"),
+        Index("ix_teaching_allocations_section_status", "section_id", "status"),
+    )
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    faculty_id = Column(String, ForeignKey("staff_members.id"), index=True)
+    course_id = Column(String, ForeignKey("courses.id"), index=True)
+    section_id = Column(String, ForeignKey("sections.id"), index=True)
+    academic_year = Column(String, default="")
+    term = Column(String, default="")
+    allocation_type = Column(String, default="primary")
+    lecture_hours = Column(Float, default=0)
+    lab_hours = Column(Float, default=0)
+    tutorial_hours = Column(Float, default=0)
+    workload_units = Column(Float, default=0)
+    assigned_by = Column(String, default="")
+    effective_from = Column(Date, nullable=True)
+    effective_to = Column(Date, nullable=True)
+    status = Column(String, default="draft", index=True)
+    is_coordinator = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CourseMaterial(Base):
+    __tablename__ = "course_materials"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    section_id = Column(String, ForeignKey("sections.id"), index=True)
+    title = Column(String)
+    description = Column(Text, default="")
+    material_type = Column(String, default="document")
+    resource_url = Column(String, default="")
+    topic = Column(String, default="")
+    status = Column(String, default="draft")
+    uploaded_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 
 # --------------------------------------------------------------------------- #
@@ -152,12 +304,202 @@ class StaffMember(Base):
     phone = Column(String, default="")
     office_hours = Column(String, default="")
     dept_id = Column(String, nullable=True)
+    school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True)
+    program_id = Column(String, ForeignKey("programs.id"), nullable=True, index=True)
+    section_id = Column(String, ForeignKey("sections.id"), nullable=True, index=True)
     designation = Column(String)       # Professor, Assistant Professor, Clerk...
     office_n = Column(Integer, nullable=True)
     campus = Column(String, default="Main Campus")
     status = Column(String, default="active")
     date_joined = Column(Date, default=date.today)
     user_id = Column(String, nullable=True)
+
+
+class PayrollEmployee(Base):
+    __tablename__ = "payroll_employees"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    staff_member_id = Column(String, ForeignKey("staff_members.id"), index=True, nullable=False)
+    employee_code = Column(String, unique=True, nullable=False)
+    bank_account_no = Column(String, default="")
+    bank_ifsc = Column(String, default="")
+    pan_no = Column(String, default="")
+    pf_no = Column(String, default="")
+    esi_no = Column(String, default="")
+    pay_mode = Column(String, default="bank_transfer")
+    status = Column(String, default="active")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PayrollSalaryStructure(Base):
+    __tablename__ = "payroll_salary_structures"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    employee_id = Column(String, ForeignKey("payroll_employees.id"), index=True, nullable=False)
+
+    basic_pay = Column(Float, default=0)
+    hra = Column(Float, default=0)
+    special_allowance = Column(Float, default=0)
+    conveyance_allowance = Column(Float, default=0)
+    medical_allowance = Column(Float, default=0)
+    other_earnings = Column(Float, default=0)
+
+    pf_employee_share = Column(Float, default=0)
+    pf_employer_share = Column(Float, default=0)
+    professional_tax = Column(Float, default=0)
+    income_tax = Column(Float, default=0)
+    loan_deduction = Column(Float, default=0)
+    advance_deduction = Column(Float, default=0)
+    other_deductions = Column(Float, default=0)
+
+    effective_from = Column(DateTime, nullable=False)
+    effective_to = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PayrollRun(Base):
+    __tablename__ = "payroll_runs"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    payroll_month = Column(String, nullable=False)
+    run_name = Column(String, nullable=False)
+    status = Column(String, default="draft")
+    generated_by = Column(String, default="")
+    reviewed_by = Column(String, default="")
+    approved_by = Column(String, default="")
+    payment_date = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PayrollEntry(Base):
+    __tablename__ = "payroll_entries"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    run_id = Column(String, ForeignKey("payroll_runs.id"), index=True, nullable=False)
+    employee_id = Column(String, ForeignKey("payroll_employees.id"), index=True, nullable=False)
+
+    gross_salary = Column(Float, default=0)
+    total_earnings = Column(Float, default=0)
+    total_deductions = Column(Float, default=0)
+    net_salary = Column(Float, default=0)
+
+    present_days = Column(Integer, default=0)
+    paid_days = Column(Integer, default=0)
+    leave_days = Column(Integer, default=0)
+
+    payslip_status = Column(String, default="not_generated")
+    payment_status = Column(String, default="pending")
+    notes = Column(Text, default="")
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PayrollPayslip(Base):
+    __tablename__ = "payroll_payslips"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    entry_id = Column(String, ForeignKey("payroll_entries.id"), index=True, nullable=False)
+    pdf_url = Column(String, default="")
+    generated_at = Column(DateTime, default=datetime.utcnow)
+    viewed_at = Column(DateTime, nullable=True)
+
+
+class PayrollPaymentPosting(Base):
+    __tablename__ = "payroll_payment_postings"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    entry_id = Column(String, ForeignKey("payroll_entries.id"), index=True, nullable=False)
+    payment_method = Column(String, default="bank_transfer")
+    bank_ref_no = Column(String, default="")
+    posted_by = Column(String, default="")
+    posted_at = Column(DateTime, nullable=True)
+    status = Column(String, default="pending")
+    remarks = Column(Text, default="")
+
+
+class StaffCheckIn(Base):
+    __tablename__ = "staff_check_ins"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    staff_id = Column(String, ForeignKey("staff_members.id"), index=True)
+    on_date = Column(Date, default=date.today, index=True)
+    checked_in_at = Column(DateTime, default=datetime.utcnow)
+    note = Column(String, default="")
+
+
+class MentorAssignment(Base):
+    __tablename__ = "mentor_assignments"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    faculty_id = Column(String, ForeignKey("staff_members.id"), index=True)
+    student_id = Column(String, ForeignKey("students.id"), index=True)
+    assigned_at = Column(DateTime, default=datetime.utcnow)
+    status = Column(String, default="active")
+
+
+class MentoringCase(Base):
+    __tablename__ = "mentoring_cases"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    student_id = Column(String, ForeignKey("students.id"), index=True)
+    mentor_id = Column(String, ForeignKey("staff_members.id"), index=True)
+    department_id = Column(String, ForeignKey("departments.id"), index=True)
+    category = Column(String, default="Academic Performance")
+    risk_level = Column(String, default="low")
+    status = Column(String, default="open", index=True)
+    summary = Column(Text, default="")
+    action_plan = Column(Text, default="")
+    follow_up_date = Column(Date, nullable=True)
+    referred_to_office = Column(String, default="")
+    referred_to_user_id = Column(String, default="", index=True)
+    referred_at = Column(DateTime, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class MentoringNote(Base):
+    __tablename__ = "mentoring_notes"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    case_id = Column(String, ForeignKey("mentoring_cases.id"), index=True)
+    author_user_id = Column(String, ForeignKey("users.id"), index=True)
+    author_name = Column(String, default="")
+    note_type = Column(String, default="note")
+    content = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class MentoringFollowUp(Base):
+    __tablename__ = "mentoring_follow_ups"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    case_id = Column(String, ForeignKey("mentoring_cases.id"), index=True)
+    scheduled_for = Column(Date, nullable=False, index=True)
+    created_by = Column(String, ForeignKey("users.id"), index=True)
+    completed_at = Column(DateTime, nullable=True)
+    completed_by = Column(String, default="")
+    outcome = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class FacultyFunctionalAssignment(Base):
+    __tablename__ = "faculty_functional_assignments"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    faculty_id = Column(String, ForeignKey("staff_members.id"), index=True)
+    role_key = Column(String, index=True)
+    permission_key = Column(String, default="", index=True)
+    scope_type = Column(String, default="")
+    scope_ref = Column(String, default="", index=True)
+    status = Column(String, default="active", index=True)
+    valid_from = Column(DateTime, default=datetime.utcnow)
+    valid_to = Column(DateTime, nullable=True)
+    assigned_at = Column(DateTime, default=datetime.utcnow)
 
 
 # --------------------------------------------------------------------------- #
@@ -179,13 +521,42 @@ class AttendanceRecord(Base):
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
     section_id = Column(String, ForeignKey("sections.id"))
+    session_id = Column(String, ForeignKey("class_sessions.id"), nullable=True, index=True)
     student_id = Column(String, ForeignKey("students.id"))
+    class_session_id = Column(String, ForeignKey("class_sessions.id"), nullable=True, index=True)
     on_date = Column(Date, default=date.today)
     present = Column(Boolean, default=True)
     status = Column(String, default="present")
     note = Column(String, default="")
     marked_by = Column(String, default="")
+    version_no = Column(Integer, default=1)
+    finalized_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AttendanceCorrectionRequest(Base):
+    __tablename__ = "attendance_correction_requests"
+    __table_args__ = (
+        Index("ix_attendance_correction_requested_by", "requested_by"),
+        Index("ix_attendance_correction_status", "status"),
+        Index("ix_attendance_correction_workflow", "workflow_instance_id"),
+    )
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    attendance_record_id = Column(String, ForeignKey("attendance_records.id"), index=True)
+    class_session_id = Column(String, ForeignKey("class_sessions.id"), index=True)
+    student_id = Column(String, ForeignKey("students.id"), index=True)
+    section_id = Column(String, ForeignKey("sections.id"), index=True)
+    requested_by = Column(String, ForeignKey("users.id"), index=True)
+    original_status = Column(String)
+    requested_status = Column(String)
+    reason = Column(Text)
+    workflow_instance_id = Column(String, ForeignKey("workflow_instances.id"), unique=True, index=True)
+    status = Column(String, default="draft", index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    applied_at = Column(DateTime, nullable=True)
+    applied_by = Column(String, default="")
 
 
 class Assessment(Base):
@@ -210,6 +581,14 @@ class Assessment(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
     published_at = Column(DateTime, nullable=True)
     published_by = Column(String, default="")
+    marks_state = Column(String, default="draft", index=True)
+    workflow_instance_id = Column(String, ForeignKey("workflow_instances.id"), nullable=True, unique=True, index=True)
+    marks_submitted_by = Column(String, default="")
+    marks_submitted_at = Column(DateTime, nullable=True)
+    marks_approved_at = Column(DateTime, nullable=True)
+    marks_published_at = Column(DateTime, nullable=True)
+    marks_revision = Column(Integer, default=1)
+    marks_return_comment = Column(Text, default="")
 
 
 class Mark(Base):
@@ -748,6 +1127,109 @@ class FeeInvoice(Base):
     due_date = Column(Date, nullable=True)
 
 
+class FinanceInvoiceReview(Base):
+    __tablename__ = "finance_invoice_reviews"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    invoice_id = Column(String, ForeignKey("fee_invoices.id"), index=True)
+    student_id = Column(String, default="", index=True)
+    decision = Column(String, default="approved")
+    remarks = Column(Text, default="")
+    reviewed_by = Column(String, default="")
+    reviewed_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class FinanceAdjustment(Base):
+    __tablename__ = "finance_adjustments"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    invoice_id = Column(String, ForeignKey("fee_invoices.id"), index=True)
+    student_id = Column(String, default="", index=True)
+    adjustment_type = Column(String, default="credit")  # credit / debit / refund
+    amount = Column(Float, default=0)
+    reason = Column(Text, default="")
+    status = Column(String, default="pending_review")  # pending_review / approved / rejected
+    created_by = Column(String, default="")
+    reviewed_by = Column(String, default="")
+    remarks = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    reviewed_at = Column(DateTime, nullable=True)
+
+
+class FinanceReconciliation(Base):
+    __tablename__ = "finance_reconciliations"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    period_start = Column(DateTime, nullable=True)
+    period_end = Column(DateTime, nullable=True)
+    opening_balance = Column(Float, default=0)
+    total_collected = Column(Float, default=0)
+    total_adjustments = Column(Float, default=0)
+    closing_balance = Column(Float, default=0)
+    status = Column(String, default="draft")  # draft / closed
+    notes = Column(Text, default="")
+    created_by = Column(String, default="")
+    closed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class FinanceRefund(Base):
+    __tablename__ = "finance_refunds"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    invoice_id = Column(String, ForeignKey("fee_invoices.id"), index=True)
+    student_id = Column(String, default="", index=True)
+    amount = Column(Float, default=0)
+    reason = Column(Text, default="")
+    status = Column(String, default="pending_approval")  # pending_approval / approved / rejected / executed
+    created_by = Column(String, default="")
+    approved_by = Column(String, default="")
+    executed_by = Column(String, default="")
+    remarks = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    approved_at = Column(DateTime, nullable=True)
+    executed_at = Column(DateTime, nullable=True)
+
+
+class FinanceDayClose(Base):
+    __tablename__ = "finance_day_closes"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    close_date = Column(Date, nullable=False, index=True)
+    total_collected = Column(Float, default=0)
+    total_pending_verification = Column(Float, default=0)
+    total_pending_clearance = Column(Float, default=0)
+    total_adjustments = Column(Float, default=0)
+    total_refunds = Column(Float, default=0)
+    total_vendor_payments = Column(Float, default=0)
+    opening_balance = Column(Float, default=0)
+    closing_balance = Column(Float, default=0)
+    status = Column(String, default="closed")  # closed / draft
+    notes = Column(Text, default="")
+    created_by = Column(String, default="")
+    closed_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class VendorPayment(Base):
+    __tablename__ = "vendor_payments"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    vendor_name = Column(String, default="")
+    invoice_ref = Column(String, default="")
+    amount = Column(Float, default=0)
+    status = Column(String, default="pending_approval")  # pending_approval / approved / paid / rejected
+    approval_reference = Column(String, default="")
+    notes = Column(Text, default="")
+    created_by = Column(String, default="")
+    approved_by = Column(String, default="")
+    paid_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    approved_at = Column(DateTime, nullable=True)
+    paid_at = Column(DateTime, nullable=True)
+
+
 class FeeComponent(Base):
     __tablename__ = "fee_components"
     id = Column(String, primary_key=True)
@@ -1068,6 +1550,8 @@ class BudgetLine(Base):
     category = Column(String)          # Salaries / Infrastructure / Labs ...
     allocated = Column(Float, default=0)
     spent = Column(Float, default=0)
+    reserved = Column(Float, default=0)
+    committed = Column(Float, default=0)
     fiscal_year = Column(String, default="2025-26")
 
 
@@ -1193,11 +1677,17 @@ class AcademicCalendarEntry(Base):
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
     term = Column(String, index=True)
+    academic_year = Column(String, default="", index=True)
+    program_id = Column(String, ForeignKey("programs.id"), nullable=True, index=True)
+    department_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True)
+    student_year = Column(Integer, nullable=True, index=True)
     title = Column(String)
     category = Column(String, default="Teaching")
     campus = Column(String, default="All Campuses")
     start_date = Column(Date, nullable=False)
     end_date = Column(Date, nullable=True)
+    start_time = Column(String, default="")
+    end_time = Column(String, default="")
     description = Column(Text, default="")
     status = Column(String, default="published")
     owner_office_n = Column(Integer, nullable=True)
@@ -1205,6 +1695,232 @@ class AcademicCalendarEntry(Base):
     updated_by = Column(String, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+# --------------------------------------------------------------------------- #
+#  Academic governance — reusable, versioned proposals and decisions
+# --------------------------------------------------------------------------- #
+class AcademicProposal(Base):
+    """A governed academic change.  Payload lives in immutable versions."""
+    __tablename__ = "academic_proposals"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    proposal_type = Column(String, index=True)  # calendar / curriculum / allocation / ...
+    title = Column(String)
+    scope_level = Column(String, default="institution")
+    scope_ref = Column(String, default="")
+    school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True)
+    dept_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True)
+    program_id = Column(String, ForeignKey("programs.id"), nullable=True, index=True)
+    section_id = Column(String, ForeignKey("sections.id"), nullable=True, index=True)
+    state = Column(String, default="DRAFT", index=True)
+    version_no = Column(Integer, default=1, nullable=False)
+    status_version = Column(Integer, default=0, nullable=False)
+    submitted_by = Column(String, default="")
+    submitted_office_n = Column(Integer, nullable=True)
+    assigned_to_office_n = Column(Integer, nullable=True)
+    assigned_reviewer_id = Column(String, nullable=True, index=True)
+    due_at = Column(DateTime, nullable=True)
+    escalated_to_office_n = Column(Integer, nullable=True)
+    implementation_ref = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AcademicProposalVersion(Base):
+    __tablename__ = "academic_proposal_versions"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    proposal_id = Column(String, ForeignKey("academic_proposals.id"), index=True)
+    version_no = Column(Integer, nullable=False)
+    payload_json = Column(Text, default="{}")
+    rationale = Column(Text, default="")
+    created_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    __table_args__ = (UniqueConstraint("proposal_id", "version_no", name="uq_academic_proposal_version"),)
+
+
+class AcademicProposalEvent(Base):
+    __tablename__ = "academic_proposal_events"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    proposal_id = Column(String, ForeignKey("academic_proposals.id"), index=True)
+    from_state = Column(String, default="")
+    to_state = Column(String)
+    actor_id = Column(String)
+    actor_office_n = Column(Integer, nullable=True)
+    reason = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class DeanScopeAssignment(Base):
+    """A time-bound, persisted boundary for a Dean Academics appointment.
+
+    An assignment can represent a whole school, or be narrowed to a department,
+    programme, and section.  Multiple active rows compose a Dean's authority;
+    an absent assignment never implies institution-wide access in production.
+    """
+    __tablename__ = "dean_scope_assignments"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True, nullable=False)
+    dean_user_id = Column(String, ForeignKey("users.id"), index=True, nullable=False)
+    school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True)
+    dept_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True)
+    program_id = Column(String, ForeignKey("programs.id"), nullable=True, index=True)
+    section_id = Column(String, ForeignKey("sections.id"), nullable=True, index=True)
+    active = Column(Boolean, default=True, nullable=False, index=True)
+    effective_from = Column(DateTime, default=datetime.utcnow, nullable=False)
+    effective_to = Column(DateTime, nullable=True)
+    created_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class FacultyAllocation(Base):
+    __tablename__ = "faculty_allocations"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    section_id = Column(String, ForeignKey("sections.id"), index=True)
+    faculty_person_id = Column(String, nullable=False, index=True)
+    term = Column(String, index=True)
+    workload_units = Column(Float, default=0)
+    status = Column(String, default="PROPOSED")
+    proposal_id = Column(String, ForeignKey("academic_proposals.id"), nullable=True)
+    created_by = Column(String, default="")
+    approved_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TimetableException(Base):
+    __tablename__ = "timetable_exceptions"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    section_id = Column(String, ForeignKey("sections.id"), nullable=True)
+    school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True)
+    dept_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True)
+    program_id = Column(String, ForeignKey("programs.id"), nullable=True, index=True)
+    kind = Column(String, index=True)
+    severity = Column(String, default="warning")
+    message = Column(Text)
+    status = Column(String, default="OPEN", index=True)
+    detected_at = Column(DateTime, default=datetime.utcnow)
+    resolved_at = Column(DateTime, nullable=True)
+    resolved_by = Column(String, default="")
+
+
+class AcademicQualityReview(Base):
+    __tablename__ = "academic_quality_reviews"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    title = Column(String)
+    scope_level = Column(String, default="institution")
+    scope_ref = Column(String, default="")
+    school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True)
+    dept_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True)
+    program_id = Column(String, ForeignKey("programs.id"), nullable=True, index=True)
+    section_id = Column(String, ForeignKey("sections.id"), nullable=True, index=True)
+    metric_key = Column(String)
+    metric_value = Column(Float, nullable=True)
+    threshold = Column(Float, nullable=True)
+    deviation = Column(Text, default="")
+    root_cause = Column(Text, default="")
+    state = Column(String, default="OPEN", index=True)
+    effectiveness_measure = Column(Text, default="")
+    effectiveness_result = Column(Text, default="")
+    closed_at = Column(DateTime, nullable=True)
+    owner_id = Column(String, default="")
+    due_at = Column(DateTime, nullable=True)
+    status_version = Column(Integer, default=0, nullable=False)
+    created_by = Column(String, default="")
+    verified_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class QualityEffectivenessMeasurement(Base):
+    __tablename__ = "quality_effectiveness_measurements"
+    id = Column(String, primary_key=True); tenant_id = Column(String, index=True); review_id = Column(String, ForeignKey("academic_quality_reviews.id"), index=True); measure = Column(Text); result = Column(Text); value = Column(Float, nullable=True); measured_by = Column(String); measured_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CorrectiveAction(Base):
+    __tablename__ = "corrective_actions"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    review_id = Column(String, ForeignKey("academic_quality_reviews.id"), index=True)
+    school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True)
+    dept_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True)
+    program_id = Column(String, ForeignKey("programs.id"), nullable=True, index=True)
+    section_id = Column(String, ForeignKey("sections.id"), nullable=True, index=True)
+    title = Column(String)
+    owner_id = Column(String)
+    deadline = Column(DateTime, nullable=True)
+    evidence = Column(Text, default="")
+    priority = Column(String, default="medium")
+    progress = Column(Float, default=0)
+    evidence_versions = Column(Text, default="[]")
+    owner_acknowledged = Column(Boolean, default=False)
+    escalation_target = Column(String, default="")
+    verification_result = Column(Text, default="")
+    state = Column(String, default="OPEN", index=True)
+    status_version = Column(Integer, default=0, nullable=False)
+    created_by = Column(String, default="")
+    verified_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AcademicCommittee(Base):
+    __tablename__ = "academic_committees"
+    id = Column(String, primary_key=True); tenant_id = Column(String, index=True); school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True); dept_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True); name = Column(String); committee_type = Column(String); chair_id = Column(String, default=""); status = Column(String, default="active"); permissions_json = Column(Text, default='["view","record","assign","verify"]')
+
+class CommitteeMember(Base):
+    __tablename__ = "committee_members"
+    id = Column(String, primary_key=True); tenant_id = Column(String, index=True); committee_id = Column(String, ForeignKey("academic_committees.id")); user_id = Column(String); role = Column(String, default="member"); active = Column(Boolean, default=True)
+
+
+class CommitteeMeeting(Base):
+    __tablename__ = "committee_meetings"
+    id = Column(String, primary_key=True); tenant_id = Column(String, index=True); school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True); dept_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True); committee_id = Column(String, ForeignKey("academic_committees.id")); meeting_at = Column(DateTime); agenda = Column(Text, default=""); minutes = Column(Text, default=""); status = Column(String, default="SCHEDULED"); agenda_status = Column(String, default="DRAFT"); minutes_status = Column(String, default="DRAFT"); created_by = Column(String, default="")
+
+
+class CommitteeResolution(Base):
+    __tablename__ = "committee_resolutions"
+    id = Column(String, primary_key=True); tenant_id = Column(String, index=True); school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True); dept_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True); meeting_id = Column(String, ForeignKey("committee_meetings.id")); title = Column(String); decision = Column(Text); linked_proposal_id = Column(String, nullable=True); linked_quality_action_id = Column(String, nullable=True); linked_planning_item_id = Column(String, nullable=True); status = Column(String, default="DRAFT"); approved_by = Column(String, default=""); approved_at = Column(DateTime, nullable=True); created_at = Column(DateTime, default=datetime.utcnow)
+
+class CommitteeActionItem(Base):
+    __tablename__ = "committee_action_items"
+    id = Column(String, primary_key=True); tenant_id = Column(String, index=True); school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True); dept_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True); resolution_id = Column(String, ForeignKey("committee_resolutions.id")); title = Column(String); owner_id = Column(String); deadline = Column(DateTime, nullable=True); status = Column(String, default="OPEN"); evidence = Column(Text, default=""); verification_result = Column(Text, default=""); verified_by = Column(String, default=""); verified_at = Column(DateTime, nullable=True)
+
+
+class ProgramOutcome(Base):
+    __tablename__ = "program_outcomes"
+    id = Column(String, primary_key=True); tenant_id = Column(String, index=True); school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True); dept_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True); program_id = Column(String, ForeignKey("programs.id")); code = Column(String); description = Column(Text); active = Column(Boolean, default=True)
+
+
+class CourseOutcome(Base):
+    __tablename__ = "course_outcomes"
+    id = Column(String, primary_key=True); tenant_id = Column(String, index=True); school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True); dept_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True); program_id = Column(String, ForeignKey("programs.id"), nullable=True, index=True); course_id = Column(String, ForeignKey("courses.id")); code = Column(String); description = Column(Text); active = Column(Boolean, default=True)
+
+
+class OutcomeMapping(Base):
+    __tablename__ = "outcome_mappings"
+    id = Column(String, primary_key=True); tenant_id = Column(String, index=True); school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True); dept_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True); program_id = Column(String, ForeignKey("programs.id"), nullable=True, index=True); course_id = Column(String, ForeignKey("courses.id"), nullable=True, index=True); course_outcome_id = Column(String, ForeignKey("course_outcomes.id")); program_outcome_id = Column(String, ForeignKey("program_outcomes.id")); weight = Column(Float, default=1.0)
+
+
+class AssessmentOutcomeMapping(Base):
+    __tablename__ = "assessment_outcome_mappings"
+    id = Column(String, primary_key=True); tenant_id = Column(String, index=True); assessment_id = Column(String, ForeignKey("assessments.id"), index=True); course_outcome_id = Column(String, ForeignKey("course_outcomes.id"), index=True); weight = Column(Float, default=1.0); target = Column(Float, default=60)
+
+
+class OutcomeAttainmentTarget(Base):
+    __tablename__ = "outcome_attainment_targets"
+    id = Column(String, primary_key=True); tenant_id = Column(String, index=True); outcome_type = Column(String); outcome_id = Column(String, index=True); aggregation_level = Column(String, default="course"); target = Column(Float, default=60); threshold = Column(Float, default=50); term = Column(String, default="")
+
+
+class NextSemesterPlan(Base):
+    __tablename__ = "next_semester_plans"
+    id = Column(String, primary_key=True); tenant_id = Column(String, index=True); school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True); dept_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True); program_id = Column(String, ForeignKey("programs.id"), nullable=True, index=True); section_id = Column(String, ForeignKey("sections.id"), nullable=True, index=True); source_term = Column(String); target_term = Column(String); summary = Column(Text, default=""); risks_json = Column(Text, default="[]"); actions_json = Column(Text, default="[]"); dependencies_json = Column(Text, default="[]"); evidence_links_json = Column(Text, default="[]"); state = Column(String, default="DRAFT"); created_by = Column(String, default=""); approved_by = Column(String, default=""); created_at = Column(DateTime, default=datetime.utcnow); updated_at = Column(DateTime, default=datetime.utcnow)
 
 
 class TimetableEntry(Base):
@@ -1226,6 +1942,204 @@ class TimetableEntry(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
+
+class CurriculumVersion(Base):
+    __tablename__ = "curriculum_versions"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    program_id = Column(String, ForeignKey("programs.id"), nullable=True, index=True)
+    regulation = Column(String, index=True)
+    effective_term = Column(String, index=True)
+    version = Column(Integer, default=1)
+    status = Column(String, default="draft", index=True)
+    snapshot_json = Column(Text, default="[]")
+    source_proposal_id = Column(String, nullable=True, index=True)
+    created_by = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    effective_at = Column(DateTime, nullable=True)
+
+
+class CurriculumSnapshot(Base):
+    __tablename__ = "curriculum_snapshots"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    curriculum_version_id = Column(String, ForeignKey("curriculum_versions.id"), index=True)
+    course_set_json = Column(Text, default="[]")
+    checksum = Column(String, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ProgramAssessment(Base):
+    __tablename__ = "program_assessments"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    proposal_id = Column(String, ForeignKey("academic_proposals.id"), index=True)
+    capacity = Column(Integer, default=0)
+    intake = Column(Integer, default=0)
+    faculty_workload = Column(Float, default=0)
+    faculty_ready = Column(Boolean, default=False)
+    infrastructure_ready = Column(Boolean, default=False)
+    infrastructure_requirements_json = Column(Text, default="[]")
+    principal_escalation_required = Column(Boolean, default=False)
+    assessed_by = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CalendarVersion(Base):
+    __tablename__ = "calendar_versions"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    term = Column(String, index=True)
+    version = Column(Integer, default=1)
+    status = Column(String, default="draft", index=True)
+    snapshot_json = Column(Text, default="[]")
+    source_proposal_id = Column(String, nullable=True, index=True)
+    effective_at = Column(DateTime, nullable=True)
+    created_by = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CalendarImpactTask(Base):
+    __tablename__ = "calendar_impact_tasks"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    calendar_version_id = Column(String, ForeignKey("calendar_versions.id"), index=True)
+    downstream = Column(String, index=True)
+    status = Column(String, default="pending")
+    acknowledged_by = Column(String, default="")
+    acknowledged_at = Column(DateTime, nullable=True)
+    reason = Column(Text, default="")
+
+
+class FacultyAvailability(Base):
+    __tablename__ = "faculty_availability"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    faculty_id = Column(String, ForeignKey("staff_members.id"), index=True)
+    term = Column(String, index=True)
+    available_units = Column(Float, default=0)
+    unavailable_slots_json = Column(Text, default="[]")
+    status = Column(String, default="available")
+    updated_by = Column(String)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class FacultyWorkloadRule(Base):
+    __tablename__ = "faculty_workload_rules"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    term = Column(String, index=True)
+    min_units = Column(Float, default=0)
+    max_units = Column(Float, default=1)
+    overload_threshold = Column(Float, default=1)
+    underload_threshold = Column(Float, default=0)
+    active = Column(Boolean, default=True)
+
+
+class FacultyConflictException(Base):
+    __tablename__ = "faculty_conflict_exceptions"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    faculty_id = Column(String, index=True)
+    assignment_ids_json = Column(Text, default="[]")
+    reason = Column(Text, default="")
+    evidence_document_ids = Column(Text, default="[]")
+    state = Column(String, default="OPEN")
+    approved_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TeachingPlan(Base):
+    __tablename__ = "teaching_plans"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    section_id = Column(String, ForeignKey("sections.id"), index=True)
+    term = Column(String, index=True)
+    objectives = Column(Text, default="")
+    status = Column(String, default="draft")
+    version = Column(Integer, default=1)
+    created_by = Column(String)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SyllabusProgress(Base):
+    __tablename__ = "syllabus_progress"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    teaching_plan_id = Column(String, ForeignKey("teaching_plans.id"), index=True)
+    topic = Column(String)
+    planned_date = Column(Date, nullable=True)
+    completed_date = Column(Date, nullable=True)
+    status = Column(String, default="planned")
+    evidence_document_ids = Column(Text, default="[]")
+
+
+class AcademicMilestone(Base):
+    __tablename__ = "academic_milestones"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    term = Column(String, index=True)
+    title = Column(String)
+    due_at = Column(DateTime)
+    status = Column(String, default="planned")
+    owner_id = Column(String, default="")
+    completed_at = Column(DateTime, nullable=True)
+
+
+class CourseCompletion(Base):
+    __tablename__ = "course_completions"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    section_id = Column(String, ForeignKey("sections.id"), index=True)
+    term = Column(String, index=True)
+    completion_pct = Column(Float, default=0)
+    verified_by = Column(String, default="")
+    status = Column(String, default="in_progress")
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class DeliveryException(Base):
+    __tablename__ = "delivery_exceptions"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    section_id = Column(String, ForeignKey("sections.id"), nullable=True, index=True)
+    kind = Column(String)
+    description = Column(Text, default="")
+    state = Column(String, default="OPEN")
+    owner_id = Column(String, default="")
+    evidence_document_ids = Column(Text, default="[]")
+    status_version = Column(Integer, default=0)
+
+class ClassSession(Base):
+    __tablename__ = "class_sessions"
+    __table_args__ = (
+        UniqueConstraint("timetable_entry_id", "session_date", name="uq_class_session_timetable_date"),
+        Index("ix_class_sessions_faculty_date", "faculty_id", "session_date"),
+        Index("ix_class_sessions_section_date", "section_id", "session_date"),
+    )
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    allocation_id = Column(String, ForeignKey("teaching_allocations.id"), nullable=True, index=True)
+    timetable_entry_id = Column(String, ForeignKey("timetable_entries.id"), nullable=True, index=True)
+    section_id = Column(String, ForeignKey("sections.id"), index=True)
+    faculty_id = Column(String, ForeignKey("staff_members.id"), index=True)
+    session_date = Column(Date, index=True)
+    scheduled_start = Column(DateTime, nullable=True)
+    scheduled_end = Column(DateTime, nullable=True)
+    actual_start = Column(DateTime, nullable=True)
+    actual_end = Column(DateTime, nullable=True)
+    room = Column(String, default="")
+    topic = Column(String, default="")
+    delivery_type = Column(String, default="")
+    status = Column(String, default="scheduled", index=True)
+    checked_in_at = Column(DateTime, nullable=True)
+    checked_in_by = Column(String, default="")
+    finalized_at = Column(DateTime, nullable=True)
+    finalized_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Assignment(Base):
     __tablename__ = "assignments"
     id = Column(String, primary_key=True)
@@ -1240,6 +2154,46 @@ class Assignment(Base):
     created_by = Column(String, default="")
     updated_by = Column(String, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    max_marks = Column(Float, default=100)
+    allow_late = Column(Boolean, default=True)
+    faculty_id = Column(String, ForeignKey("staff_members.id"), nullable=True)
+    teaching_allocation_id = Column(String, ForeignKey("teaching_allocations.id"), nullable=True)
+    published_at = Column(DateTime, nullable=True)
+    published_by = Column(String, default="")
+    closed_at = Column(DateTime, nullable=True)
+    closed_by = Column(String, default="")
+
+
+class AssignmentSubmission(Base):
+    __tablename__ = "assignment_submissions"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    assignment_id = Column(String, ForeignKey("assignments.id"), index=True)
+    student_id = Column(String, ForeignKey("students.id"), index=True)
+    submitted_at = Column(DateTime, default=datetime.utcnow)
+    attempt_no = Column(Integer, default=1)
+    status = Column(String, default="submitted")
+    is_late = Column(Boolean, default=False)
+    submission_text = Column(Text, default="")
+    file_name = Column(String, default="")
+    file_url = Column(String, default="")
+    returned_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AssignmentEvaluation(Base):
+    __tablename__ = "assignment_evaluations"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    submission_id = Column(String, ForeignKey("assignment_submissions.id"), unique=True, index=True)
+    evaluator_id = Column(String, ForeignKey("staff_members.id"), nullable=True)
+    marks_awarded = Column(Float, nullable=True)
+    feedback = Column(Text, default="")
+    internal_comment = Column(Text, default="")
+    status = Column(String, default="evaluated")
+    evaluated_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -1309,6 +2263,12 @@ class LeaveRequest(Base):
     reason = Column(String, default="")
     status = Column(String, default="pending")  # pending/approved/rejected
     decided_by = Column(String, default="")
+    workflow_instance_id = Column(String, ForeignKey("workflow_instances.id"), nullable=True, unique=True, index=True)
+    requested_by = Column(String, default="", index=True)
+    half_day = Column(Boolean, default=False)
+    submitted_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    returned_comment = Column(Text, default="")
 
 
 class JobPosting(Base):
@@ -1354,6 +2314,84 @@ class TransportRoute(Base):
     vehicle_no = Column(String, default="")
     seats = Column(Integer, default=40)
     seats_taken = Column(Integer, default=0)
+    status = Column(String, default="active", index=True)
+
+
+class TransportStop(Base):
+    __tablename__ = "transport_stops"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    route_id = Column(String, ForeignKey("transport_routes.id"), index=True)
+    name = Column(String)
+    sequence = Column(Integer, default=1)
+    address = Column(String, default="")
+    pickup_time = Column(String, default="")
+    drop_time = Column(String, default="")
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+
+
+class TransportVehicle(Base):
+    __tablename__ = "transport_vehicles"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    number = Column(String, unique=True, index=True)
+    kind = Column(String, default="Bus")
+    capacity = Column(Integer, default=40)
+    status = Column(String, default="available")
+    driver_id = Column(String, nullable=True)
+
+
+class TransportDriver(Base):
+    __tablename__ = "transport_drivers"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    name = Column(String)
+    employee_id = Column(String, default="")
+    phone = Column(String, default="")
+    license_no = Column(String, default="")
+    license_expiry = Column(Date, nullable=True)
+    status = Column(String, default="active")
+    user_id = Column(String, nullable=True)
+
+
+class TransportRequest(Base):
+    __tablename__ = "transport_requests"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    student_id = Column(String, index=True)
+    route_id = Column(String)
+    stop_id = Column(String)
+    status = Column(String, default="pending")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TransportAllocation(Base):
+    __tablename__ = "transport_allocations"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    student_id = Column(String, index=True)
+    route_id = Column(String)
+    stop_id = Column(String)
+    vehicle_id = Column(String)
+    driver_id = Column(String, nullable=True)
+    status = Column(String, default="active")
+    assigned_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TransportTrip(Base):
+    __tablename__ = "transport_trips"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    vehicle_id = Column(String)
+    driver_id = Column(String)
+    trip_type = Column(String)
+    status = Column(String, default="running")
+    started_at = Column(DateTime, default=datetime.utcnow)
+    ended_at = Column(DateTime, nullable=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class TransportRequest(Base):
@@ -1423,6 +2461,55 @@ class ResearchProject(Base):
     agency = Column(String, default="")
     grant_amount = Column(Float, default=0)
     status = Column(String, default="ongoing")  # proposed/ongoing/completed
+    owner_id = Column(String, ForeignKey("staff_members.id"), nullable=True, index=True)
+    category = Column(String, default="")
+    summary = Column(Text, default="")
+    start_date = Column(Date, nullable=True)
+    expected_end_date = Column(Date, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ResearchProgress(Base):
+    __tablename__ = "research_progress"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    project_id = Column(String, ForeignKey("research_projects.id"), index=True)
+    author_id = Column(String, ForeignKey("users.id"), index=True)
+    author_name = Column(String, default="")
+    content = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ResearchMilestone(Base):
+    __tablename__ = "research_milestones"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    project_id = Column(String, ForeignKey("research_projects.id"), index=True)
+    title = Column(String)
+    due_date = Column(Date, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    completed_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ResearchPublication(Base):
+    __tablename__ = "research_publications"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    owner_id = Column(String, ForeignKey("staff_members.id"), index=True)
+    title = Column(String)
+    publication_type = Column(String, default="journal")
+    venue = Column(String, default="")
+    authors = Column(Text, default="")
+    publication_date = Column(Date, nullable=True)
+    doi_url = Column(String, default="")
+    volume_issue_pages = Column(String, default="")
+    status = Column(String, default="draft")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 
 class Accreditation(Base):

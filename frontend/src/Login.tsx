@@ -52,6 +52,10 @@ export default function Login({ onDone, onBack }: { onDone: (u: any) => void; on
   }
 
   const shown = offices.filter(o => filter === 0 || o.level === filter)
+  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    submit()
+  }
 
   return (
     <div className="auth">
@@ -86,19 +90,21 @@ export default function Login({ onDone, onBack }: { onDone: (u: any) => void; on
 
           {err && <div className="auth-err">{err}</div>}
 
-          <div className="auth-field">
-            <label>Username</label>
-            <input value={username} onChange={e => setUsername(e.target.value)}
-              placeholder="e.g. student" onKeyDown={e => e.key === 'Enter' && submit()} />
-          </div>
-          <div className="auth-field">
-            <label>Password</label>
-            <input type="password" value={password} onChange={e => setPassword(e.target.value)}
-              placeholder="••••••••" onKeyDown={e => e.key === 'Enter' && submit()} />
-          </div>
-          <button className="auth-submit" onClick={submit} disabled={busy}>
-            {busy ? 'Signing in…' : 'Sign in →'}
-          </button>
+          <form onSubmit={handleSubmit}>
+            <div className="auth-field">
+              <label>Username</label>
+              <input value={username} onChange={e => setUsername(e.target.value)}
+                placeholder="e.g. student" autoComplete="username" />
+            </div>
+            <div className="auth-field">
+              <label>Password</label>
+              <input type="password" value={password} onChange={e => setPassword(e.target.value)}
+                placeholder="••••••••" autoComplete="current-password" />
+            </div>
+            <button className="auth-submit" type="submit" disabled={busy}>
+              {busy ? 'Signing in…' : 'Sign in →'}
+            </button>
+          </form>
 
           <div className="auth-demo-head">
             <span className="t">Demo accounts · {offices.length || 40} offices</span>

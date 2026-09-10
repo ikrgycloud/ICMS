@@ -83,6 +83,47 @@ def _invoice_display_amounts(invoice, payment_total=None):
             "amount": total, "paid": paid, "balance": balance}
 
 
+def _format_fee_category(value: str | None):
+    if not value:
+        return "Uncategorised"
+    return value.replace("_", " ").strip().title()
+
+
+def _invoice_fee_category_details(s, invoice):
+    lines = []
+    if invoice and invoice.fee_structure_id:
+        lines = s.query(D.FeeStructureLine).filter(D.FeeStructureLine.fee_structure_id == invoice.fee_structure_id).all()
+
+    categories = {}
+    for line in lines:
+        head = s.get(D.FeeHead, line.fee_head_id)
+        if not head:
+            continue
+        category = _format_fee_category(head.category)
+        if category not in categories:
+            categories[category] = {"fee_category_id": None, "fee_category": category,
+                                    "assigned": 0.0, "paid": 0.0, "balance": 0.0}
+        categories[category]["assigned"] += float(line.amount or 0)
+
+    if not categories:
+        summary = [{"fee_category_id": None, "fee_category": "Uncategorised",
+                    "assigned": float(invoice.amount or 0), "paid": float(invoice.paid or 0),
+                    "balance": float((invoice.amount or 0) - (invoice.paid or 0))}]
+        return {"fee_category_id": None, "fee_category": "Uncategorised", "categories": summary}
+
+    summaries = []
+    for category in categories:
+        assigned = round(categories[category]["assigned"], 2)
+        paid = round(min(float(invoice.paid or 0), assigned), 2)
+        balance = round(max(assigned - paid, 0), 2)
+        summaries.append({"fee_category_id": None, "fee_category": category,
+                          "assigned": assigned, "paid": paid, "balance": balance})
+
+    summaries.sort(key=lambda x: x["fee_category"])
+    primary = summaries[0]["fee_category"] if len(summaries) == 1 else "Mixed"
+    return {"fee_category_id": None, "fee_category": primary, "categories": summaries}
+
+
 def _settle_payment(s, payment, actor=""):
     """Idempotently allocate a confirmed payment and create its official receipt."""
     if payment.status not in {"success", "cleared"}:
@@ -433,6 +474,8 @@ def whoami(ctx=Depends(auth), s=Depends(db)):
 
 def _student_or_404(s, ctx):
     st = s.query(D.Student).filter(D.Student.user_id == ctx["sub"]).first()
+    if not st and ctx.get("scope_ref"):
+        st = s.query(D.Student).get(ctx["scope_ref"])
     if not st:
         raise HTTPException(404, "No student linked to this login")
     return st
@@ -783,14 +826,21 @@ def _source_label(created_by: str = "", owner_office_n: int | None = None, fallb
 
 def _section_schedule_string(s, section_id: str, fallback: str = ""):
     rows = (
-        s.query(D.TimetableEntry)
+        s.query(D.TimetableEntry).join(D.TimetablePlanWorkflow, D.TimetablePlanWorkflow.timetable_entry_id == D.TimetableEntry.id)
         .filter(D.TimetableEntry.section_id == section_id, D.TimetableEntry.status == "active")
+        .filter(D.TimetablePlanWorkflow.status == "Published")
         .order_by(D.TimetableEntry.day_of_week, D.TimetableEntry.start_time)
         .all()
     )
     if not rows:
         return fallback
     return ", ".join(f"{_day_name(row.day_of_week)} {row.start_time}-{row.end_time}" for row in rows[:3])
+
+
+def _published_section_ids(s, sections):
+    ids = [x.id for x in sections]
+    if not ids: return set()
+    return {x.section_id for x in s.query(D.TimetableEntry.section_id).join(D.TimetablePlanWorkflow, D.TimetablePlanWorkflow.timetable_entry_id == D.TimetableEntry.id).filter(D.TimetableEntry.section_id.in_(ids), D.TimetableEntry.status == "active", D.TimetablePlanWorkflow.status == "Published").distinct().all()}
 
 
 def _student_course_view_row(s, st, enrollment, sections, course_map, faculty_names, pref_map):
@@ -850,11 +900,12 @@ def _student_today_classes_payload(s, st):
     section_ids = list(sections.keys())
     today = PORTAL_TODAY
     rows = (
-        s.query(D.TimetableEntry)
+        s.query(D.TimetableEntry).join(D.TimetablePlanWorkflow, D.TimetablePlanWorkflow.timetable_entry_id == D.TimetableEntry.id)
         .filter(
             D.TimetableEntry.section_id.in_(section_ids) if section_ids else False,
             D.TimetableEntry.day_of_week == today.weekday(),
             D.TimetableEntry.status == "active",
+            D.TimetablePlanWorkflow.status == "Published",
             or_(D.TimetableEntry.effective_from == None, D.TimetableEntry.effective_from <= today),
             or_(D.TimetableEntry.effective_to == None, D.TimetableEntry.effective_to >= today),
         )
@@ -2728,23 +2779,44 @@ def student_fees(ctx=Depends(auth), s=Depends(db)):
         .all()
     )
     invoice_data = []
+    category_buckets = {}
     for row in invoices:
         amounts = _invoice_display_amounts(row)
-        invoice_data.append({"id": row.id, "term": row.term, "semester": semesters.get(structures[row.fee_structure_id].semester_id, row.term) if row.fee_structure_id in structures else row.term, **amounts, "status": row.status, "due_date": row.due_date.isoformat() if row.due_date else ""})
+        invoice_details = _invoice_fee_category_details(s, row)
+        invoice_entry = {"id": row.id, "term": row.term,
+                         "semester": semesters.get(structures[row.fee_structure_id].semester_id, row.term) if row.fee_structure_id in structures else row.term,
+                         **amounts, "status": row.status, "due_date": row.due_date.isoformat() if row.due_date else "",
+                         "fee_category_id": invoice_details["fee_category_id"],
+                         "fee_category": invoice_details["fee_category"],
+                         "categories": invoice_details["categories"]}
+        invoice_data.append(invoice_entry)
+        for category in invoice_details["categories"]:
+            bucket = category_buckets.setdefault(category["fee_category"], {"fee_category_id": None,
+                                                                           "fee_category": category["fee_category"],
+                                                                           "assigned": 0.0, "paid": 0.0,
+                                                                           "balance": 0.0})
+            bucket["assigned"] += category["assigned"]
+            bucket["paid"] += category["paid"]
+            bucket["balance"] += category["balance"]
+    payment_rows = []
+    for row in payments:
+        invoice = s.get(D.FeeInvoice, row.invoice_id)
+        invoice_details = _invoice_fee_category_details(s, invoice) if invoice else {"fee_category_id": None, "fee_category": "Uncategorised", "categories": []}
+        payment_rows.append({
+            "id": row.id,
+            "invoice_id": row.invoice_id,
+            "amount": row.amount,
+            "method": row.method,
+            "reference": row.reference,
+            "fee_category_id": invoice_details["fee_category_id"],
+            "fee_category": invoice_details["fee_category"],
+            "at": row.at.isoformat() if row.at else "",
+        })
     return {
         "summary": {"balance": round(sum(item["balance"] for item in invoice_data), 2)},
         "invoices": invoice_data,
-        "payments": [
-            {
-                "id": row.id,
-                "invoice_id": row.invoice_id,
-                "amount": row.amount,
-                "method": row.method,
-                "reference": row.reference,
-                "at": row.at.isoformat() if row.at else "",
-            }
-            for row in payments
-        ],
+        "payments": payment_rows,
+        "categories": sorted(category_buckets.values(), key=lambda x: x["fee_category"]),
     }
 
 
@@ -3225,10 +3297,387 @@ def student_library_loans(ctx=Depends(auth), s=Depends(db)):
     }
 
 
+@router.get("/payroll/runs")
+def payroll_runs(ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") not in (23, 24, 25):
+        raise HTTPException(403, "Not allowed")
+
+    runs = s.query(D.PayrollRun).order_by(desc(D.PayrollRun.created_at)).all()
+    return {
+        "runs": [
+            {
+                "id": row.id,
+                "payroll_month": row.payroll_month,
+                "run_name": row.run_name,
+                "status": row.status,
+                "payment_date": row.payment_date.isoformat() if row.payment_date else None,
+            }
+            for row in runs
+        ]
+    }
+
+
+def _ensure_payroll_run_entries(s, run):
+    staff_rows = s.query(D.StaffMember).filter(D.StaffMember.status == "active").order_by(D.StaffMember.name).all()
+    for index, staff in enumerate(staff_rows, start=1):
+        payroll_emp = (
+            s.query(D.PayrollEmployee)
+            .filter(D.PayrollEmployee.staff_member_id == staff.id)
+            .first()
+        )
+        if not payroll_emp:
+            payroll_emp = D.PayrollEmployee(
+                id=f"payroll_emp_{staff.id}",
+                tenant_id=TENANT,
+                staff_member_id=staff.id,
+                employee_code=staff.emp_id or f"EMP-{index:03d}",
+                bank_account_no=f"100{index:05d}",
+                bank_ifsc="ICMS0001",
+                pan_no=f"PAN{index:05d}",
+                pay_mode="bank_transfer",
+                status="active",
+            )
+            s.add(payroll_emp)
+            s.flush()
+
+        structure = (
+            s.query(D.PayrollSalaryStructure)
+            .filter(D.PayrollSalaryStructure.employee_id == payroll_emp.id)
+            .first()
+        )
+        if not structure:
+            base_salary = 22000 + (index * 2400)
+            s.add(D.PayrollSalaryStructure(
+                id=f"payroll_struct_{payroll_emp.id}",
+                tenant_id=TENANT,
+                employee_id=payroll_emp.id,
+                basic_pay=base_salary,
+                hra=base_salary * 0.18,
+                special_allowance=base_salary * 0.08,
+                conveyance_allowance=1800,
+                medical_allowance=1200,
+                other_earnings=0,
+                pf_employee_share=base_salary * 0.12,
+                professional_tax=200,
+                income_tax=base_salary * 0.02,
+                loan_deduction=0,
+                advance_deduction=0,
+                other_deductions=0,
+                effective_from=datetime.utcnow(),
+            ))
+
+    s.flush()
+    existing_employee_ids = {
+        row.employee_id
+        for row in s.query(D.PayrollEntry.employee_id).filter(D.PayrollEntry.run_id == run.id).all()
+    }
+    employees = s.query(D.PayrollEmployee).filter(D.PayrollEmployee.status == "active").all()
+    added = 0
+    for emp in employees:
+        if emp.id in existing_employee_ids:
+            continue
+        structure = (
+            s.query(D.PayrollSalaryStructure)
+            .filter(D.PayrollSalaryStructure.employee_id == emp.id)
+            .order_by(D.PayrollSalaryStructure.effective_from.desc())
+            .first()
+        )
+        if not structure:
+            continue
+
+        gross_salary = sum((
+            structure.basic_pay,
+            structure.hra,
+            structure.special_allowance,
+            structure.conveyance_allowance,
+            structure.medical_allowance,
+            structure.other_earnings,
+        ))
+        total_deductions = sum((
+            structure.pf_employee_share,
+            structure.professional_tax,
+            structure.income_tax,
+            structure.loan_deduction,
+            structure.advance_deduction,
+            structure.other_deductions,
+        ))
+        s.add(D.PayrollEntry(
+            id=uid(),
+            tenant_id=TENANT,
+            run_id=run.id,
+            employee_id=emp.id,
+            gross_salary=gross_salary,
+            total_earnings=gross_salary,
+            total_deductions=total_deductions,
+            net_salary=gross_salary - total_deductions,
+            payment_status="pending",
+        ))
+        added += 1
+    return added
+
+
+@router.post("/payroll/runs")
+def create_payroll_run(body: dict, ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") not in (24, 25):
+        raise HTTPException(403, "Not allowed")
+
+    payroll_month = body.get("payroll_month")
+    run_name = body.get("run_name", f"{payroll_month} Payroll Run")
+    if not payroll_month:
+        raise HTTPException(400, "payroll_month is required")
+
+    existing = s.query(D.PayrollRun).filter(D.PayrollRun.payroll_month == payroll_month).first()
+    if existing:
+        added = _ensure_payroll_run_entries(s, existing)
+        s.commit()
+        return {"run_id": existing.id, "status": existing.status, "entries_added": added}
+
+    run = D.PayrollRun(
+        id=uid(),
+        tenant_id=TENANT,
+        payroll_month=payroll_month,
+        run_name=run_name,
+        status="generated",
+        generated_by=ctx["sub"],
+    )
+    s.add(run)
+    s.flush()
+
+    _ensure_payroll_run_entries(s, run)
+
+    s.commit()
+    return {"run_id": run.id, "status": "generated"}
+
+
+@router.get("/payroll/runs/{run_id}")
+def payroll_run_details(run_id: str, ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") not in (23, 24, 25):
+        raise HTTPException(403, "Not allowed")
+
+    run = s.query(D.PayrollRun).get(run_id)
+    if not run:
+        raise HTTPException(404, "Run not found")
+
+    entries = s.query(D.PayrollEntry).filter(D.PayrollEntry.run_id == run_id).all()
+    out_entries = []
+    for item in entries:
+        emp = s.query(D.PayrollEmployee).get(item.employee_id)
+        staff = s.query(D.StaffMember).get(emp.staff_member_id) if emp else None
+        out_entries.append(
+            {
+                "id": item.id,
+                "employee_id": item.employee_id,
+                "employee_name": staff.name if staff else emp.employee_code if emp else item.employee_id,
+                "employee_code": emp.employee_code if emp else "",
+                "designation": staff.designation if staff else "",
+                "gross_salary": item.gross_salary,
+                "total_deductions": item.total_deductions,
+                "net_salary": item.net_salary,
+                "payment_status": item.payment_status,
+            }
+        )
+
+    return {
+        "run": {
+            "id": run.id,
+            "payroll_month": run.payroll_month,
+            "run_name": run.run_name,
+            "status": run.status,
+        },
+        "entries": out_entries,
+    }
+
+
+@router.post("/payroll/entries/{entry_id}/status")
+def update_payroll_entry_status(entry_id: str, body: dict, ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") != 23:
+        raise HTTPException(403, "Only Accounts Office can post payroll payments")
+
+    entry = s.query(D.PayrollEntry).get(entry_id)
+    if not entry:
+        raise HTTPException(404, "Payroll entry not found")
+
+    new_status = (body or {}).get("status", "paid")
+    allowed = {"pending", "approved", "paid", "failed"}
+    if new_status not in allowed:
+        raise HTTPException(400, "Invalid payroll status")
+
+    entry.payment_status = new_status
+    entry.updated_at = datetime.utcnow()
+
+    if new_status == "paid":
+        posting = (
+            s.query(D.PayrollPaymentPosting)
+            .filter(D.PayrollPaymentPosting.entry_id == entry.id)
+            .first()
+        )
+        if not posting:
+            posting = D.PayrollPaymentPosting(
+                id=uid(),
+                tenant_id=TENANT,
+                entry_id=entry.id,
+                payment_method="bank_transfer",
+                bank_ref_no=f"PAY-{entry.id[:8]}",
+                posted_by=ctx["sub"],
+                posted_at=datetime.utcnow(),
+                status="posted",
+                remarks="Posted from payroll UI",
+            )
+            s.add(posting)
+
+    s.commit()
+    return {"status": entry.payment_status, "entry_id": entry.id}
+
+
+@router.get("/payroll/me")
+def my_payroll(month: str = None, ctx=Depends(auth), s=Depends(db)):
+    stf = _staff_or_404(s, ctx)
+
+    payroll_emp = (
+        s.query(D.PayrollEmployee)
+        .filter(D.PayrollEmployee.staff_member_id == stf.id, D.PayrollEmployee.status == "active")
+        .order_by(desc(D.PayrollEmployee.created_at))
+        .first()
+    )
+    if not payroll_emp:
+        raise HTTPException(404, "Payroll profile not found")
+
+    structure = (
+        s.query(D.PayrollSalaryStructure)
+        .filter(D.PayrollSalaryStructure.employee_id == payroll_emp.id)
+        .order_by(desc(D.PayrollSalaryStructure.effective_from))
+        .first()
+    )
+
+    payroll_entries = (
+        s.query(D.PayrollEntry)
+        .filter(D.PayrollEntry.employee_id == payroll_emp.id)
+        .order_by(desc(D.PayrollEntry.created_at))
+        .all()
+    )
+    runs = {run.id: run for run in s.query(D.PayrollRun).all()}
+    available_months = sorted(
+        {runs[item.run_id].payroll_month for item in payroll_entries if item.run_id in runs},
+        reverse=True,
+    )
+    entry = next(
+        (item for item in payroll_entries if not month or (runs.get(item.run_id) and runs[item.run_id].payroll_month == month)),
+        None,
+    )
+
+    paid_entry = (
+        s.query(D.PayrollEntry)
+        .filter(
+            D.PayrollEntry.employee_id == payroll_emp.id,
+            D.PayrollEntry.payment_status == "paid",
+        )
+        .order_by(desc(D.PayrollEntry.created_at))
+        .first()
+    )
+
+    run = s.query(D.PayrollRun).get(entry.run_id) if entry else None
+    paid_run = s.query(D.PayrollRun).get(paid_entry.run_id) if paid_entry else None
+    posting = None
+    if entry:
+        posting = (
+            s.query(D.PayrollPaymentPosting)
+            .filter(D.PayrollPaymentPosting.entry_id == entry.id)
+            .order_by(desc(D.PayrollPaymentPosting.posted_at))
+            .first()
+        )
+    paid_posting = None
+    if paid_entry:
+        paid_posting = (
+            s.query(D.PayrollPaymentPosting)
+            .filter(D.PayrollPaymentPosting.entry_id == paid_entry.id)
+            .order_by(desc(D.PayrollPaymentPosting.posted_at))
+            .first()
+        )
+
+    dept = s.query(D.Department).get(stf.dept_id) if stf.dept_id else None
+
+    earnings = []
+    deductions = []
+    if structure:
+        earnings = [
+            {"label": "Basic pay", "amount": structure.basic_pay or 0},
+            {"label": "House rent allowance", "amount": structure.hra or 0},
+            {"label": "Special allowance", "amount": structure.special_allowance or 0},
+            {"label": "Conveyance allowance", "amount": structure.conveyance_allowance or 0},
+            {"label": "Medical allowance", "amount": structure.medical_allowance or 0},
+            {"label": "Other earnings", "amount": structure.other_earnings or 0},
+        ]
+        deductions = [
+            {"label": "Provident fund", "amount": structure.pf_employee_share or 0},
+            {"label": "Professional tax", "amount": structure.professional_tax or 0},
+            {"label": "Income tax", "amount": structure.income_tax or 0},
+            {"label": "Loan deduction", "amount": structure.loan_deduction or 0},
+            {"label": "Advance deduction", "amount": structure.advance_deduction or 0},
+            {"label": "Other deductions", "amount": structure.other_deductions or 0},
+        ]
+
+    return {
+        "profile": {
+            "name": stf.name,
+            "emp_id": stf.emp_id,
+            "designation": stf.designation,
+            "department": dept.name if dept else "",
+            "email": stf.email,
+            "phone": stf.phone or None,
+            "employee_code": payroll_emp.employee_code,
+            "bank_account_no": payroll_emp.bank_account_no,
+            "bank_ifsc": payroll_emp.bank_ifsc,
+            "pay_mode": payroll_emp.pay_mode,
+        },
+        "run": {
+            "id": run.id if run else None,
+            "payroll_month": run.payroll_month if run else None,
+            "run_name": run.run_name if run else None,
+            "payment_date": run.payment_date.isoformat() if run and run.payment_date else None,
+            "status": run.status if run else None,
+        },
+        "entry": {
+            "id": entry.id if entry else None,
+            "gross_salary": entry.gross_salary if entry else 0,
+            "total_earnings": entry.total_earnings if entry else 0,
+            "total_deductions": entry.total_deductions if entry else 0,
+            "net_salary": entry.net_salary if entry else 0,
+            "payment_status": entry.payment_status if entry else "pending",
+            "payslip_status": entry.payslip_status if entry else "not_generated",
+            "present_days": entry.present_days if entry else 0,
+            "paid_days": entry.paid_days if entry else 0,
+            "leave_days": entry.leave_days if entry else 0,
+        } if entry else None,
+        "payment": {
+            "payment_method": posting.payment_method if posting else payroll_emp.pay_mode,
+            "bank_ref_no": posting.bank_ref_no if posting else "",
+            "posted_at": posting.posted_at.isoformat() if posting and posting.posted_at else None,
+            "status": posting.status if posting else "pending",
+        },
+        "available_months": available_months,
+        "last_paid_receipt": {
+            "receipt_no": paid_posting.bank_ref_no if paid_posting else paid_entry.id if paid_entry else None,
+            "payroll_month": paid_run.payroll_month if paid_run else None,
+            "run_name": paid_run.run_name if paid_run else None,
+            "gross_salary": paid_entry.gross_salary if paid_entry else 0,
+            "total_deductions": paid_entry.total_deductions if paid_entry else 0,
+            "net_salary": paid_entry.net_salary if paid_entry else 0,
+            "payment_date": paid_posting.posted_at.isoformat() if paid_posting and paid_posting.posted_at else paid_run.payment_date.isoformat() if paid_run and paid_run.payment_date else None,
+            "payment_method": paid_posting.payment_method if paid_posting else payroll_emp.pay_mode,
+            "bank_ref_no": paid_posting.bank_ref_no if paid_posting else "",
+            "status": paid_entry.payment_status if paid_entry else None,
+        } if paid_entry else None,
+        "earnings": earnings,
+        "deductions": deductions,
+    }
+
+
 @router.get("/faculty/home")
 def faculty_home(ctx=Depends(auth), s=Depends(db)):
     stf = _staff_or_404(s, ctx)
     sections = s.query(D.Section).filter(D.Section.faculty_person_id == stf.id).all()
+    published_ids = _published_section_ids(s, sections)
+    sections = [x for x in sections if x.id in published_ids]
     section_ids = [row.id for row in sections]
     enrolled_count = 0
     if section_ids:

@@ -111,7 +111,7 @@ docker compose up --build
 ```
 
 - **Frontend** → http://localhost:8080
-- **Backend API** → http://localhost:8000 (interactive docs at `/docs`)
+- **Backend API** → http://localhost:8010 (interactive docs at `/docs`; override with `ICMS_BACKEND_PORT`)
 - **PostgreSQL** → localhost:5432 (`icms` / `icms_secret`)
 
 The backend waits for Postgres, creates all tables, and seeds the 40 offices, 268 roles,
