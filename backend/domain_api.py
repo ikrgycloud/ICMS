@@ -2624,8 +2624,8 @@ def create_program_proposal(body: ProgramProposalIn, ctx=Depends(auth), s=Depend
 @router.post("/programs/proposals/{proposal_id}/submit")
 def submit_program_proposal(proposal_id:str,body:AcademicProposalTransitionIn,ctx=Depends(auth),s=Depends(db)):
     p=require_academic_object(s, ctx, s.query(D.AcademicProposal).filter(D.AcademicProposal.id == proposal_id).with_for_update().first(), "submit", "Programme proposal")
-    if not p or p.proposal_type!="program" or p.submitted_by!=ctx["sub"] or p.state!="DRAFT" or p.status_version!=body.expected_status_version: raise HTTPException(409,"Programme proposal cannot be submitted")
-    p.state="SUBMITTED";p.status_version+=1;p.updated_at=datetime.utcnow();_proposal_event(s,p,ctx,"DRAFT","SUBMITTED",body.reason);write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.program.proposal.submit",f"academic_proposal:{p.id}","DRAFT","SUBMITTED",body.reason,commit=False);s.commit();return {"proposal":_proposal_payload(s,p)}
+    if not p or p.proposal_type!="program" or p.submitted_by!=ctx["sub"] or p.state not in {"DRAFT", "RETURNED"} or p.status_version!=body.expected_status_version: raise HTTPException(409,"Programme proposal cannot be submitted")
+    previous=p.state; p.state="RESUBMITTED" if previous == "RETURNED" else "SUBMITTED";p.status_version+=1;p.updated_at=datetime.utcnow();_proposal_event(s,p,ctx,previous,p.state,body.reason);write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.program.proposal.submit",f"academic_proposal:{p.id}",previous,p.state,body.reason,commit=False);s.commit();return {"proposal":_proposal_payload(s,p)}
 
 
 @router.post("/programs/proposals/{proposal_id}/decision/{decision}")
@@ -2633,11 +2633,11 @@ def decide_program_proposal(proposal_id:str,decision:str,body:AcademicProposalTr
     require(gate(s, ctx, "academics", "approve_proposal" if decision.lower() == "approve" else "reject_proposal")[0])
     p=require_tenant(s.get(D.AcademicProposal,proposal_id), ctx, "Programme proposal")
     prevent_self_approval(p, ctx)
-    if not p or p.proposal_type!="program" or p.state!="SUBMITTED" or p.status_version!=body.expected_status_version: raise HTTPException(409,"Invalid programme decision")
+    if not p or p.proposal_type!="program" or p.state not in {"SUBMITTED", "RESUBMITTED"} or p.status_version!=body.expected_status_version: raise HTTPException(409,"Invalid programme decision")
     target={"approve":"APPROVED","reject":"REJECTED","return":"RETURNED","escalate":"ESCALATED"}.get(decision.lower())
     if not target: raise HTTPException(422,"Unsupported decision")
     validate_transition(s, p, target, body.expected_status_version, ctx, body.reason)
-    claim_proposal_transition(s, p, body.expected_status_version, {"SUBMITTED"})
+    claim_proposal_transition(s, p, body.expected_status_version, {"SUBMITTED", "RESUBMITTED"})
     data=json.loads(_proposal_version(s,p).payload_json)
     if target=="APPROVED" and not data["feasibility"]["ready"]: raise HTTPException(409,"Programme lacks faculty or course readiness; escalate or revise")
     previous=p.state;p.state=target;p.status_version+=1;p.updated_at=datetime.utcnow()
