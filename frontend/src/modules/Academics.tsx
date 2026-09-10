@@ -41,8 +41,10 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
   })
 
   function load() {
-    api.sections().then(setSections).catch(() => {})
-    api.courses().then(setCourses).catch(() => {})
+    // Some endpoints may return an empty response while the database is still
+    // starting.  Keep the view renderable until a later refresh succeeds.
+    api.sections().then((response) => setSections(response ?? { sections: [] })).catch(() => setSections({ sections: [] }))
+    api.courses().then((response) => setCourses(response ?? { courses: [] })).catch(() => setCourses({ courses: [] }))
   }
 
   useEffect(() => {
@@ -142,17 +144,20 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
 
   if (!sections || !courses) return <Spinner />
 
+  const sectionRows = Array.isArray(sections.sections) ? sections.sections : []
+  const courseRows = Array.isArray(courses.courses) ? courses.courses : []
+
   return (
     <div className="fade-in">
       <PageHead
         title="Academics"
         sub="Course catalog, sections, timetable management, and targeted student notices"
-        right={<><GatedBtn can={!!caps.create_section} onClick={() => { setForm({ ...form, course_id: courses.courses[0]?.id || '' }); setShowAdd(true) }}>+ Create section</GatedBtn>{caps.assign_faculty && <button className="btn btn-out" type="button" onClick={() => go?.('source_allocation')}>Faculty allocation</button>}</>}
+        right={<><GatedBtn can={!!caps.create_section} onClick={() => { setForm({ ...form, course_id: courseRows[0]?.id || '' }); setShowAdd(true) }}>+ Create section</GatedBtn>{caps.assign_faculty && <button className="btn btn-out" type="button" onClick={() => go?.('source_allocation')}>Faculty allocation</button>}</>}
       />
 
       <div className="tabs">
-        <button className={`tab ${tab === 'sections' ? 'on' : ''}`} onClick={() => setTab('sections')} type="button">Sections ({sections.sections.length})</button>
-        <button className={`tab ${tab === 'courses' ? 'on' : ''}`} onClick={() => setTab('courses')} type="button">Course catalog ({courses.courses.length})</button>
+        <button className={`tab ${tab === 'sections' ? 'on' : ''}`} onClick={() => setTab('sections')} type="button">Sections ({sectionRows.length})</button>
+        <button className={`tab ${tab === 'courses' ? 'on' : ''}`} onClick={() => setTab('courses')} type="button">Course catalog ({courseRows.length})</button>
       </div>
 
       {tab === 'sections' && (
@@ -161,7 +166,7 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
             <table className="tbl">
               <thead><tr><th>Course</th><th>Sec</th><th>Faculty</th><th>Schedule</th><th>Room</th><th>Enrolled</th><th>Manage</th></tr></thead>
               <tbody>
-                {sections.sections.map((section: any) => (
+                {sectionRows.map((section: any) => (
                   <tr key={section.id}>
                     <td><b className="mono">{section.course_code}</b> • {section.course_title}</td>
                     <td>{section.section}</td>
@@ -189,7 +194,7 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
             <table className="tbl">
               <thead><tr><th>Code</th><th>Title</th><th>Dept</th><th>Credits</th><th>Semester</th></tr></thead>
               <tbody>
-                {courses.courses.map((course: any) => (
+                {courseRows.map((course: any) => (
                   <tr key={course.id}>
                     <td className="mono"><b>{course.code}</b></td>
                     <td>{course.title}</td>
@@ -212,7 +217,7 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
         >
           <div className="form-row"><label>Course</label>
             <select className="select" value={form.course_id} onChange={e => setForm({ ...form, course_id: e.target.value })}>
-              {courses.courses.map((course: any) => <option key={course.id} value={course.id}>{course.code} — {course.title}</option>)}
+              {courseRows.map((course: any) => <option key={course.id} value={course.id}>{course.code} — {course.title}</option>)}
             </select>
           </div>
           <div className="grid-2">
