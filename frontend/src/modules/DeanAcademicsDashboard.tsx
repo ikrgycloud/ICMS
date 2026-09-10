@@ -68,9 +68,10 @@ export default function DeanAcademicsDashboard({ go }: { go: (view: string) => v
   const readiness = data?.timetable_readiness || { completed: 0, in_progress: 0, pending: 0, conflicts: 0 }
   const curriculumSegments = valueColoredSegments(curriculumEntries.map(([label, value]) => ({ label: niceLabel(label), value: Number(value || 0) })))
   const readinessSegments = valueColoredSegments([
-    { label: 'Completed', value: Number(readiness.completed || 0) },
-    { label: 'In Progress', value: Number(readiness.in_progress || 0) },
-    { label: 'Pending', value: Number(readiness.pending || 0) },
+    { label: 'Published', value: Number(readiness.completed || 0) },
+    { label: 'In Review', value: Number(readiness.in_progress || 0) },
+    { label: 'Returned', value: Number(readiness.returned || 0) },
+    { label: 'Not Submitted', value: Number(readiness.pending || 0) },
   ])
   const readinessTotal = readinessSegments.reduce((sum, segment) => sum + segment.value, 0)
   const healthScorecard = data?.health_scorecard || []

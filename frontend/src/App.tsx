@@ -93,12 +93,22 @@ const GROUP_ORDER = ['Workspace', 'Academics', 'Services', 'Operations', 'Platfo
 const DEAN_ACADEMICS_NAV = [
   ['Workspace', 'Overview', 'overview'],
   ['Academic Planning', 'Programs', 'dean_programs'], ['Academic Planning', 'Curriculum', 'curriculum'], ['Academic Planning', 'Courses', 'courses_subjects'],
-  ['Academic Operations', 'Academic Calendar', 'academic_calendar'], ['Academic Operations', 'Timetable', 'dean_timetable'], ['Academic Operations', 'Faculty Allocation', 'dean_allocation'],
-  ['Academic Quality', 'Performance & Results', 'analytics'], ['Academic Quality', 'Academic Risk', 'dean_risk'],
+  // The workspace owns its related operational and quality tabs. Keeping each
+  // tab in this global navigation made the sidebar duplicate the on-page menu.
+  ['Academic Operations', 'Academic Calendar', 'academic_calendar'], ['Academic Operations', 'Academic Operations', 'dean_academic_operations'],
+  ['Academic Quality', 'Performance & Results', 'analytics'], ['Academic Quality', 'Academic Quality', 'dean_academic_quality'],
   ['Authority', 'My Approvals', 'decision_inbox'], ['Authority', 'My Requests', 'workflows'],
   ['Reports', 'Reports & Analytics', 'dean_reports'], ['Reports', 'Audit', 'audit'],
   ['Reference', 'Directory', 'directory'],
 ] as const
+
+// These routes are used by dashboard cards and notifications. They deliberately
+// do not appear in the sidebar: each opens the relevant contextual workspace.
+const DEAN_ACADEMICS_CONTEXT_ROUTES: Record<string, { label: string; key: string; actions: Record<string, never> }> = {
+  dean_timetable: { label: 'Academic Operations', key: 'dean_academic_operations', actions: {} },
+  dean_allocation: { label: 'Academic Operations', key: 'dean_academic_operations', actions: {} },
+  dean_risk: { label: 'Academic Quality', key: 'dean_academic_quality', actions: {} },
+}
 const DEAN_ADMINISTRATION_NAV = [
   ['Overview', 'Overview', 'administration_dashboard'],
   // Every item has its own view identity. Reusing a key here makes every
@@ -287,7 +297,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     // retained when opened from the dashboard KPI or the Principal sidebar.
     const virtualModule =
       (user?.office_n === 4 && ['faculty_staff', 'curriculum', 'courses_subjects'].includes(view))
-      || (user?.office_n === 6 && ['courses_subjects', 'decision_inbox', 'dean_programs', 'dean_timetable', 'dean_allocation', 'dean_risk', 'dean_reports', 'analytics'].includes(view))
+      || (user?.office_n === 6 && ['courses_subjects', 'decision_inbox', 'dean_programs', 'dean_academic_operations', 'dean_academic_quality', 'dean_timetable', 'dean_allocation', 'dean_risk', 'dean_reports', 'analytics'].includes(view))
       || ([10, 17].includes(user?.office_n) && view === 'source_allocation')
       || (user?.office_n === 7 && view.startsWith('administration_'))
       || ([3, 4].includes(user?.office_n) && PRINCIPAL_NAV.some(([, , key]) => key === view))
@@ -434,7 +444,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const activeAdmissionsGroupKeys = directorAdmissionsShell ? directorGroupKeys : managerGroupKeys
   const current = (
     deanAcademicsShell
-      ? Object.values(deanGroups).flat().find((module: any) => module.key === view)
+      ? Object.values(deanGroups).flat().find((module: any) => module.key === view) || DEAN_ACADEMICS_CONTEXT_ROUTES[view]
       : deanAdministrationShell
         ? Object.values(deanAdministrationGroups).flat().find((module: any) => module.key === view)
         : coordinatorShell
@@ -444,6 +454,10 @@ export default function App({ onLogout }: { onLogout: () => void }) {
             : undefined
   ) || sidebarModules.find((module: any) => module.key === view) || sidebarModules[0]
   const campusHeader = user.scope_level === 'campus' ? user.scope_ref : ''
+  const isDeanNavActive = (moduleKey: string) =>
+    view === moduleKey
+    || (moduleKey === 'dean_academic_operations' && ['dean_timetable', 'dean_allocation'].includes(view))
+    || (moduleKey === 'dean_academic_quality' && view === 'dean_risk')
 
   return (
     <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''} ${facultyShell ? 'faculty-shell' : ''} ${deanAcademicsShell ? 'dean-academics-shell' : ''} ${deanAdministrationShell ? 'dean-administration-shell' : ''} ${directorAdmissionsShell ? 'director-admissions-shell' : ''} ${admissionManagerShell ? 'admission-manager-shell' : ''}`}>
@@ -473,7 +487,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
               {((!deanAcademicsShell && !deanAdministrationShell && !admissionsOperationsShell) || ((deanAcademicsShell || deanAdministrationShell) ? !collapsedDeanGroups[group] : !collapsedDirectorGroups[group])) && ((coordinatorShell ? coordinatorGroups[group] : deanAcademicsShell ? deanGroups[group] : deanAdministrationShell ? deanAdministrationGroups[group] : principalShell ? principalGroups[group] : facultyShell ? facultyGroups[group] : admissionsOperationsShell ? activeAdmissionsGroups[group] : groups[group]) || []).map((module: any) => (
                 <button
                   key={(deanAcademicsShell || deanAdministrationShell || coordinatorShell || principalShell || facultyShell || admissionsOperationsShell) ? `${group}-${module.label}` : module.key}
-                  className={`nav-item ${(coordinatorShell ? view === module.key : facultyShell ? FACULTY_ACTIVE_LABEL[view] === module.label : view === module.key) && (!(deanAcademicsShell || deanAdministrationShell || coordinatorShell || principalShell || facultyShell || admissionsOperationsShell) || module.enabled) ? 'on' : ''} ${((principalShell || facultyShell || admissionsOperationsShell) && !module.enabled) ? 'nav-item-disabled' : ''}`}
+                  className={`nav-item ${(coordinatorShell ? view === module.key : deanAcademicsShell ? isDeanNavActive(module.key) : facultyShell ? FACULTY_ACTIVE_LABEL[view] === module.label : view === module.key) && (!(deanAcademicsShell || deanAdministrationShell || coordinatorShell || principalShell || facultyShell || admissionsOperationsShell) || module.enabled) ? 'on' : ''} ${((principalShell || facultyShell || admissionsOperationsShell) && !module.enabled) ? 'nav-item-disabled' : ''}`}
                   onClick={() => {
                     setView(module.key)
                     setSideOpen(false)
@@ -666,12 +680,17 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'mentoring':
       return user.persona === 'faculty' ? <FacultyMentoring /> : <Students caps={caps} />
     case 'academics':
-      if (user.office_n === 6) return <DeanAcademicWorkspaces />
+      if (user.office_n === 10) return <DeanAcademicWorkspaces initialTab="action" />
+      if ([6, 17].includes(user.office_n)) return <DeanAcademicWorkspaces />
       if (user.persona === 'faculty') return <FacultyCourses go={go} />
       if (user.persona === 'student') return <StudentCoursesView />
       return <Academics caps={caps} go={go} />
     case 'source_allocation':
       return <DeanAcademicWorkspaces initialTab="allocation" />
+    case 'dean_academic_operations':
+      return <DeanAcademicWorkspaces initialTab="readiness" />
+    case 'dean_academic_quality':
+      return <DeanAcademicWorkspaces initialTab="risk" />
     case 'dean_timetable':
       return <DeanAcademicWorkspaces initialTab="readiness" />
     case 'dean_allocation':

@@ -23,6 +23,14 @@ export default function DeanAcademicWorkspaces({
     [jobs, setJobs] = useState<any>(null);
   const [show, setShow] = useState(false),
     [form, setForm] = useState<any>({}),
+    [riskReviewContext, setRiskReviewContext] = useState<any>(null),
+    [reviewFocusId, setReviewFocusId] = useState(""),
+    [evidenceAction, setEvidenceAction] = useState<any>(null),
+    [evidenceText, setEvidenceText] = useState(""),
+    [evidenceError, setEvidenceError] = useState(""),
+    [verificationAction, setVerificationAction] = useState<any>(null),
+    [verificationNote, setVerificationNote] = useState(""),
+    [verificationError, setVerificationError] = useState(""),
     [saving, setSaving] = useState(false),
     [refreshing, setRefreshing] = useState(false),
     [density, setDensity] = useState<"comfortable" | "compact">("comfortable"),
@@ -131,9 +139,12 @@ export default function DeanAcademicWorkspaces({
   async function review() {
     setSaving(true);
     try {
-      await api.createQualityReview(form);
+      const result = await api.createQualityReview(form);
       setShow(false);
-      load();
+      setRiskReviewContext(null);
+      setReviewFocusId(result.review_id || "");
+      setTab("review");
+      await load();
     } catch (e: any) {
       setError(e.message || "Unable to create quality review");
     } finally {
@@ -176,16 +187,52 @@ export default function DeanAcademicWorkspaces({
       setSaving(false);
     }
   }
-  async function verify(a: any) {
+  function openEvidenceVerification(action: any) {
+    setVerificationAction(action);
+    setVerificationNote("");
+    setVerificationError("");
+  }
+  async function verify() {
+    if (!verificationAction) return;
+    if (!verificationNote.trim()) {
+      setVerificationError("Record what you checked before approving this evidence.");
+      return;
+    }
     setSaving(true);
     try {
-      await api.verifyCorrectiveAction(a.id, {
-        expected_status_version: a.status_version,
-        evidence: a.evidence,
+      await api.verifyCorrectiveAction(verificationAction.id, {
+        expected_status_version: verificationAction.status_version,
+        evidence: verificationAction.evidence,
+        verification_result: verificationNote.trim(),
       });
-      load();
+      setVerificationAction(null);
+      setVerificationNote("");
+      await load();
     } catch (e: any) {
       setError(e.message || "Unable to verify corrective action");
+    } finally {
+      setSaving(false);
+    }
+  }
+  function openEvidenceSubmission(action: any) {
+    setEvidenceAction(action);
+    setEvidenceText(action.evidence || "");
+    setEvidenceError("");
+  }
+  async function submitEvidence() {
+    if (!evidenceAction) return;
+    if (!evidenceText.trim()) {
+      setEvidenceError("Describe the completed work and provide the evidence location or reference.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.submitCorrectiveAction(evidenceAction.id, { expected_status_version: evidenceAction.status_version, evidence: evidenceText.trim(), progress: 100, owner_acknowledged: true });
+      setEvidenceAction(null);
+      setEvidenceText("");
+      await load();
+    } catch (e: any) {
+      setError(e.message || "Unable to submit corrective-action evidence");
     } finally {
       setSaving(false);
     }
@@ -263,7 +310,7 @@ export default function DeanAcademicWorkspaces({
   const filteredAllocationRows = allocationRows.filter(matchesQuery);
   const filteredReadinessExceptions = readinessExceptions.filter(matchesQuery);
   const filteredRisks = (data.risks.risks || []).filter(matchesQuery);
-  const filteredReviews = data.reviews.reviews.filter(matchesQuery);
+  const filteredReviews = data.reviews.reviews.filter((review: any) => (!reviewFocusId || review.id === reviewFocusId) && matchesQuery);
   const filteredActions = data.actions.actions.filter(matchesQuery);
   const workloadFaculty = data.workload?.faculty || [];
   const workloadOverloaded = workloadFaculty.filter((item: any) => item.status === "overload").length;
@@ -278,6 +325,8 @@ export default function DeanAcademicWorkspaces({
     ? Math.round(attainmentValues.reduce((sum: number, value: number) => sum + value, 0) / attainmentValues.length)
     : null;
   const open = (kind: string) => {
+    setRiskReviewContext(null);
+    setReviewFocusId("");
     setForm(
       kind === "allocation"
         ? {
@@ -303,6 +352,12 @@ export default function DeanAcademicWorkspaces({
             },
     );
     setTab(kind);
+    setShow(true);
+  };
+  const openRiskReview = (risk: any) => {
+    setRiskReviewContext(risk);
+    setForm({ title: `Academic readiness risk — ${risk.department || "Academic scope"}`, source_key: risk.source_key, metric_key: risk.metric_key, metric_value: risk.metric_value, threshold: risk.threshold, deviation: risk.deviation, root_cause: "", owner_id: "", due_at: "", effectiveness_measure: "" });
+    setTab("review");
     setShow(true);
   };
   const activeTabLabel = WORKSPACE_TAB_GROUPS.flatMap((group) => group.tabs).find((item) => item.key === tab)?.label || "Dean Academic Workspaces";
@@ -488,7 +543,7 @@ export default function DeanAcademicWorkspaces({
               <div className="dean-workspace-row dean-risk-row" key={x.scope_ref || i}>
                 <span><b>{x.department || "Academic scope"}</b><br /><small>{x.deviation || "Performance deviation requires review"}</small></span>
                 <Pill s={x.severity || "OPEN"} />
-                <button className="btn btn-sm btn-out" onClick={() => setTab("review")} type="button">Review risk</button>
+                <button className="btn btn-sm btn-out" onClick={() => openRiskReview(x)} type="button">Review risk</button>
               </div>
             ))}
             {!filteredRisks.length && <Empty text={data.risks.risks.length ? "No risks match your search" : "No academic risks in the current scope"} />}
@@ -563,10 +618,8 @@ export default function DeanAcademicWorkspaces({
       {tab === "review" && (
         <section className="card card-pad">
           <div className="card-h">
-            <h3>Academic quality reviews</h3>
-            <button className="btn btn-crimson" onClick={() => open("review")}>
-              Create review
-            </button>
+            <div><h3>{reviewFocusId ? "Quality review for selected risk" : "Academic quality reviews"}</h3><span className="hint">Open → Investigate → Confirm root cause → Approve action plan → Assign and verify actions → Measure effectiveness → Close.</span></div>
+            <div className="row-actions">{reviewFocusId && <button className="btn btn-sm btn-out" onClick={() => setReviewFocusId("")} type="button">Show all</button>}<button className="btn btn-crimson" onClick={() => open("review")}>Create review</button></div>
           </div>
           {filteredReviews.map((r: any) => (
             <div className="snap" key={r.id}>
@@ -574,15 +627,19 @@ export default function DeanAcademicWorkspaces({
                 <b>{r.title}</b>
                 <br />
                 {r.deviation || r.metric_key}
+                {r.closure && r.state !== "CLOSED" && <><br /><small className={r.closure.can_close ? "quality-review-ready" : "quality-review-blocked"}>{r.closure.verified_action_count} of {r.closure.action_count} corrective actions verified · {r.closure.has_effectiveness_measurement ? "Effectiveness recorded" : "Effectiveness not recorded"}<br />{r.closure.message}</small></>}
               </span>
               <span className="row-actions">
                 <Pill s={r.state} />
                 {(reviewTransitions[r.state] || []).map(
-                  ([target, label]: string[]) => (
+                  ([target, label]: string[]) => target === "EFFECTIVENESS_REVIEW" && !r.closure?.can_enter_effectiveness ? (
+                    <button key={target} className="btn btn-sm btn-out" disabled={saving} onClick={() => setTab("action")} title={r.closure?.message}>Open corrective actions</button>
+                  ) : (
                     <button
                       key={target}
                       className={`btn btn-sm ${target === "CLOSED" ? "btn-crimson" : "btn-out"}`}
-                      disabled={saving}
+                      disabled={saving || (target === "CLOSED" && !r.closure?.can_close)}
+                      title={target === "CLOSED" && !r.closure?.can_close ? r.closure?.message : undefined}
                       onClick={() => transitionReview(r, target)}
                     >
                       {label}
@@ -607,7 +664,7 @@ export default function DeanAcademicWorkspaces({
       {tab === "action" && (
         <section className="card card-pad">
           <div className="card-h">
-            <h3>Corrective actions</h3>
+            <div><h3>Corrective actions</h3><span className="hint">Owners submit evidence here; an authorized academic reviewer verifies it. The review advances only after every action is verified.</span></div>
             <button
               className="btn btn-crimson"
               disabled={!actionableReviews.length}
@@ -626,19 +683,23 @@ export default function DeanAcademicWorkspaces({
               <span>
                 <b>{a.title}</b>
                 <br />
-                {a.deadline || "No deadline"}
+                {a.deadline || "No deadline"}<br /><small>Owner: {a.owner_id || "Not assigned"} · {a.state === "EVIDENCE_SUBMITTED" ? "Evidence awaiting verification" : a.state === "VERIFIED" ? "Evidence verified" : "Awaiting owner evidence"}</small>
               </span>
               <span className="row-actions">
                 <Pill s={a.state} />
-                {a.state === "EVIDENCE_SUBMITTED" && (
+                {['OPEN', 'OVERDUE'].includes(a.state) && a.owner_id === currentUserId() && (
+                  <button className="btn btn-sm btn-out" disabled={saving} onClick={() => openEvidenceSubmission(a)}>Submit evidence</button>
+                )}
+                {a.state === "EVIDENCE_SUBMITTED" && currentOfficeNumber() === 6 && (
                   <button
                     className="btn btn-sm btn-crimson"
                     disabled={saving}
-                    onClick={() => verify(a)}
+                    onClick={() => openEvidenceVerification(a)}
                   >
-                    Verify
+                    Review evidence
                   </button>
                 )}
+                {a.state === "EVIDENCE_SUBMITTED" && currentOfficeNumber() !== 6 && <span className="hint">Submitted to Dean for verification</span>}
               </span>
             </div>
           ))}
@@ -772,17 +833,18 @@ export default function DeanAcademicWorkspaces({
       )}
       {show && (
         <Modal
+          className={tab === "review" ? "quality-review-modal" : ""}
           title={
             tab === "allocation"
               ? "Propose Faculty Allocation"
               : tab === "review"
-                ? "Create Quality Review"
+                ? (riskReviewContext ? `Review academic risk — ${riskReviewContext.department || "Academic scope"}` : "Create Quality Review")
                 : "Assign Corrective Action"
           }
-          onClose={() => setShow(false)}
+          onClose={() => { setShow(false); if (riskReviewContext) setTab("risk"); setRiskReviewContext(null); }}
           footer={
             <>
-              <button className="btn btn-out" onClick={() => setShow(false)}>
+              <button className="btn btn-out" onClick={() => { setShow(false); if (riskReviewContext) setTab("risk"); setRiskReviewContext(null); }}>
                 Cancel
               </button>
               <button
@@ -840,9 +902,11 @@ export default function DeanAcademicWorkspaces({
                 <input
                   className="inp"
                   value={form.title}
+                  readOnly={!!riskReviewContext}
                   onChange={(e) => setForm({ ...form, title: e.target.value })}
                 />
               </Field>
+              {riskReviewContext && <div className="form-row"><label>Detected risk</label><div className="inp">{riskReviewContext.deviation}<br /><small>{riskReviewContext.severity} severity · Current value: {riskReviewContext.metric_value ?? "N/A"} · Threshold: {riskReviewContext.threshold ?? "N/A"}</small></div></div>}
               <Field label="Owner user ID">
                 <input
                   className="inp"
@@ -900,10 +964,44 @@ export default function DeanAcademicWorkspaces({
                       }
                     />
                   </Field>
+                  <Field label="Due date">
+                    <input className="inp" type="datetime-local" value={form.due_at || ""} onChange={(e) => setForm({ ...form, due_at: e.target.value })} />
+                  </Field>
+                  <Field label="Effectiveness measure">
+                    <input className="inp" value={form.effectiveness_measure || ""} placeholder="Example: Average CGPA reaches 6.5 or higher" onChange={(e) => setForm({ ...form, effectiveness_measure: e.target.value })} />
+                  </Field>
                 </>
               )}
             </>
           )}
+        </Modal>
+      )}
+      {evidenceAction && (
+        <Modal
+          className="quality-evidence-modal"
+          title="Submit corrective-action evidence"
+          onClose={() => { if (!saving) { setEvidenceAction(null); setEvidenceError(""); } }}
+          footer={<><button className="btn btn-out" disabled={saving} onClick={() => { setEvidenceAction(null); setEvidenceError(""); }}>Cancel</button><button className="btn btn-crimson" disabled={saving || !evidenceText.trim()} onClick={submitEvidence}>{saving ? "Submitting..." : "Submit evidence"}</button></>}
+        >
+          <div className="evidence-action-context"><span>Corrective action</span><b>{evidenceAction.title}</b><small>Due {formatWorkspaceDate(evidenceAction.deadline)} · You are submitting as the assigned owner.</small></div>
+          <Field label="Completion evidence">
+            <textarea className="inp evidence-textarea" rows={6} value={evidenceText} placeholder="Summarize the completed work and include verifiable references, such as a document URL, meeting record, attendance register, report number, or repository path." onChange={(event) => { setEvidenceText(event.target.value); setEvidenceError(""); }} />
+          </Field>
+          <p className="hint evidence-guidance">Include what was completed, when it was completed, the outcome, and a reference that the Dean can verify. Submitted evidence becomes part of the action audit trail.</p>
+          {evidenceError && <div className="calendar-banner warn">{evidenceError}</div>}
+        </Modal>
+      )}
+      {verificationAction && (
+        <Modal
+          className="quality-evidence-modal"
+          title="Review corrective-action evidence"
+          onClose={() => { if (!saving) { setVerificationAction(null); setVerificationError(""); } }}
+          footer={<><button className="btn btn-out" disabled={saving} onClick={() => { setVerificationAction(null); setVerificationError(""); }}>Cancel</button><button className="btn btn-crimson" disabled={saving || !verificationNote.trim()} onClick={verify}>{saving ? "Verifying..." : "Verify evidence"}</button></>}
+        >
+          <div className="evidence-action-context"><span>Corrective action</span><b>{verificationAction.title}</b><small>Submitted by {verificationAction.owner_id} · Review the supplied evidence before verification.</small></div>
+          <div className="form-row"><label>Submitted evidence</label><div className="inp evidence-readonly">{verificationAction.evidence}</div></div>
+          <Field label="Verification note"><textarea className="inp evidence-textarea" rows={4} value={verificationNote} placeholder="State what you checked and why the evidence is accepted." onChange={(event) => { setVerificationNote(event.target.value); setVerificationError(""); }} /></Field>
+          {verificationError && <div className="calendar-banner warn">{verificationError}</div>}
         </Modal>
       )}
     </div>
@@ -914,6 +1012,14 @@ function currentUserId() {
     return JSON.parse(localStorage.getItem("icms_user") || "{}").id || "";
   } catch {
     return "";
+  }
+}
+
+function currentOfficeNumber() {
+  try {
+    return Number(JSON.parse(localStorage.getItem("icms_user") || "{}").office_n || 0);
+  } catch {
+    return 0;
   }
 }
 

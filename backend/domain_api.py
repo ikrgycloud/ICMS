@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import and_, desc, false, func, or_, text
+from sqlalchemy.exc import IntegrityError
 
 from core import db, auth, uid, write_audit, notify, active_delegation_for
 from database import office, TENANT, slug
@@ -110,6 +111,57 @@ def dean_dashboard(
         sections = sections.filter(D.Section.term.like(f"%{semester}%"))
     section_rows = sections.all()
     section_ids = {row.id for row in section_rows}
+
+    # Timetable readiness is an operational state owned by the Academic
+    # Coordinator workflow.  Do not infer it from course-completion rows:
+    # completion tracks delivery after teaching begins, whereas these plans
+    # record whether a section can actually be released for delivery.
+    offering_query = s.query(D.CourseOffering).filter(
+        D.CourseOffering.tenant_id == ctx["tenant_id"],
+        D.CourseOffering.course_id.in_(course_ids) if course_ids else text("1=0"),
+    )
+    if program_id:
+        offering_query = offering_query.filter(D.CourseOffering.program_id == program_id)
+    if academic_year:
+        offering_query = offering_query.filter(D.CourseOffering.academic_year == academic_year)
+    if semester is not None:
+        offering_query = offering_query.filter(D.CourseOffering.semester == semester)
+    offering_rows = offering_query.all()
+    offering_ids = {row.id for row in offering_rows}
+    # A legacy section without an offering is still valid historical data for
+    # delivery/attendance analytics, but it is not a Coordinator planning
+    # work item.  Restrict the readiness pipeline to sections with a matching
+    # operational offering so old records cannot inflate "Not Submitted".
+    coordinator_section_ids = {
+        row.id for row in section_rows if row.offering_id and row.offering_id in offering_ids
+    }
+    timetable_plans = s.query(D.TimetablePlanWorkflow).filter(
+        D.TimetablePlanWorkflow.tenant_id == ctx["tenant_id"],
+        D.TimetablePlanWorkflow.section_id.in_(coordinator_section_ids) if coordinator_section_ids else text("1=0"),
+        D.TimetablePlanWorkflow.offering_id.in_(offering_ids) if offering_ids else text("1=0"),
+    ).all()
+    plan_by_section = {}
+    plan_priority = {"Published": 5, "Approved": 4, "VP Review": 3, "HOD Review": 2,
+                     "VP Returned": 1, "HOD Returned": 1, "Draft": 0, "Closed": 0}
+    for plan in timetable_plans:
+        current = plan_by_section.get(plan.section_id)
+        if current is None or plan_priority.get(plan.status, -1) >= plan_priority.get(current.status, -1):
+            plan_by_section[plan.section_id] = plan
+    published_sections = {section_id for section_id, plan in plan_by_section.items() if plan.status == "Published"}
+    review_sections = {section_id for section_id, plan in plan_by_section.items() if plan.status in {"HOD Review", "VP Review", "Approved"}}
+    returned_sections = {section_id for section_id, plan in plan_by_section.items() if plan.status in {"HOD Returned", "VP Returned"}}
+    active_entry_ids = {
+        row[0] for row in s.query(D.TimetableEntry.id).filter(
+            D.TimetableEntry.tenant_id == ctx["tenant_id"],
+            D.TimetableEntry.section_id.in_(coordinator_section_ids) if coordinator_section_ids else text("1=0"),
+            D.TimetableEntry.status == "active",
+        ).all()
+    }
+    timetable_conflicts = s.query(D.TimetableConflict).filter(
+        D.TimetableConflict.tenant_id == ctx["tenant_id"],
+        D.TimetableConflict.status != "Resolved",
+        or_(D.TimetableConflict.left_entry_id.in_(active_entry_ids), D.TimetableConflict.right_entry_id.in_(active_entry_ids)) if active_entry_ids else text("1=0"),
+    ).all()
 
     proposals = s.query(D.AcademicProposal).filter(
         D.AcademicProposal.tenant_id == ctx["tenant_id"],
@@ -299,7 +351,7 @@ def dean_dashboard(
         "kpis": {
             "programs": len(program_rows), "departments": len(department_rows), "courses": len(course_rows),
             "faculty": len(faculty_rows), "curriculum_reviews": approval_counts["curriculum"],
-            "timetable_conflicts": sum(1 for row in exceptions if row.status != "RESOLVED"), "academic_actions": sum(1 for row in actions if row.state != "VERIFIED"),
+            "timetable_conflicts": len(timetable_conflicts) + sum(1 for row in exceptions if row.status != "RESOLVED"), "academic_actions": sum(1 for row in actions if row.state != "VERIFIED"),
             "academic_risks": len(reviews), "needs_my_decision": len(scoped_proposals),
         },
         "approvals": approval_counts,
@@ -317,7 +369,21 @@ def dean_dashboard(
         "data_as_of": datetime.utcnow().isoformat(),
         "department_performance": department_performance,
         "curriculum_status": curriculum_states,
-        "timetable_readiness": {"completed": sum(1 for row in completions if row.status == "completed"), "in_progress": sum(1 for row in completions if row.status == "in_progress"), "pending": max(0, len(section_rows) - len(completions)), "conflicts": sum(1 for row in exceptions if row.status != "RESOLVED")},
+        "timetable_readiness": {
+            "completed": len(published_sections),
+            "in_progress": len(review_sections),
+            "pending": max(0, len(coordinator_section_ids - published_sections - review_sections)),
+            "returned": len(returned_sections),
+            "conflicts": len(timetable_conflicts) + sum(1 for row in exceptions if row.status != "RESOLVED"),
+        },
+        "coordinator_workflow": {
+            "offerings": len(offering_rows), "sections": len(coordinator_section_ids),
+            "plans": len(timetable_plans), "published": len(published_sections),
+            "hod_review": sum(1 for row in timetable_plans if row.status == "HOD Review"),
+            "vp_review": sum(1 for row in timetable_plans if row.status == "VP Review"),
+            "approved": sum(1 for row in timetable_plans if row.status == "Approved"),
+            "returned": len(returned_sections), "open_conflicts": len(timetable_conflicts),
+        },
         "faculty_workload": workload_summary,
         "result_trends": [{"academic_year": year, "pass_rate": round(100 * sum(1 for row in rows if row.outcome == "passed") / len(rows), 1)} for year in sorted({row.academic_year for row in results}) for rows in [[item for item in results if item.academic_year == year]] if rows],
         "milestones": [{"id": row.id, "title": row.title, "category": row.category, "start_date": row.start_date.isoformat(), "end_date": row.end_date.isoformat() if row.end_date else None} for row in calendar],
@@ -2414,16 +2480,23 @@ def timetable_readiness(ctx=Depends(auth), s=Depends(db)):
     return {"exceptions": persisted, "summary":{"open":len(persisted),"critical":sum(1 for x in persisted if x["severity"]=="critical")}, "can_decide":resolve_decision.outcome in ("ALLOW", "ESCALATE"), "decision":resolve_decision.as_dict()}
 
 
-@router.get("/academics/quality/risks")
-def academic_quality_risks(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view", governance=True)[0]); departments=scoped_academic_query(s, D.Department, ctx).all(); result=[]
+def academic_quality_risk_snapshot(s, ctx):
+    """Compute the current scoped risks and give each one a stable workflow key."""
+    departments=scoped_academic_query(s, D.Department, ctx).all(); result=[]
     for dept in departments:
         students=s.query(D.Student).filter(D.Student.tenant_id == ctx["tenant_id"], D.Student.dept_id==dept.id).all(); sections=s.query(D.Section).filter(D.Section.tenant_id == ctx["tenant_id"], D.Section.dept_id==dept.id).all()
         avg=round(sum(float(x.cgpa or 0) for x in students)/len(students),2) if students else None
         unassigned=sum(1 for x in sections if not x.faculty_person_id)
         if (avg is not None and avg < 6.5) or unassigned:
-            result.append({"scope_level":"department","scope_ref":dept.id,"department":dept.name,"metric_key":"academic_readiness","metric_value":avg,"threshold":6.5,"deviation":f"Average CGPA {avg if avg is not None else 'N/A'}; {unassigned} unassigned sections"})
-    return {"risks":result,"generated_at":datetime.utcnow().isoformat()}
+            severity = "critical" if (avg is not None and avg < 5.5) or unassigned >= 3 else "high" if (avg is not None and avg < 6.0) or unassigned >= 2 else "medium"
+            result.append({"source_key":f"academic_readiness:department:{dept.id}","scope_level":"department","scope_ref":dept.id,"department":dept.name,"metric_key":"academic_readiness","metric_value":avg,"threshold":6.5,"severity":severity,"deviation":f"Average CGPA {avg if avg is not None else 'N/A'}; {unassigned} unassigned sections"})
+    return result
+
+
+@router.get("/academics/quality/risks")
+def academic_quality_risks(ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "academics", "view", governance=True)[0])
+    return {"risks":academic_quality_risk_snapshot(s, ctx),"generated_at":datetime.utcnow().isoformat()}
 
 
 class QualityReviewIn(BaseModel):
@@ -2438,6 +2511,7 @@ class QualityReviewIn(BaseModel):
     owner_id: str = ""
     due_at: str = ""
     effectiveness_measure: str = ""
+    source_key: str = Field(default="", max_length=160)
 
 
 class CorrectiveActionIn(BaseModel):
@@ -2448,13 +2522,23 @@ class CorrectiveActionIn(BaseModel):
     escalation_target: str = ""
 
 
+def quality_review_readiness(s, review):
+    """Return the immutable workflow prerequisites used by both API and UI."""
+    actions=s.query(D.CorrectiveAction).filter(D.CorrectiveAction.review_id==review.id, D.CorrectiveAction.tenant_id==review.tenant_id).all()
+    verified=sum(1 for action in actions if action.state == "VERIFIED")
+    has_measurement=s.query(D.QualityEffectivenessMeasurement.id).filter(D.QualityEffectivenessMeasurement.review_id==review.id, D.QualityEffectivenessMeasurement.tenant_id==review.tenant_id).first() is not None
+    actions_complete=bool(actions) and verified == len(actions)
+    message=("Create and verify at least one corrective action before continuing." if not actions else "Verify every corrective action before continuing." if not actions_complete else "Record an effectiveness measurement before closing." if not has_measurement else "All closure requirements are complete.")
+    return {"action_count":len(actions),"verified_action_count":verified,"has_effectiveness_measurement":has_measurement,"can_enter_effectiveness":actions_complete,"can_close":actions_complete and has_measurement,"message":message}
+
+
 @router.get("/academics/quality/reviews")
 def quality_reviews(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view", governance=True)[0]); rows=scoped_academic_query(s, D.AcademicQualityReview, ctx).order_by(desc(D.AcademicQualityReview.updated_at)).all()
     # ACTION_ASSIGNED was emitted by an earlier workflow revision.  Expose it
     # as the equivalent current state so old records do not become unmanageable.
     legacy_states = {"ACTION_ASSIGNED": "ACTION_PLAN_APPROVED"}
-    return {"states":["OPEN","INVESTIGATION","ROOT_CAUSE_CONFIRMED","ACTION_PLAN_APPROVED","ACTIONS_IN_PROGRESS","EFFECTIVENESS_REVIEW","CLOSED"],"reviews":[{"id":x.id,"title":x.title,"state":legacy_states.get(x.state, x.state),"metric_key":x.metric_key,"deviation":x.deviation,"root_cause":x.root_cause,"effectiveness_measure":x.effectiveness_measure,"effectiveness_result":x.effectiveness_result,"closed_at":x.closed_at.isoformat() if x.closed_at else None,"due_at":x.due_at.isoformat() if x.due_at else None,"status_version":x.status_version,"owner_id":x.owner_id,"scope_ref":x.scope_ref} for x in rows],"can_manage":ctx["office_n"]==6}
+    return {"states":["OPEN","INVESTIGATION","ROOT_CAUSE_CONFIRMED","ACTION_PLAN_APPROVED","ACTIONS_IN_PROGRESS","EFFECTIVENESS_REVIEW","CLOSED"],"reviews":[{"id":x.id,"title":x.title,"state":legacy_states.get(x.state, x.state),"source_key":x.source_key,"metric_key":x.metric_key,"metric_value":x.metric_value,"threshold":x.threshold,"deviation":x.deviation,"root_cause":x.root_cause,"effectiveness_measure":x.effectiveness_measure,"effectiveness_result":x.effectiveness_result,"closed_at":x.closed_at.isoformat() if x.closed_at else None,"due_at":x.due_at.isoformat() if x.due_at else None,"status_version":x.status_version,"owner_id":x.owner_id,"scope_ref":x.scope_ref,"closure":quality_review_readiness(s, x)} for x in rows],"can_manage":ctx["office_n"]==6}
 
 
 @router.post("/academics/quality/reviews")
@@ -2463,7 +2547,29 @@ def create_quality_review(body: QualityReviewIn, ctx=Depends(auth), s=Depends(db
     if ctx["office_n"] not in {6,10,17}: raise HTTPException(403,"Only Dean, HOD, or Academic Coordinator can create quality reviews")
     if body.scope_ref and body.scope_level == "department":
         require_academic_object(s, ctx, s.get(D.Department, body.scope_ref), "create", "Department")
-    now=datetime.utcnow(); row=D.AcademicQualityReview(id=uid(),tenant_id=TENANT,title=body.title.strip(),scope_level=body.scope_level,scope_ref=body.scope_ref,metric_key=body.metric_key,metric_value=body.metric_value,threshold=body.threshold,deviation=body.deviation,root_cause=body.root_cause,owner_id=body.owner_id,effectiveness_measure=body.effectiveness_measure,due_at=datetime.fromisoformat(body.due_at) if body.due_at else now+timedelta(days=14),created_by=ctx["sub"],created_at=now,updated_at=now); s.add(row); s.commit(); write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.quality.review.create",f"quality_review:{row.id}","","OPEN",body.deviation); return {"review_id":row.id,"state":row.state}
+    risk = next((item for item in academic_quality_risk_snapshot(s, ctx) if item["source_key"] == body.source_key), None) if body.source_key else None
+    if body.source_key and not risk:
+        raise HTTPException(409, "This risk is no longer active. Refresh the risk register before creating a review.")
+    if risk:
+        existing=s.query(D.AcademicQualityReview).filter(D.AcademicQualityReview.tenant_id==ctx["tenant_id"],D.AcademicQualityReview.source_key==risk["source_key"],D.AcademicQualityReview.state!="CLOSED").first()
+        if existing:
+            return {"review_id":existing.id,"state":existing.state,"reused":True}
+        title=f"Academic readiness risk — {risk['department']}"; scope_level=risk["scope_level"]; scope_ref=risk["scope_ref"]; metric_key=risk["metric_key"]; metric_value=risk["metric_value"]; threshold=risk["threshold"]; deviation=risk["deviation"]; source_key=risk["source_key"]
+    else:
+        title=body.title.strip(); scope_level=body.scope_level; scope_ref=body.scope_ref; metric_key=body.metric_key; metric_value=body.metric_value; threshold=body.threshold; deviation=body.deviation; source_key=""
+    if not title:
+        raise HTTPException(422, "A review title is required")
+    department=s.get(D.Department, scope_ref) if scope_level == "department" and scope_ref else None
+    now=datetime.utcnow(); row=D.AcademicQualityReview(id=uid(),tenant_id=TENANT,title=title,scope_level=scope_level,scope_ref=scope_ref,school_id=department.school_id if department else None,dept_id=department.id if department else None,metric_key=metric_key,metric_value=metric_value,threshold=threshold,deviation=deviation,root_cause=body.root_cause,owner_id=body.owner_id,effectiveness_measure=body.effectiveness_measure,due_at=datetime.fromisoformat(body.due_at) if body.due_at else now+timedelta(days=14),source_key=source_key,created_by=ctx["sub"],created_at=now,updated_at=now); s.add(row)
+    try:
+        s.commit()
+    except IntegrityError:
+        s.rollback()
+        existing=s.query(D.AcademicQualityReview).filter(D.AcademicQualityReview.tenant_id==ctx["tenant_id"],D.AcademicQualityReview.source_key==source_key,D.AcademicQualityReview.state!="CLOSED").first()
+        if existing:
+            return {"review_id":existing.id,"state":existing.state,"reused":True}
+        raise
+    write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.quality.review.create",f"quality_review:{row.id}","","OPEN",deviation); return {"review_id":row.id,"state":row.state,"reused":False}
 
 
 class QualityReviewTransitionIn(BaseModel):
@@ -2508,11 +2614,12 @@ def transition_quality_review(review_id: str, body: QualityReviewTransitionIn, c
         review.state = "ACTION_PLAN_APPROVED"
     if target not in allowed.get(review.state, set()): raise HTTPException(409, f"Transition {review.state} -> {target} is not allowed")
     if review.status_version != body.expected_status_version: raise HTTPException(409, "Review changed; reload before transitioning")
+    readiness=quality_review_readiness(s, review)
+    if target == "EFFECTIVENESS_REVIEW" and not readiness["can_enter_effectiveness"]:
+        raise HTTPException(409, readiness["message"])
     if target == "CLOSED":
-        actions=s.query(D.CorrectiveAction).filter(D.CorrectiveAction.review_id==review.id, D.CorrectiveAction.tenant_id==TENANT).all()
-        if not actions or any(action.state != "VERIFIED" for action in actions): raise HTTPException(409, "All corrective actions must be verified before closure")
-        measurement=s.query(D.QualityEffectivenessMeasurement).filter(D.QualityEffectivenessMeasurement.review_id==review.id, D.QualityEffectivenessMeasurement.tenant_id==TENANT).first()
-        if not measurement: raise HTTPException(409, "A post-action effectiveness measurement is required before closure")
+        if not readiness["can_close"]:
+            raise HTTPException(409, readiness["message"])
         review.closed_at=datetime.utcnow()
     previous=review.state; review.state=target; review.status_version+=1; review.updated_at=datetime.utcnow(); s.commit()
     write_audit(s, ctx["sub"], actor_name(s,ctx), ctx["office_n"], "academic.quality.review.transition", f"quality_review:{review.id}", previous, target, body.reason)
@@ -2533,7 +2640,14 @@ def create_corrective_action(review_id: str, body: CorrectiveActionIn, ctx=Depen
 
 @router.get("/academics/quality/actions")
 def corrective_actions(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view", governance=True)[0]); rows=scoped_academic_query(s, D.CorrectiveAction, ctx).order_by(D.CorrectiveAction.deadline).all(); now=datetime.utcnow()
+    require(gate(s, ctx, "academics", "view", governance=True)[0])
+    # Scope governs departmental oversight, but an action owner must always be
+    # able to see their own assigned work—even for a legacy action whose
+    # hierarchy columns were not populated when it was created.
+    scoped_rows=scoped_academic_query(s, D.CorrectiveAction, ctx).all()
+    owned_rows=s.query(D.CorrectiveAction).filter(D.CorrectiveAction.tenant_id==ctx["tenant_id"],D.CorrectiveAction.owner_id==ctx["sub"]).all()
+    rows=sorted({row.id: row for row in [*scoped_rows, *owned_rows]}.values(), key=lambda row: row.deadline or datetime.max)
+    now=datetime.utcnow()
     return {"actions":[{"id":x.id,"review_id":x.review_id,"title":x.title,"owner_id":x.owner_id,"deadline":x.deadline.isoformat() if x.deadline else None,"state":"OVERDUE" if x.state in {"OPEN","IN_PROGRESS"} and x.deadline and x.deadline<now else x.state,"priority":x.priority,"progress":x.progress,"evidence_versions":json.loads(x.evidence_versions or "[]"),"owner_acknowledged":x.owner_acknowledged,"escalation_target":x.escalation_target,"verification_result":x.verification_result,"evidence":x.evidence,"status_version":x.status_version} for x in rows],"overdue":sum(1 for x in rows if x.state in {"OPEN","IN_PROGRESS"} and x.deadline and x.deadline<now)}
 
 
@@ -2556,9 +2670,19 @@ def submit_corrective_action(action_id: str, body: ActionUpdateIn, ctx=Depends(a
 def verify_corrective_action(action_id: str, body: ActionUpdateIn, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "manage_quality")[0])
     action=require_academic_object(s, ctx, s.get(D.CorrectiveAction,action_id), "verify", "Corrective action")
+    if ctx["office_n"] != 6:
+        raise HTTPException(403, "Only Dean Academics may independently verify corrective-action evidence")
+    if action.owner_id == ctx["sub"]:
+        raise HTTPException(403, "Action owners submit evidence; a different Dean reviewer must verify it")
     if action.status_version != body.expected_status_version: raise HTTPException(409,"Action changed or not found")
     if not action.evidence.strip(): raise HTTPException(422,"Evidence is required before verification")
-    action.state="VERIFIED"; action.verified_by=ctx["sub"]; action.verification_result=body.verification_result.strip() or "Evidence verified"; action.status_version+=1; action.updated_at=datetime.utcnow(); review=s.get(D.AcademicQualityReview,action.review_id); review.verified_by=ctx["sub"]; review.state="EFFECTIVENESS_REVIEW"; review.updated_at=datetime.utcnow(); s.commit(); write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.quality.action.verify",f"corrective_action:{action.id}","EVIDENCE_SUBMITTED","VERIFIED",body.evidence); return {"state":action.state,"review_state":review.state}
+    action.state="VERIFIED"; action.verified_by=ctx["sub"]; action.verification_result=body.verification_result.strip() or "Evidence verified"; action.status_version+=1; action.updated_at=datetime.utcnow(); review=s.get(D.AcademicQualityReview,action.review_id); review.verified_by=ctx["sub"]
+    # A review must not enter effectiveness assessment while another assigned
+    # action is still open. This keeps multi-action reviews coherent.
+    remaining=s.query(D.CorrectiveAction).filter(D.CorrectiveAction.review_id==review.id,D.CorrectiveAction.tenant_id==TENANT,D.CorrectiveAction.state!="VERIFIED").count()
+    if remaining == 0:
+        review.state="EFFECTIVENESS_REVIEW"
+    review.updated_at=datetime.utcnow(); s.commit(); write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.quality.action.verify",f"corrective_action:{action.id}","EVIDENCE_SUBMITTED","VERIFIED",body.evidence); return {"state":action.state,"review_state":review.state,"remaining_actions":remaining}
 
 
 #  ACADEMICS: courses & sections

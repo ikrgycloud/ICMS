@@ -3677,7 +3677,6 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
     stf = _staff_or_404(s, ctx)
     sections = s.query(D.Section).filter(D.Section.faculty_person_id == stf.id).all()
     published_ids = _published_section_ids(s, sections)
-    sections = [x for x in sections if x.id in published_ids]
     section_ids = [row.id for row in sections]
     enrolled_count = 0
     if section_ids:
@@ -3766,6 +3765,10 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
     week_start = today - timedelta(days=today.weekday())
     teaching_schedule = []
     for section in sections:
+        # An allocation is already actionable for the professor.  A timetable
+        # plan only controls whether a concrete class time is shown.
+        if section.id not in published_ids:
+            continue
         parts = (section.schedule or "").split(maxsplit=1)
         days, class_time = (parts[0], parts[1] if len(parts) > 1 else "Time pending") if parts else ("", "Time pending")
         course = course_map.get(section.course_id)
@@ -3800,14 +3803,46 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
         elif score_pct >= 60: distribution["60% – 79%"] += 1
         elif score_pct >= 40: distribution["40% – 59%"] += 1
         else: distribution["Below 40%"] += 1
+    active_assignments = (s.query(D.Assignment)
+                          .filter(D.Assignment.section_id.in_(section_ids), D.Assignment.status == "published")
+                          .count() if section_ids else 0)
+    mentor_assignments = s.query(D.MentorAssignment).filter(
+        D.MentorAssignment.faculty_id == stf.id, D.MentorAssignment.status == "active"
+    ).count()
+    mentoring_cases = s.query(D.MentoringCase).filter(
+        D.MentoringCase.mentor_id == stf.id, D.MentoringCase.status.notin_(("closed", "resolved"))
+    ).all()
+    at_risk_advisees = len({case.student_id for case in mentoring_cases if case.risk_level.lower() in {"high", "critical"}})
+    active_projects = s.query(D.ResearchProject).filter(
+        D.ResearchProject.owner_id == stf.id, D.ResearchProject.status.in_(("proposed", "ongoing", "active"))
+    ).count()
+    publications = s.query(D.ResearchPublication).filter(D.ResearchPublication.owner_id == stf.id).count()
+    active_requests = s.query(D.LeaveRequest).filter(
+        D.LeaveRequest.staff_id == stf.id, D.LeaveRequest.status.in_(("pending", "returned"))
+    ).count()
+    total_requests = s.query(D.LeaveRequest).filter(D.LeaveRequest.staff_id == stf.id).count()
+    marks_reviews = sum(1 for assessment in assessments if assessment.marks_state in {"submitted", "under_review", "hod_review", "evaluation_review"})
+    returned_marks = sum(1 for assessment in assessments if assessment.marks_state == "returned")
+    upcoming = []
+    for assignment in (s.query(D.Assignment).filter(D.Assignment.section_id.in_(section_ids), D.Assignment.status == "published").all() if section_ids else []):
+        if assignment.due_at and assignment.due_at.date() >= today:
+            upcoming.append({"kind": "assignment", "title": assignment.title, "due_at": assignment.due_at.isoformat(), "route": "assignments"})
+    for assessment in assessments:
+        if assessment.scheduled_at and assessment.scheduled_at.date() >= today:
+            upcoming.append({"kind": "assessment", "title": assessment.name, "due_at": assessment.scheduled_at.isoformat(), "route": "assessments"})
+    upcoming.sort(key=lambda item: item["due_at"])
     return {
         "profile": {"name": stf.name, "emp_id": stf.emp_id,
                     "designation": stf.designation,
                     "department": dept.name if dept else "", "email": stf.email,
                     "phone": stf.phone or None, "office_hours": stf.office_hours or None},
-        "kpis": {"sections": len(sections), "students": enrolled_count, "classes_this_week": classes_this_week,
-                 "pending_tasks": len(pending), "marks_entry_pending": marks_pending,
-                 "average_attendance": average_attendance, "average_grade": average_score},
+        "kpis": {"sections": len(sections), "assigned_courses": len({section.course_id for section in sections}),
+                 "students": enrolled_count, "classes_this_week": classes_this_week,
+                 "pending_tasks": len(pending), "pending_attendance": len([item for item in pending if item["kind"] == "attendance"]),
+                 "marks_entry_pending": marks_pending, "marks_reviews": marks_reviews,
+                 "returned_marks": returned_marks, "active_assignments": active_assignments,
+                 "at_risk_advisees": at_risk_advisees, "average_attendance": average_attendance,
+                 "average_grade": average_score},
         "sections": section_rows, "pending_tasks": pending[:4],
         "announcements": [{"id": item.id, "title": item.title, "detail": item.detail, "date": item.created_at.date().isoformat()} for item in notes],
         "teaching_schedule": teaching_schedule,
@@ -3815,6 +3850,9 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
         "marks_distribution": [{"label": label, "value": value} for label, value in distribution.items()],
         "performance": {"assessments": len(assessments), "average_score": round(average_score * 10, 1) if average_score is not None else None,
                         "marks_entered": len(marks), "expected_marks": sum(enrollment_by_section.get(item.section_id, 0) for item in assessments)},
+        "dashboard": {"mentoring": {"advisees": mentor_assignments, "active_cases": len(mentoring_cases), "at_risk_advisees": at_risk_advisees},
+                      "research": {"active_projects": active_projects, "publications": publications},
+                      "requests": {"active": active_requests, "total": total_requests}, "upcoming": upcoming[:6]},
         "role_context": {"active_role": ctx.get("role"), "available_roles": office(ctx["office_n"])["internal_roles"]},
     }
     leave_rows = s.query(D.LeaveRequest).filter(D.LeaveRequest.staff_id == stf.id).all()

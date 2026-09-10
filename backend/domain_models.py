@@ -1820,6 +1820,7 @@ class AcademicQualityReview(Base):
     dept_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True)
     program_id = Column(String, ForeignKey("programs.id"), nullable=True, index=True)
     section_id = Column(String, ForeignKey("sections.id"), nullable=True, index=True)
+    source_key = Column(String, default="", index=True)
     metric_key = Column(String)
     metric_value = Column(Float, nullable=True)
     threshold = Column(Float, nullable=True)

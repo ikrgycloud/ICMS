@@ -40,6 +40,8 @@ from migrations import v0037_administration_outbox_lease
 from migrations import v0038_dean_scope_assignments
 from migrations import v0039_allocation_resubmission_policy
 from migrations import v0040_course_offering_lineage
+from migrations import v0041_quality_risk_identity
+from migrations import v0042_quality_action_independent_verification
 from migrations import v0008_transport_route_status
 from migrations import v0009_course_offerings
 from migrations import v0010_offering_workflow
@@ -95,6 +97,8 @@ MIGRATIONS.append(v0037_administration_outbox_lease)
 MIGRATIONS.append(v0038_dean_scope_assignments)
 MIGRATIONS.append(v0039_allocation_resubmission_policy)
 MIGRATIONS.append(v0040_course_offering_lineage)
+MIGRATIONS.append(v0041_quality_risk_identity)
+MIGRATIONS.append(v0042_quality_action_independent_verification)
 MIGRATIONS.append(v0008_transport_route_status)
 MIGRATIONS.append(v0009_course_offerings)
 MIGRATIONS.append(v0010_offering_workflow)
