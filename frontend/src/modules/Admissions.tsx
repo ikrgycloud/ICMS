@@ -718,7 +718,7 @@ export default function Admissions({
                               act(
                                 async () => {
                                   const result = await api.advanceAdmissionPhase4(a.id, a.status_version);
-                                  return { decision: { outcome: "ALLOW", reason: `Advanced to ${String(result.current_status || "next stage").replaceAll("_", " ")}.` } };
+                                  return { decision: { outcome: "ALLOW", reason: `Advanced to ${String(result.current_status || "next stage").replace(/_/g, " ")}.` } };
                                 },
                                 loadPhase4,
                               )
@@ -1762,6 +1762,8 @@ export default function Admissions({ caps: capsProp, initialTab, sidebarNavigati
     {notice && <DecisionToast decision={notice} onClose={() => setNotice(null)}/>}</div>
 }
 
+*/
+
 function AdmissionsReports({ apps, phase5 }: any) {
   const [selectedReport, setSelectedReport] = useState<any>(null);
   const groups = [
@@ -1811,7 +1813,7 @@ function AdmissionsReports({ apps, phase5 }: any) {
         <p className="hint">Live admissions performance summary from the current database.</p>
         <button className="btn btn-out" onClick={() => api.downloadAdmissionsReport().catch((error: any) => alert(error.message))}>Download PDF report</button>
         <div className="kpi-grid">
-          <button className="kpi" onClick={() => openReport("Total applications", [...new Set(apps.map((app: any) => app.current_status))])}><div className="kpi-val">{apps.length}</div><div className="kpi-label">Total applications</div></button>
+          <button className="kpi" onClick={() => openReport("Total applications", [...new Set<string>(apps.map((app: any) => String(app.current_status || "")))])}><div className="kpi-val">{apps.length}</div><div className="kpi-label">Total applications</div></button>
           <button className="kpi" onClick={() => openReport("Enrolled students", ["ENROLLED"])}><div className="kpi-val">{apps.filter((x: any) => x.current_status === "ENROLLED").length}</div><div className="kpi-label">Enrolled students</div></button>
           <button className="kpi" onClick={() => openReport("Offers accepted", ["OFFER_ACCEPTED"])}><div className="kpi-val">{apps.filter((x: any) => x.current_status === "OFFER_ACCEPTED").length}</div><div className="kpi-label">Offers accepted</div></button>
           <div className="kpi">
@@ -2740,8 +2742,6 @@ function Phase5Status({ rows, mode }: any) {
   );
 }
 
-*/
-
 function EligibilityQueue({
   eligibility,
   filters,
@@ -2893,7 +2893,6 @@ function EligibilityQueue({
   );
 }
 
-/* Continuation of the obsolete duplicate component.
 function ConfigList({
   title,
   items,
@@ -3235,8 +3234,6 @@ function CycleModal({
     </Modal>
   );
 }
-*/
-
 function RuleModal({ rule, setRule, cycles, programmes, quotas, save }: any) {
   return (
     <Modal
