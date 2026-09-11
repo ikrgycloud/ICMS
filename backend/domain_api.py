@@ -8,487 +8,24 @@ and is written to the hash-chained audit log. Actions the office may not perform
 return 403 with the engine's reason — the same verdict the UI uses to disable
 the control.
 """
-from datetime import date, datetime, timedelta
 import json
-import csv
-import io
-import zipfile
-from decimal import Decimal
+from datetime import date, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import Response
-from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import and_, desc, false, func, or_, text
-from sqlalchemy.exc import IntegrityError
+from pydantic import BaseModel
+from sqlalchemy import and_, desc, func, or_
 
 from core import db, auth, uid, write_audit, notify, active_delegation_for
-from database import office, TENANT, slug
-from authority import authorize, ALLOW, pwhash
-from matrices import rbac_for, scope_for, approval_limit_for, APPROVAL_LIMITS
+from database import office, slug
+from authority import authorize, ALLOW, scope_covers
+from matrices import (rbac_for, scope_for, approval_limit_for, APPROVAL_LIMITS,
+                       APPROVAL_MATRIX, RISK_ESCALATION_TARGETS, RISK_ESCALATION_PROCESS)
 from capabilities import (modules_for_office, module_meta, MODULE_ACTIONS,
                           MODULES, action_allowed_for_office)
 import domain_models as D
-from academic_scope import authorize_object, dean_scope_assignments, hierarchy
-from governance_engine import validate_transition
-from teaching import faculty_owns_section
-from models import User, Person, OrgScope, WorkflowInstance, Notification
+from models import (AuthorityMembership, User, Person, OrgScope, Tenant,
+                    WorkflowInstance, WorkflowProfile, Approval, Notification, AuditLog)
 
 router = APIRouter(prefix="/api")
-
-REPORTS = {
-    "approval-aging": ("Approval aging", ["entity", "state", "updated_at"]),
-    "curriculum-version-history": ("Curriculum version history", ["id", "program_id", "effective_term", "version", "status"]),
-    "program-feasibility": ("Program feasibility", ["program_id", "capacity", "intake", "faculty_ready", "infrastructure_ready"]),
-    "faculty-workload": ("Faculty workload", ["faculty_id", "term", "workload_units"]),
-    "timetable-readiness": ("Timetable readiness", ["id", "kind", "severity", "status"]),
-    "delivery-status": ("Delivery status", ["section_id", "term", "completion_pct", "status"]),
-    "quality-action-aging": ("Quality action aging", ["id", "review_id", "priority", "state", "deadline"]),
-    "co-po-attainment": ("CO/PO attainment", ["outcome", "code", "attainment"]),
-    "semester-comparison": ("Semester comparison", ["term", "metric", "value"]),
-}
-
-
-@router.get("/academics/dean-dashboard")
-def dean_dashboard(
-    academic_year: str = "",
-    semester: int | None = None,
-    school_id: str = "",
-    dept_id: str = "",
-    program_id: str = "",
-    ctx=Depends(auth),
-    s=Depends(db),
-):
-    """Return the Dean's filtered executive view from authorized academic rows."""
-    require(gate(s, ctx, "academics", "view", governance=True)[0])
-    academic_year_options = [
-        row.name for row in s.query(D.AcademicYear)
-        .filter(D.AcademicYear.tenant_id == ctx["tenant_id"], D.AcademicYear.is_active == True)
-        .order_by(D.AcademicYear.start_date.desc(), D.AcademicYear.name.desc()).all()
-    ]
-    semester_options = [
-        row[0] for row in s.query(D.Semester.sequence)
-        .join(D.AcademicYear, D.Semester.academic_year_id == D.AcademicYear.id)
-        .filter(D.AcademicYear.tenant_id == ctx["tenant_id"], D.Semester.is_active == True)
-        .distinct().order_by(D.Semester.sequence).all()
-    ]
-    courses = scoped_academic_query(s, D.Course, ctx)
-    # Archived/inactive catalogue rows are not current academic delivery.
-    courses = courses.filter(~D.Course.status.in_(["Archived", "Inactive", "Deleted"]))
-    if school_id:
-        courses = courses.filter(D.Course.school_id == school_id)
-    if dept_id:
-        courses = courses.filter(D.Course.dept_id == dept_id)
-    if program_id:
-        courses = courses.filter(D.Course.program_id == program_id)
-    course_rows = courses.all()
-    course_ids = {row.id for row in course_rows}
-    schools = scoped_academic_query(s, D.School, ctx)
-    if school_id:
-        schools = schools.filter(D.School.id == school_id)
-    school_rows = schools.all()
-    departments = scoped_academic_query(s, D.Department, ctx)
-    if school_id:
-        departments = departments.filter(or_(D.Department.school_id == school_id, D.Department.campus == school_id))
-    if dept_id:
-        departments = departments.filter(D.Department.id == dept_id)
-    department_rows = departments.all()
-    department_ids = {row.id for row in department_rows}
-    programs = scoped_academic_query(s, D.Program, ctx)
-    if school_id:
-        programs = programs.filter(D.Program.school_id == school_id)
-    if dept_id:
-        programs = programs.filter(D.Program.dept_id == dept_id)
-    if program_id:
-        programs = programs.filter(D.Program.id == program_id)
-    program_rows = programs.all()
-    program_ids = {row.id for row in program_rows}
-
-    sections = scoped_academic_query(s, D.Section, ctx)
-    if course_ids:
-        sections = sections.filter(D.Section.course_id.in_(course_ids))
-    else:
-        sections = sections.filter(text("1=0"))
-    if semester is not None:
-        sections = sections.filter(D.Section.term.like(f"%{semester}%"))
-    section_rows = sections.all()
-    section_ids = {row.id for row in section_rows}
-
-    # Timetable readiness is an operational state owned by the Academic
-    # Coordinator workflow.  Do not infer it from course-completion rows:
-    # completion tracks delivery after teaching begins, whereas these plans
-    # record whether a section can actually be released for delivery.
-    offering_query = s.query(D.CourseOffering).filter(
-        D.CourseOffering.tenant_id == ctx["tenant_id"],
-        D.CourseOffering.course_id.in_(course_ids) if course_ids else text("1=0"),
-    )
-    if program_id:
-        offering_query = offering_query.filter(D.CourseOffering.program_id == program_id)
-    if academic_year:
-        offering_query = offering_query.filter(D.CourseOffering.academic_year == academic_year)
-    if semester is not None:
-        offering_query = offering_query.filter(D.CourseOffering.semester == semester)
-    offering_rows = offering_query.all()
-    offering_ids = {row.id for row in offering_rows}
-    # A legacy section without an offering is still valid historical data for
-    # delivery/attendance analytics, but it is not a Coordinator planning
-    # work item.  Restrict the readiness pipeline to sections with a matching
-    # operational offering so old records cannot inflate "Not Submitted".
-    coordinator_section_ids = {
-        row.id for row in section_rows if row.offering_id and row.offering_id in offering_ids
-    }
-    timetable_plans = s.query(D.TimetablePlanWorkflow).filter(
-        D.TimetablePlanWorkflow.tenant_id == ctx["tenant_id"],
-        D.TimetablePlanWorkflow.section_id.in_(coordinator_section_ids) if coordinator_section_ids else text("1=0"),
-        D.TimetablePlanWorkflow.offering_id.in_(offering_ids) if offering_ids else text("1=0"),
-    ).all()
-    plan_by_section = {}
-    plan_priority = {"Published": 5, "Approved": 4, "VP Review": 3, "HOD Review": 2,
-                     "VP Returned": 1, "HOD Returned": 1, "Draft": 0, "Closed": 0}
-    for plan in timetable_plans:
-        current = plan_by_section.get(plan.section_id)
-        if current is None or plan_priority.get(plan.status, -1) >= plan_priority.get(current.status, -1):
-            plan_by_section[plan.section_id] = plan
-    published_sections = {section_id for section_id, plan in plan_by_section.items() if plan.status == "Published"}
-    review_sections = {section_id for section_id, plan in plan_by_section.items() if plan.status in {"HOD Review", "VP Review", "Approved"}}
-    returned_sections = {section_id for section_id, plan in plan_by_section.items() if plan.status in {"HOD Returned", "VP Returned"}}
-    active_entry_ids = {
-        row[0] for row in s.query(D.TimetableEntry.id).filter(
-            D.TimetableEntry.tenant_id == ctx["tenant_id"],
-            D.TimetableEntry.section_id.in_(coordinator_section_ids) if coordinator_section_ids else text("1=0"),
-            D.TimetableEntry.status == "active",
-        ).all()
-    }
-    timetable_conflicts = s.query(D.TimetableConflict).filter(
-        D.TimetableConflict.tenant_id == ctx["tenant_id"],
-        D.TimetableConflict.status != "Resolved",
-        or_(D.TimetableConflict.left_entry_id.in_(active_entry_ids), D.TimetableConflict.right_entry_id.in_(active_entry_ids)) if active_entry_ids else text("1=0"),
-    ).all()
-
-    proposals = s.query(D.AcademicProposal).filter(
-        D.AcademicProposal.tenant_id == ctx["tenant_id"],
-        D.AcademicProposal.assigned_to_office_n == ctx["office_n"],
-        D.AcademicProposal.state.in_(["SUBMITTED", "RESUBMITTED"]),
-    ).all()
-    scoped_proposals = [row for row in proposals if not row.dept_id or row.dept_id in department_ids]
-    curriculum_proposals = s.query(D.AcademicProposal).filter(
-        D.AcademicProposal.tenant_id == ctx["tenant_id"],
-        D.AcademicProposal.proposal_type == "curriculum",
-        D.AcademicProposal.assigned_to_office_n == ctx["office_n"],
-    ).all()
-    scoped_curriculum_proposals = [row for row in curriculum_proposals if not row.dept_id or row.dept_id in department_ids]
-    reviews = scoped_academic_query(s, D.AcademicQualityReview, ctx).all()
-    actions = scoped_academic_query(s, D.CorrectiveAction, ctx).all()
-    exceptions = scoped_academic_query(s, D.TimetableException, ctx).all()
-    # Official Dean metrics use only Exam Controller-published result sheets.
-    # Faculty draft marks and development samples are intentionally excluded.
-    published_sheet_ids = [row[0] for row in s.query(D.ResultSheet.id).filter(
-        D.ResultSheet.tenant_id == ctx["tenant_id"], D.ResultSheet.status == "published",
-    ).all()]
-    all_results = s.query(D.StudentSubjectResult).filter(
-        D.StudentSubjectResult.tenant_id == ctx["tenant_id"],
-        D.StudentSubjectResult.course_id.in_(course_ids) if course_ids else text("1=0"),
-        D.StudentSubjectResult.source == "examination",
-        D.StudentSubjectResult.published_at != None,
-        D.StudentSubjectResult.result_sheet_id.in_(published_sheet_ids) if published_sheet_ids else text("1=0"),
-    ).all()
-    results = all_results
-    if academic_year:
-        results = [row for row in results if row.academic_year == academic_year]
-    if semester is not None:
-        results = [row for row in results if row.semester == semester]
-    student_scope = scoped_academic_query(s, D.Student, ctx)
-    if school_id:
-        student_scope = student_scope.filter(D.Student.dept_id.in_([r.id for r in department_rows])) if department_rows else student_scope.filter(text("1=0"))
-    if dept_id:
-        student_scope = student_scope.filter(D.Student.dept_id == dept_id)
-    if program_id:
-        student_scope = student_scope.filter(D.Student.program_id == program_id)
-    student_rows = student_scope.all()
-    attendance = s.query(D.AttendanceRecord).filter(
-        D.AttendanceRecord.tenant_id == ctx["tenant_id"],
-        D.AttendanceRecord.section_id.in_(section_ids) if section_ids else text("1=0"),
-    ).all()
-    completions = s.query(D.CourseCompletion).filter(
-        D.CourseCompletion.tenant_id == ctx["tenant_id"],
-        D.CourseCompletion.section_id.in_(section_ids) if section_ids else text("1=0"),
-    ).all()
-    allocations = s.query(D.FacultyAllocation).filter(
-        D.FacultyAllocation.tenant_id == ctx["tenant_id"],
-        D.FacultyAllocation.section_id.in_(section_ids) if section_ids else text("1=0"),
-    ).all()
-    calendar = s.query(D.AcademicCalendarEntry).filter(
-        D.AcademicCalendarEntry.tenant_id == ctx["tenant_id"],
-        D.AcademicCalendarEntry.status == "published",
-        D.AcademicCalendarEntry.start_date >= date.today(),
-    ).order_by(D.AcademicCalendarEntry.start_date).limit(8).all()
-
-    passed = sum(1 for row in results if row.outcome == "passed")
-    attendance_rate = round(100 * sum(1 for row in attendance if row.present) / len(attendance), 1) if attendance else None
-    pass_rate = round(100 * passed / len(results), 1) if results else None
-    cgpa_values = [row.cgpa for row in student_rows if row.cgpa is not None]
-    avg_cgpa = round(sum(cgpa_values) / len(cgpa_values), 2) if cgpa_values else None
-    active_backlogs = sum(1 for row in results if row.outcome == "failed")
-    at_risk_students = sum(1 for row in student_rows if row.cgpa is not None and row.cgpa < 6)
-    department_map = {row.id: row.name for row in department_rows}
-    course_map = {row.id: row for row in course_rows}
-    department_scores = {}
-    for row in results:
-        course = course_map.get(row.course_id)
-        if course:
-            bucket = department_scores.setdefault(course.dept_id, [0, 0])
-            bucket[0] += 1
-            bucket[1] += row.outcome == "passed"
-    department_performance = [
-        {"id": key, "name": department_map.get(key, key), "pass_rate": round(100 * values[1] / values[0], 1)}
-        for key, values in department_scores.items()
-    ]
-    curriculum_states = {}
-    for row in scoped_curriculum_proposals:
-        if row.state == "APPROVED":
-            label = "Approved"
-        elif row.state in {"SUBMITTED", "RESUBMITTED", "UNDER_REVIEW"}:
-            label = "Overdue" if row.due_at and row.due_at < datetime.utcnow() else "In Review"
-        elif row.state == "RETURNED":
-            label = "Returned"
-        else:
-            continue
-        curriculum_states[label] = curriculum_states.get(label, 0) + 1
-    workload = {}
-    for row in allocations:
-        workload[row.faculty_person_id] = workload.get(row.faculty_person_id, 0) + float(row.workload_units or 0)
-    average_workload_units = sum(workload.values()) / len(workload) if workload else 0
-    workload_status = "Underloaded" if average_workload_units < 2 else "Balanced" if average_workload_units <= 4 else "Overloaded"
-    workload_summary = {
-        "underloaded": sum(1 for value in workload.values() if value < 2),
-        "balanced": sum(1 for value in workload.values() if 2 <= value <= 4),
-        "overloaded": sum(1 for value in workload.values() if value > 4),
-        "avg_load": round(min(100, max(0, average_workload_units / 4 * 100)), 1),
-        "status": workload_status if workload else None,
-    }
-    # Report pending work by proposal type.  Programme inventory is not the
-    # same as programme changes awaiting a Dean decision.
-    approval_counts = {
-        proposal_type: sum(1 for row in scoped_proposals if row.proposal_type == proposal_type)
-        for proposal_type in ("program", "curriculum", "calendar", "allocation")
-    }
-    faculty_query = scoped_academic_query(s, D.StaffMember, ctx).filter(D.StaffMember.status == "active")
-    if school_id:
-        faculty_query = faculty_query.filter(D.StaffMember.school_id == school_id)
-    if dept_id:
-        faculty_query = faculty_query.filter(D.StaffMember.dept_id == dept_id)
-    if program_id:
-        faculty_query = faculty_query.filter(D.StaffMember.program_id == program_id)
-    # Include active faculty with no allocation in the denominator so the
-    # average is representative and the gauge has a useful empty state.
-    faculty_rows = faculty_query.all()
-    faculty_ids = {row.id for row in faculty_rows}
-    scoped_loads = {faculty_id: units for faculty_id, units in workload.items() if faculty_id in faculty_ids}
-    average_workload_units = sum(scoped_loads.values()) / len(faculty_ids) if faculty_ids else 0
-    max_units = 4.0
-    workload_summary = {
-        "underloaded": sum(1 for faculty_id in faculty_ids if scoped_loads.get(faculty_id, 0) < 2),
-        "balanced": sum(1 for faculty_id in faculty_ids if 2 <= scoped_loads.get(faculty_id, 0) <= max_units),
-        "overloaded": sum(1 for faculty_id in faculty_ids if scoped_loads.get(faculty_id, 0) > max_units),
-        "assigned": sum(1 for faculty_id in faculty_ids if scoped_loads.get(faculty_id, 0) > 0),
-        "unassigned": sum(1 for faculty_id in faculty_ids if scoped_loads.get(faculty_id, 0) <= 0),
-        "faculty_count": len(faculty_ids), "total_units": round(sum(scoped_loads.values()), 1),
-        "avg_units": round(average_workload_units, 2), "capacity_units": max_units,
-        "avg_load": round(min(100, max(0, average_workload_units / max_units * 100)), 1),
-        "status": "No allocation data" if not faculty_ids or not scoped_loads else "Underloaded" if average_workload_units < 2 else "Balanced" if average_workload_units <= max_units else "Overloaded",
-    }
-    def comparison(current, previous, unit, label):
-        if current is None or previous is None:
-            return None
-        return {"change": round(current - previous, 1), "unit": unit, "label": label}
-
-    result_years = sorted({row.academic_year for row in all_results if row.academic_year})
-    previous_year = result_years[result_years.index(academic_year) - 1] if academic_year in result_years and result_years.index(academic_year) else None
-    previous_results = [row for row in all_results if row.academic_year == previous_year] if previous_year else []
-    previous_pass_rate = round(100 * sum(1 for row in previous_results if row.outcome == "passed") / len(previous_results), 1) if previous_results else None
-    previous_backlogs = sum(1 for row in previous_results if row.outcome == "failed") if previous_results else None
-    recent_start, prior_start = date.today() - timedelta(days=29), date.today() - timedelta(days=59)
-    recent_attendance = [row for row in attendance if row.on_date and row.on_date >= recent_start]
-    prior_attendance = [row for row in attendance if row.on_date and prior_start <= row.on_date < recent_start]
-    recent_rate = round(100 * sum(1 for row in recent_attendance if row.present) / len(recent_attendance), 1) if recent_attendance else None
-    prior_rate = round(100 * sum(1 for row in prior_attendance if row.present) / len(prior_attendance), 1) if prior_attendance else None
-    backlog_rate = active_backlogs / max(1, len(student_rows))
-    risk_rate = at_risk_students / max(1, len(cgpa_values))
-
-    def health_status(key, value):
-        if value is None:
-            return "unavailable"
-        if key == "avg_cgpa":
-            return "on_track" if value >= 7 else "watch" if value >= 6 else "action"
-        if key in {"pass_rate", "attendance"}:
-            return "on_track" if value >= 75 else "watch" if value >= 60 else "action"
-        rate = backlog_rate if key == "active_backlogs" else risk_rate
-        return "on_track" if rate <= .03 else "watch" if rate <= .10 else "action"
-
-    health_scorecard = [
-        {"key": "avg_cgpa", "label": "Average CGPA", "value": avg_cgpa, "target": "Target ≥ 7.00", "status": health_status("avg_cgpa", avg_cgpa), "comparison": None, "route": "analytics"},
-        {"key": "pass_rate", "label": "Pass rate", "value": pass_rate, "target": "Target ≥ 75%", "status": health_status("pass_rate", pass_rate), "comparison": comparison(pass_rate, previous_pass_rate, "points", f"vs {previous_year}") if academic_year else None, "route": "analytics"},
-        {"key": "attendance", "label": "Attendance", "value": attendance_rate, "target": "Target ≥ 75%", "status": health_status("attendance", attendance_rate), "comparison": comparison(recent_rate, prior_rate, "points", "vs prior 30 days"), "route": "attendance"},
-        {"key": "active_backlogs", "label": "Active backlogs", "value": active_backlogs, "target": "Target ≤ 3% of students", "status": health_status("active_backlogs", active_backlogs), "comparison": comparison(active_backlogs, previous_backlogs, "count", f"vs {previous_year}") if academic_year else None, "route": "students"},
-        {"key": "at_risk_students", "label": "At-risk students", "value": at_risk_students, "target": "Target ≤ 3% of assessed students", "status": health_status("at_risk_students", at_risk_students), "comparison": None, "route": "students"},
-    ]
-    priority_metric = next((row for status in ("action", "watch") for row in health_scorecard if row["status"] == status), None)
-    priority_messages = {
-        "attendance": "Attendance is below the operating target. Review affected sections.",
-        "pass_rate": "Pass rate needs attention. Review result and intervention data.",
-        "avg_cgpa": "Average CGPA is below target. Review academic support actions.",
-        "active_backlogs": "Backlogs exceed the operating threshold. Open the student risk list.",
-        "at_risk_students": "At-risk student volume needs review. Open the intervention list.",
-    }
-    health_priority = {"status": priority_metric["status"], "metric": priority_metric["label"], "message": priority_messages[priority_metric["key"]], "route": priority_metric["route"]} if priority_metric else {"status": "on_track", "metric": "Academic health", "message": "All tracked academic health measures are on target.", "route": "analytics"}
-    return {
-        "filters": {"academic_year": academic_year, "semester": semester, "school_id": school_id, "dept_id": dept_id, "program_id": program_id},
-        "options": {
-            "academic_years": academic_year_options,
-            "semesters": semester_options,
-            "schools": [{"id": row.id, "name": row.name} for row in school_rows],
-            "departments": [{"id": row.id, "name": row.name} for row in department_rows],
-            "programs": [{"id": row.id, "name": row.name} for row in program_rows],
-        },
-        "kpis": {
-            "programs": len(program_rows), "departments": len(department_rows), "courses": len(course_rows),
-            "faculty": len(faculty_rows), "curriculum_reviews": approval_counts["curriculum"],
-            "timetable_conflicts": len(timetable_conflicts) + sum(1 for row in exceptions if row.status != "RESOLVED"), "academic_actions": sum(1 for row in actions if row.state != "VERIFIED"),
-            "academic_risks": len(reviews), "needs_my_decision": len(scoped_proposals),
-        },
-        "approvals": approval_counts,
-        "health": {
-            "attendance": attendance_rate,
-            "pass_rate": pass_rate,
-            "avg_cgpa": avg_cgpa,
-            "active_backlogs": active_backlogs,
-            "at_risk_students": at_risk_students,
-            "active_actions": sum(1 for row in actions if row.state != "VERIFIED"),
-            "risk_indicators": len(reviews),
-        },
-        "health_scorecard": health_scorecard,
-        "health_priority": health_priority,
-        "data_as_of": datetime.utcnow().isoformat(),
-        "department_performance": department_performance,
-        "curriculum_status": curriculum_states,
-        "timetable_readiness": {
-            "completed": len(published_sections),
-            "in_progress": len(review_sections),
-            "pending": max(0, len(coordinator_section_ids - published_sections - review_sections)),
-            "returned": len(returned_sections),
-            "conflicts": len(timetable_conflicts) + sum(1 for row in exceptions if row.status != "RESOLVED"),
-        },
-        "coordinator_workflow": {
-            "offerings": len(offering_rows), "sections": len(coordinator_section_ids),
-            "plans": len(timetable_plans), "published": len(published_sections),
-            "hod_review": sum(1 for row in timetable_plans if row.status == "HOD Review"),
-            "vp_review": sum(1 for row in timetable_plans if row.status == "VP Review"),
-            "approved": sum(1 for row in timetable_plans if row.status == "Approved"),
-            "returned": len(returned_sections), "open_conflicts": len(timetable_conflicts),
-        },
-        "faculty_workload": workload_summary,
-        "result_trends": [{"academic_year": year, "pass_rate": round(100 * sum(1 for row in rows if row.outcome == "passed") / len(rows), 1)} for year in sorted({row.academic_year for row in results}) for rows in [[item for item in results if item.academic_year == year]] if rows],
-        "milestones": [{"id": row.id, "title": row.title, "category": row.category, "start_date": row.start_date.isoformat(), "end_date": row.end_date.isoformat() if row.end_date else None} for row in calendar],
-    }
-
-
-@router.post("/jobs")
-def enqueue_job(body: dict, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "export")[0])
-    if ctx.get("office_n") not in {6, 10, 17, 28, 40}: raise HTTPException(403, "Worker operations access denied")
-    key=(body.get("idempotency_key") or "").strip()
-    operation=(body.get("operation") or "").strip()
-    if not key or not operation: raise HTTPException(422, "operation and idempotency_key are required")
-    existing=s.execute(text("SELECT id, status FROM icms_jobs WHERE idempotency_key=:key"), {"key":key}).first()
-    if existing: return {"id":existing.id,"status":existing.status,"duplicate":True}
-    job_id=uid(); s.execute(text("INSERT INTO icms_jobs (id,queue,payload,idempotency_key) VALUES (:id,:queue,:payload,:key)"), {"id":job_id,"queue":body.get("queue","default"),"payload":json.dumps({"operation":operation,"payload":body.get("payload",{})}),"key":key}); s.commit()
-    return {"id":job_id,"status":"queued","duplicate":False}
-
-
-@router.get("/jobs")
-def job_monitor(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view")[0])
-    if ctx.get("office_n") not in {6, 10, 17, 28, 40}: raise HTTPException(403, "Worker monitoring access denied")
-    try: rows=s.execute(text("SELECT id,queue,status,attempts,last_error,created_at FROM icms_jobs ORDER BY created_at DESC LIMIT 100")).all(); workers=s.execute(text("SELECT worker_id,status,processed,failed,last_error,updated_at FROM icms_worker_heartbeats ORDER BY updated_at DESC")).all()
-    except Exception: return {"jobs":[]}
-    return {"jobs":[dict(row._mapping) for row in rows],"dead_letter":sum(1 for row in rows if row.status=="dead_letter"),"workers":[dict(row._mapping) for row in workers]}
-
-
-@router.get("/academics/reports/{report_type}.csv")
-def academic_report(report_type: str, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "export", governance=True)[0])
-    if report_type not in REPORTS: raise HTTPException(404, "Unknown academic report")
-    _, headers=REPORTS[report_type]; rows=[]
-    if report_type == "quality-action-aging":
-        rows=[[x.id,x.review_id,x.priority,x.state,x.deadline.isoformat() if x.deadline else ""] for x in scoped_academic_query(s,D.CorrectiveAction,ctx).all()]
-    elif report_type == "approval-aging":
-        rows=[[x.id,x.state,x.updated_at.isoformat() if x.updated_at else ""] for x in s.query(D.AcademicProposal).filter(D.AcademicProposal.tenant_id==TENANT).all()]
-    elif report_type == "timetable-readiness":
-        rows=[[x.id,x.kind,x.severity,x.status] for x in scoped_academic_query(s,D.TimetableException,ctx).all()]
-    elif report_type == "delivery-status":
-        rows=[[x.section_id,x.term,x.completion_pct,x.status] for x in s.query(D.CourseCompletion).filter(D.CourseCompletion.tenant_id==TENANT).all()]
-    elif report_type == "curriculum-version-history":
-        rows=[[x.id,x.program_id,x.effective_term,x.version,x.status] for x in s.query(D.CurriculumVersion).filter(D.CurriculumVersion.tenant_id==TENANT).all()]
-    elif report_type == "program-feasibility":
-        rows=[[x.proposal_id,x.capacity,x.intake,x.faculty_ready,x.infrastructure_ready] for x in s.query(D.ProgramAssessment).filter(D.ProgramAssessment.tenant_id==TENANT).all()]
-    elif report_type == "faculty-workload":
-        rows=[[x.faculty_person_id,x.term,x.workload_units] for x in s.query(D.FacultyAllocation).filter(D.FacultyAllocation.tenant_id==TENANT).all()]
-    elif report_type == "co-po-attainment":
-        data=attainment("","",ctx,s); rows=[["CO",x["code"],x["attainment"]] for x in data["course_outcomes"]]+[["PO",x["code"],x["attainment"]] for x in data["program_outcomes"]]
-    elif report_type == "semester-comparison":
-        rows=[[x.academic_year,"results",x.percentage] for x in s.query(D.StudentSubjectResult).filter(D.StudentSubjectResult.tenant_id==TENANT,D.StudentSubjectResult.percentage!=None).all()]
-    output=io.StringIO(); csv.writer(output).writerows([headers,*rows])
-    return Response(output.getvalue(), media_type="text/csv", headers={"Content-Disposition":f'attachment; filename="icms-{report_type}.csv"'})
-
-
-@router.get("/academics/reports/{report_type}.{file_format}")
-def academic_report_file(report_type: str, file_format: str, ctx=Depends(auth), s=Depends(db)):
-    if file_format not in {"pdf", "xlsx"}: raise HTTPException(404, "Unsupported report format")
-    csv_response=academic_report(report_type,ctx,s)
-    rows=list(csv.reader(io.StringIO(csv_response.body.decode())))
-    if file_format == "pdf":
-        from reportlab.lib.pagesizes import letter
-        from reportlab.pdfgen import canvas
-        stream=io.BytesIO(); page=canvas.Canvas(stream,pagesize=letter); y=760
-        for row in rows:
-            page.drawString(36,y," | ".join(str(item)[:35] for item in row)); y-=16
-            if y < 40: page.showPage(); y=760
-        page.save(); content=stream.getvalue(); media="application/pdf"
-    else:
-        stream=io.BytesIO()
-        with zipfile.ZipFile(stream,"w",zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>")
-            archive.writestr("_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>")
-            archive.writestr("xl/_rels/workbook.xml.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>")
-            archive.writestr("xl/workbook.xml", "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Report\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>")
-            cells=[]
-            for row_no,row in enumerate(rows,1):
-                cells.append(f"<row r=\"{row_no}\">"+"".join(f"<c t=\"inlineStr\"><is><t>{str(value).replace('&','&amp;').replace('<','&lt;')}</t></is></c>" for value in row)+"</row>")
-            archive.writestr("xl/worksheets/sheet1.xml", "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>"+"".join(cells)+"</sheetData></worksheet>")
-        content=stream.getvalue(); media="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    return Response(content,media_type=media,headers={"Content-Disposition":f'attachment; filename="icms-{report_type}.{file_format}"'})
-
-
-def _ensure_student_portal_account(s, student):
-    """Give an invoiced student a portal account, without duplicating existing users."""
-    username = (student.roll_no or "").strip().lower()
-    if not username:
-        return False
-    user = s.query(User).filter(func.lower(User.username) == username).first()
-    if user:
-        if student.user_id != user.id:
-            student.user_id = user.id
-        return False
-
-    person_id = f"person_student_{username}"
-    if not s.get(Person, person_id):
-        s.add(Person(id=person_id, tenant_id=TENANT, name=student.name,
-                     email=student.email or f"{username}@icms.edu", contact=""))
-    user = User(id=f"user_student_{username}", tenant_id=TENANT, person_id=person_id,
-                username=username, password_hash=pwhash("demo123"), status="active",
-                mfa_enabled=False, office_n=36, role="Student", scope_level="individual",
-                scope_ref=student.id)
-    s.add(user)
-    student.user_id = user.id
-    return True
 
 # Which module actions are monetary approvals (limit-checked & escalatable).
 MONETARY = {("finance", "waive"): ("fee_waiver", "Vice-Chancellor"),
@@ -499,119 +36,11 @@ MONETARY = {("finance", "waive"): ("fee_waiver", "Vice-Chancellor"),
 # --------------------------------------------------------------------------- #
 #  Authority gate for a module action                                         #
 # --------------------------------------------------------------------------- #
-ACADEMIC_GOVERNANCE_OFFICES = {6, 10, 17}
-
-
-def academic_scope_allows(ctx, *, dept_id=None, program_id=None, section_id=None) -> bool:
-    """Central academic-object scope policy used by governance endpoints."""
-    office_n = ctx.get("office_n")
-    if office_n == 6:
-        return True
-    if office_n not in ACADEMIC_GOVERNANCE_OFFICES:
-        return False
-    scope_ref = (ctx.get("scope_ref") or "").strip()
-    # HOD/coordinator tokens carry department scope; tolerate legacy tokens
-    # whose scope is represented by the staff profile (checked by callers).
-    if dept_id and scope_ref and scope_ref not in {dept_id, f"dept_{dept_id}", f"scope_{dept_id}"}:
-        return False
-    return True
-
-
-def actor_department_id(s, ctx):
-    staff = _staff_profile(s, ctx)
-    if staff and staff.dept_id:
-        return staff.dept_id
-    scope_ref = (ctx.get("scope_ref") or "").strip()
-    # Department identifiers are commonly named ``dept_*``.  Resolve the
-    # persisted identifier before treating that prefix as a scope wrapper.
-    if scope_ref and s.get(D.Department, scope_ref):
-        return scope_ref
-    ref = scope_ref.removeprefix("dept_").removeprefix("scope_")
-    return ref if s.get(D.Department, ref) else None
-
-
-def scoped_academic_query(s, model, ctx):
-    """Build a database-scoped query for academic models (never frontend-filtered)."""
-    q = s.query(model).filter(getattr(model, "tenant_id") == ctx.get("tenant_id", TENANT))
-    if ctx.get("office_n") == 6:
-        assignments = dean_scope_assignments(ctx, s)
-        # Development compatibility is intentionally temporary: a local legacy
-        # database without assignments remains readable.  Production has no
-        # equivalent fallback and fails closed.
-        from database import demo_data_enabled
-        if not assignments:
-            return q if demo_data_enabled() else q.filter(false())
-        clauses = []
-        for assignment in assignments:
-            filters = []
-            unsupported_narrow_scope = False
-            if assignment.school_id:
-                if hasattr(model, "school_id"):
-                    filters.append(getattr(model, "school_id") == assignment.school_id)
-                elif getattr(model, "__tablename__", "") == "departments":
-                    filters.append(or_(D.Department.school_id == assignment.school_id, D.Department.campus == assignment.school_id))
-                elif getattr(model, "__tablename__", "") == "schools":
-                    filters.append(D.School.id == assignment.school_id)
-                else:
-                    unsupported_narrow_scope = True
-            if assignment.dept_id:
-                if hasattr(model, "dept_id"):
-                    filters.append(getattr(model, "dept_id") == assignment.dept_id)
-                elif getattr(model, "__tablename__", "") == "departments":
-                    filters.append(D.Department.id == assignment.dept_id)
-                else:
-                    unsupported_narrow_scope = True
-            if assignment.program_id:
-                if hasattr(model, "program_id"):
-                    filters.append(getattr(model, "program_id") == assignment.program_id)
-                elif getattr(model, "__tablename__", "") == "programs":
-                    filters.append(D.Program.id == assignment.program_id)
-                else:
-                    unsupported_narrow_scope = True
-            if assignment.section_id:
-                if hasattr(model, "section_id"):
-                    filters.append(getattr(model, "section_id") == assignment.section_id)
-                elif getattr(model, "__tablename__", "") == "sections":
-                    filters.append(D.Section.id == assignment.section_id)
-                else:
-                    unsupported_narrow_scope = True
-            if not unsupported_narrow_scope:
-                clauses.append(and_(*filters) if filters else false())
-        return q.filter(or_(*clauses)) if clauses else q.filter(false())
-    ref = (ctx.get("scope_ref") or "").strip()
-    school_ref = ref if ref.startswith("school_") else None
-    ref = actor_department_id(s, ctx) or ref.removeprefix("dept_").removeprefix("scope_")
-    if school_ref and hasattr(model, "school_id"):
-        return q.filter(getattr(model, "school_id") == school_ref)
-    if ref and getattr(model, "__tablename__", "") == "departments":
-        return q.filter(getattr(model, "id") == ref)
-    if ref and hasattr(model, "dept_id"):
-        q = q.filter(getattr(model, "dept_id") == ref)
-    elif ref and hasattr(model, "scope_ref"):
-        q = q.filter(getattr(model, "scope_ref") == ref)
-    return q
-
-
-def require_academic_object(s, ctx, obj, action="read", label="academic object", allow_dean=True):
-    if not obj:
-        raise HTTPException(404, f"{label} not found")
-    authorize_object(ctx, s, obj, action, allow_dean=allow_dean)
-    return obj
-
-
-def gate(s, ctx, module: str, action: str, amount=None, governance: bool = False):
+def gate(s, ctx, module: str, action: str, amount=None):
     """Return the Decision for (module, action); raise 403 if not ALLOW/ESCALATE."""
     verb = MODULE_ACTIONS.get(module, {}).get(action, "view")
     o = office(ctx["office_n"])
-    if governance and ctx.get("office_n") not in ACADEMIC_GOVERNANCE_OFFICES:
-        from authority import Decision, DENY
-        return Decision(DENY, "Only Dean Academics, HOD, or Academic Coordinator may access academic governance", "Not Allowed"), "view"
     rbac = rbac_for(ctx["office_n"], o["level"], verb)
-    # Front Office cleanup is enforced server-side. Hiding its sidebar alone
-    # must never leave shared domain APIs reachable with a copied URL/token.
-    if ctx["office_n"] == 35 and module not in modules_for_office(35):
-        from authority import Decision, DENY
-        return Decision(DENY, f"{module} is not available to Front Office", rbac), verb
     # Office-level reservation of sensitive actions (Document §9 invariants, §10).
     if action != "view" and not action_allowed_for_office(module, action, ctx["office_n"]):
         from authority import Decision, DENY
@@ -626,7 +55,8 @@ def gate(s, ctx, module: str, action: str, amount=None, governance: bool = False
             approval_limit = approval_limit_for(scope_level, proc)
     dec = authorize(ctx=ctx, action=verb, resource=module, rbac_authority=rbac,
                     amount=amount, approval_limit=approval_limit,
-                    active_delegation=active_delegation_for(s, ctx["sub"]),
+                    active_delegation=active_delegation_for(
+                        s, ctx["sub"], ctx["tenant_id"], ctx["scope_ref"]),
                     target_scope_level=ctx.get("scope_level", "individual"),
                     escalate_to=escalate_to)
     return dec, verb
@@ -635,8 +65,6 @@ def gate(s, ctx, module: str, action: str, amount=None, governance: bool = False
 def can(s, ctx, module: str, action: str) -> bool:
     verb = MODULE_ACTIONS.get(module, {}).get(action, "view")
     o = office(ctx["office_n"])
-    if ctx["office_n"] == 35 and module not in modules_for_office(35):
-        return False
     if action != "view" and not action_allowed_for_office(module, action, ctx["office_n"]):
         return False
     return rbac_for(ctx["office_n"], o["level"], verb) not in ("Not Allowed",)
@@ -647,159 +75,40 @@ def require(dec):
         raise HTTPException(403, dec.reason)
 
 
-def require_tenant(row, ctx, label="record"):
-    if not row or getattr(row, "tenant_id", None) != ctx.get("tenant_id", TENANT):
-           raise HTTPException(404, f"{label} not found")
-    return row
-
-
-class DeanScopeAssignmentIn(BaseModel):
-    dean_user_id: str
-    school_id: str = ""
-    dept_id: str = ""
-    program_id: str = ""
-    section_id: str = ""
-    effective_from: datetime | None = None
-    effective_to: datetime | None = None
-
-
-def _dean_scope_payload(row):
-    return {
-        "id": row.id, "dean_user_id": row.dean_user_id, "school_id": row.school_id,
-        "dept_id": row.dept_id, "program_id": row.program_id, "section_id": row.section_id,
-        "active": row.active, "effective_from": row.effective_from.isoformat() if row.effective_from else None,
-        "effective_to": row.effective_to.isoformat() if row.effective_to else None,
-    }
-
-
-def _validate_dean_scope(s, ctx, body: DeanScopeAssignmentIn):
-    dean = s.get(User, body.dean_user_id)
-    if not dean or dean.tenant_id != ctx["tenant_id"] or dean.office_n != 6:
-        raise HTTPException(422, "dean_user_id must identify an active Dean Academics user in this tenant")
-    school = s.get(D.School, body.school_id) if body.school_id else None
-    dept = s.get(D.Department, body.dept_id) if body.dept_id else None
-    program = s.get(D.Program, body.program_id) if body.program_id else None
-    section = s.get(D.Section, body.section_id) if body.section_id else None
-    for label, row in (("school", school), ("department", dept), ("program", program), ("section", section)):
-        if (getattr(body, f"{label}_id", "") if label != "department" else body.dept_id) and (not row or row.tenant_id != ctx["tenant_id"]):
-            raise HTTPException(422, f"{label} is not in this tenant")
-    if dept and school and dept.school_id and dept.school_id != school.id:
-        raise HTTPException(422, "Department is not in the selected school")
-    if program and dept and program.dept_id != dept.id:
-        raise HTTPException(422, "Program is not in the selected department")
-    if section and dept and section.dept_id != dept.id:
-        raise HTTPException(422, "Section is not in the selected department")
-    if section and program:
-        course = s.get(D.Course, section.course_id)
-        if not course or course.program_id != program.id:
-            raise HTTPException(422, "Section is not in the selected program")
-    if body.effective_to and body.effective_from and body.effective_to < body.effective_from:
-        raise HTTPException(422, "effective_to cannot precede effective_from")
-
-
-@router.get("/academics/dean-scope-assignments")
-def list_dean_scope_assignments(ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] not in {6, 28}:
-        raise HTTPException(403, "Only Dean Academics or System Administration may view Dean scope assignments")
-    query = s.query(D.DeanScopeAssignment).filter(D.DeanScopeAssignment.tenant_id == ctx["tenant_id"])
-    if ctx["office_n"] == 6:
-        query = query.filter(D.DeanScopeAssignment.dean_user_id == ctx["sub"])
-    return {"assignments": [_dean_scope_payload(row) for row in query.order_by(D.DeanScopeAssignment.created_at.desc()).all()]}
-
-
-@router.post("/academics/dean-scope-assignments")
-def create_dean_scope_assignment(body: DeanScopeAssignmentIn, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] != 28:
-        raise HTTPException(403, "Only System Administration may assign Dean academic scope")
-    _validate_dean_scope(s, ctx, body)
-    now = datetime.utcnow()
-    row = D.DeanScopeAssignment(
-        id=uid(), tenant_id=ctx["tenant_id"], dean_user_id=body.dean_user_id,
-        school_id=body.school_id or None, dept_id=body.dept_id or None,
-        program_id=body.program_id or None, section_id=body.section_id or None,
-        active=True, effective_from=body.effective_from or now, effective_to=body.effective_to,
-        created_by=ctx["sub"], created_at=now, updated_at=now,
-    )
-    s.add(row)
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.dean_scope.assign",
-                f"dean_scope_assignment:{row.id}", "", "active", json.dumps(_dean_scope_payload(row)), commit=False)
-    s.commit()
-    return {"assignment": _dean_scope_payload(row)}
-
-
-def prevent_self_approval(proposal, ctx):
-    if proposal.submitted_by == ctx.get("sub"):
-        raise HTTPException(403, "Proposal submitter cannot approve or reject their own proposal")
-
-
-def claim_proposal_transition(s, proposal, expected_version, valid_states):
-    updated = (s.query(D.AcademicProposal)
-               .filter(D.AcademicProposal.id == proposal.id,
-                       D.AcademicProposal.status_version == expected_version,
-                       D.AcademicProposal.state.in_(valid_states))
-               .update({D.AcademicProposal.status_version: D.AcademicProposal.status_version + 1},
-                       synchronize_session=False))
-    if updated != 1:
-        raise HTTPException(409, "Proposal changed or is no longer awaiting this transition")
-    s.refresh(proposal)
-
-
 def actor_name(s, ctx):
-    u = s.query(User).get(ctx["sub"])
+    u = s.get(User, ctx["sub"])
     if not u:
         return ctx["sub"]
-    p = s.query(Person).get(u.person_id)
+    p = s.get(Person, u.person_id)
     return p.name if p else u.username
 
 
 def _staff_profile(s, ctx):
-    return s.query(D.StaffMember).filter(D.StaffMember.user_id == ctx["sub"]).first()
+    return s.query(D.StaffMember).filter(D.StaffMember.user_id == ctx["sub"], D.StaffMember.tenant_id == ctx["tenant_id"]).first()
 
 
-def _faculty_or_403(s, ctx):
-    staff = _staff_profile(s, ctx)
-    if not staff or ctx["office_n"] not in {11, 12, 13, 14}:
-        raise HTTPException(403, "Teaching faculty access required")
-    return staff
-
-
-def _session_or_404(s, session_id):
-    session = s.query(D.ClassSession).get(session_id)
-    if not session:
-        raise HTTPException(404, "Class session not found")
-    return session
-
-
-def _checkin_window_open(session, now):
-    if not session.scheduled_start or not session.scheduled_end:
-        return True
-    return session.scheduled_start - timedelta(minutes=30) <= now <= session.scheduled_end + timedelta(minutes=30)
-
-
-def _section_or_404(s, section_id: str):
-    row = s.query(D.Section).get(section_id)
+def _section_or_404(s, ctx, section_id: str):
+    row = (s.query(D.Section)
+           .filter(D.Section.id == section_id, D.Section.tenant_id == ctx["tenant_id"])
+           .first())
     if not row:
         raise HTTPException(404, "Section not found")
     return row
 
 
-def _section_course_payloads(s):
-    return {c.id: c for c in s.query(D.Course).all()}
+def _section_course_payloads(s, tenant_id):
+    return {c.id: c for c in s.query(D.Course).filter(D.Course.tenant_id == tenant_id).all()}
 
 
-def _section_faculty_names(s):
-    return {f.id: f.name for f in s.query(D.StaffMember).all()}
+def _section_faculty_names(s, tenant_id):
+    return {f.id: f.name for f in s.query(D.StaffMember).filter(D.StaffMember.tenant_id == tenant_id).all()}
 
 
 def _can_manage_section_for_timetable(s, ctx, section):
     if ctx["office_n"] == 6:
-        try:
-            authorize_object(ctx, s, section, "edit")
-            return True
-        except HTTPException:
-            return False
+        return True
     staff = _staff_profile(s, ctx)
-    if ctx["office_n"] in {43}:
+    if ctx["office_n"] in {10, 17}:
         return bool(staff and staff.dept_id == section.dept_id)
     return False
 
@@ -807,7 +116,7 @@ def _can_manage_section_for_timetable(s, ctx, section):
 def _can_manage_section_for_tasks(s, ctx, section):
     staff = _staff_profile(s, ctx)
     if ctx["office_n"] in {11, 12, 13, 14}:
-           return bool(staff and section.faculty_person_id == staff.id)
+        return bool(staff and section.faculty_person_id == staff.id)
     if ctx["office_n"] in {10, 17}:
         return bool(staff and staff.dept_id == section.dept_id)
     return ctx["office_n"] == 6
@@ -818,7 +127,7 @@ def _can_manage_section_for_assessments(s, ctx, section):
     if ctx["office_n"] == 16:
         return True
     if ctx["office_n"] in {11, 12, 13, 14}:
-           return bool(staff and section.faculty_person_id == staff.id)
+        return bool(staff and section.faculty_person_id == staff.id)
     return bool(ctx["office_n"] in {10, 17} and staff and staff.dept_id == section.dept_id)
 
 
@@ -840,21 +149,6 @@ def workspace(ctx=Depends(auth), s=Depends(db)):
         for act in MODULE_ACTIONS.get(key, {}):
             actions[act] = can(s, ctx, key, act)
         mods.append({**meta, "actions": actions})
-    staff = s.query(D.StaffMember).filter(D.StaffMember.user_id == ctx["sub"]).first()
-    if staff and staff.status == "active":
-        payroll = (
-            s.query(D.PayrollEmployee)
-            .filter(D.PayrollEmployee.staff_member_id == staff.id, D.PayrollEmployee.status == "active")
-            .first()
-        )
-        if payroll and not any(item["key"] == "my_payroll" for item in mods):
-            mods.append({
-                "key": "my_payroll",
-                "label": "My Payroll",
-                "icon": "Pay",
-                "group": "Self Service",
-                "actions": {"view": True},
-            })
     return {"office_n": ctx["office_n"], "office": o.get("name"),
             "level": o.get("level"), "scope_level": ctx.get("scope_level"),
             "modules": mods}
@@ -865,48 +159,155 @@ def workspace(ctx=Depends(auth), s=Depends(db)):
 # --------------------------------------------------------------------------- #
 @router.get("/overview")
 def overview(ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] == 35:
-           raise HTTPException(403, "The generic institutional overview is not available to Front Office.")
+    # The generic overview predates the Campus Head portal. Campus Head must
+    # never receive tenant-wide aggregates as a campus dashboard.
+    if ctx.get("office_n") == 3:
+        require(gate(s, ctx, "analytics", "view")[0])
+        campus = _campus_scope_for_campus_head(s, ctx)
+        tenant_id = ctx["tenant_id"]
+        students = s.query(D.Student).filter(D.Student.tenant_id == tenant_id,
+                                             D.Student.campus_scope_id == campus.id)
+        staff = s.query(D.StaffMember).filter(D.StaffMember.tenant_id == tenant_id,
+                                              D.StaffMember.campus_scope_id == campus.id)
+        dept_counts = dict(s.query(D.Department.code, func.count(D.Student.id))
+                           .join(D.Student, D.Student.dept_id == D.Department.id)
+                           .filter(D.Student.tenant_id == tenant_id,
+                                   D.Student.campus_scope_id == campus.id)
+                           .group_by(D.Department.code).all())
+        # Departments only have the legacy campus label rather than a canonical
+        # scope foreign key.  Resolve the authenticated canonical scope first,
+        # then use its tenant-local label to select its catalog records.  Program
+        # ownership is inherited through the selected department relationship.
+        catalog_departments = (s.query(D.Department)
+                               .filter(D.Department.tenant_id == tenant_id,
+                                       D.Department.campus == campus.name)
+                               .order_by(D.Department.code).all())
+        department_ids = [row.id for row in catalog_departments]
+        student_counts = dict(s.query(D.Student.dept_id, func.count(D.Student.id))
+                              .filter(D.Student.tenant_id == tenant_id,
+                                      D.Student.campus_scope_id == campus.id,
+                                      D.Student.dept_id.in_(department_ids))
+                              .group_by(D.Student.dept_id).all()) if department_ids else {}
+        program_counts = dict(s.query(D.Program.dept_id, func.count(D.Program.id))
+                              .filter(D.Program.tenant_id == tenant_id,
+                                      D.Program.dept_id.in_(department_ids))
+                              .group_by(D.Program.dept_id).all()) if department_ids else {}
+        department_programs = [{
+            "id": row.id,
+            "code": row.code,
+            "name": row.name,
+            "students": student_counts.get(row.id, 0),
+            "programs": program_counts.get(row.id, 0),
+        } for row in catalog_departments]
+        # No authoritative campus ownership exists for the remaining sources.
+        # `None` means unavailable; it must not be rendered as a real zero.
+        return {"stats": {"students": students.count(), "faculty": staff.count(),
+                "courses": None, "sections": None, "applications": None,
+                "fees_due": None, "books": None, "projects": None,
+                "open_complaints": None, "pending_leave": None,
+                "placement_offers": None}, "dept_distribution": dept_counts,
+                "department_programs": department_programs,
+                "program_mix": {row["code"]: row["programs"] for row in department_programs},
+                "campus_scope_id": campus.id, "data_status": "partial"}
+
+    tenant_id = ctx["tenant_id"]
     def c(model):
-        return s.query(model).count()
-    students_query = _real_students(s.query(D.Student))
+        return s.query(model).filter(model.tenant_id == tenant_id).count()
     stats = {
-        "students": students_query.count(), "faculty": c(D.StaffMember),
-        "provisional_students": students_query.filter(D.Student.status == "provisional").count(),
-        "active_students": students_query.filter(D.Student.status == "active").count(),
-           "students": c(D.Student), "faculty": c(D.StaffMember),
+        "students": c(D.Student), "faculty": c(D.StaffMember),
         "courses": c(D.Course), "sections": c(D.Section),
-        "applications": s.query(D.Application).filter(D.Application.status.in_(["submitted", "verified"])).count(),
-        "fees_due": s.query(func.coalesce(func.sum(D.FeeInvoice.amount - D.FeeInvoice.paid), 0)).filter(D.FeeInvoice.status != "paid").scalar() or 0,
-        "books": c(D.Book), "projects": s.query(D.ResearchProject).filter(D.ResearchProject.status == "ongoing").count(),
-        "open_complaints": s.query(D.Complaint).filter(D.Complaint.status != "resolved").count(),
-        "pending_leave": s.query(D.LeaveRequest).filter(D.LeaveRequest.status == "pending").count(),
-        "placement_offers": s.query(func.coalesce(func.sum(D.PlacementDrive.offers), 0)).scalar() or 0,
+        "applications": s.query(D.Application).filter(D.Application.tenant_id == tenant_id, D.Application.status.in_(["submitted", "verified"])).count(),
+        "fees_due": s.query(func.coalesce(func.sum(D.FeeInvoice.amount - D.FeeInvoice.paid), 0)).filter(D.FeeInvoice.tenant_id == tenant_id, D.FeeInvoice.status != "paid").scalar() or 0,
+        "books": c(D.Book), "projects": s.query(D.ResearchProject).filter(D.ResearchProject.tenant_id == tenant_id, D.ResearchProject.status == "ongoing").count(),
+        "open_complaints": s.query(D.Complaint).filter(D.Complaint.tenant_id == tenant_id, D.Complaint.status != "resolved").count(),
+        "pending_leave": s.query(D.LeaveRequest).filter(D.LeaveRequest.tenant_id == tenant_id, D.LeaveRequest.status == "pending").count(),
+        "placement_offers": s.query(func.coalesce(func.sum(D.PlacementDrive.offers), 0)).filter(D.PlacementDrive.tenant_id == tenant_id).scalar() or 0,
     }
     # department distribution for charts
-    dept_counts = dict(_real_students(s.query(D.Department.code, func.count(D.Student.id))
+    dept_counts = dict(s.query(D.Department.code, func.count(D.Student.id))
                        .join(D.Student, D.Student.dept_id == D.Department.id)
-                       .group_by(D.Department.code)).all())
+                       .filter(D.Department.tenant_id == tenant_id, D.Student.tenant_id == tenant_id)
+                       .group_by(D.Department.code).all())
     return {"stats": stats, "dept_distribution": dept_counts}
+
+
+# These are the existing catalog offices whose purpose is explicitly campus,
+# branch, school, or department leadership.  This is an office-policy list,
+# not a designation/title inference: a person appears only with an active
+# AuthorityMembership for one of these offices.
+CAMPUS_LEADERSHIP_OFFICES = frozenset({3, 4, 5, 6, 7, 8, 9, 10})
+
+
+@router.get("/campus-leadership")
+def campus_leadership(ctx=Depends(auth), s=Depends(db)):
+    """Authoritative, read-only leadership directory for a Campus Head."""
+    if ctx["office_n"] != 3:
+        raise HTTPException(403, "Campus leadership is available only to Campus Head offices")
+    require(gate(s, ctx, "analytics", "view")[0])
+    campus = _campus_scope_for_campus_head(s, ctx)
+    now = datetime.utcnow()
+    memberships = (s.query(AuthorityMembership)
+                   .filter(AuthorityMembership.tenant_id == ctx["tenant_id"],
+                           AuthorityMembership.org_scope_id == campus.id,
+                           AuthorityMembership.office_n.in_(CAMPUS_LEADERSHIP_OFFICES),
+                           AuthorityMembership.status == "active",
+                           AuthorityMembership.active_from <= now,
+                           or_(AuthorityMembership.active_to.is_(None), AuthorityMembership.active_to >= now))
+                   .order_by(AuthorityMembership.office_n, AuthorityMembership.created_at, AuthorityMembership.id)
+                   .all())
+    user_ids = [row.user_id for row in memberships]
+    users = {row.id: row for row in s.query(User).filter(User.id.in_(user_ids), User.tenant_id == ctx["tenant_id"]).all()} if user_ids else {}
+    persons = {row.id: row for row in s.query(Person).filter(Person.tenant_id == ctx["tenant_id"], Person.id.in_([user.person_id for user in users.values()])).all()} if users else {}
+    staff = {row.user_id: row for row in s.query(D.StaffMember).filter(
+        D.StaffMember.tenant_id == ctx["tenant_id"],
+        D.StaffMember.campus_scope_id == campus.id,
+        D.StaffMember.user_id.in_(user_ids),
+    ).all()} if user_ids else {}
+    departments = {row.id: row for row in s.query(D.Department).filter(D.Department.tenant_id == ctx["tenant_id"]).all()}
+    members = []
+    for membership in memberships:
+        user = users.get(membership.user_id)
+        if not user:
+            continue
+        person = persons.get(user.person_id)
+        staff_profile = staff.get(user.id)
+        department = departments.get(staff_profile.dept_id) if staff_profile and staff_profile.dept_id else None
+        members.append({
+            "id": membership.id,
+            "user_id": user.id,
+            "office_n": membership.office_n,
+            "office": office(membership.office_n)["name"],
+            "role": user.role,
+            "name": person.name if person else (staff_profile.name if staff_profile else user.username),
+            "email": person.email if person and person.email else (staff_profile.email if staff_profile else ""),
+            "phone": person.contact if person and person.contact else (staff_profile.phone if staff_profile else ""),
+            "employee_id": staff_profile.emp_id if staff_profile else "",
+            "designation": staff_profile.designation if staff_profile else "",
+            "department": department.name if department else "",
+            "department_code": department.code if department else "",
+            "status": membership.status,
+            "campus": campus.name,
+            "campus_scope_id": campus.id,
+            "joining_date": staff_profile.date_joined.isoformat() if staff_profile and staff_profile.date_joined else None,
+        })
+    return {"members": members, "campus_scope_id": campus.id, "data_status": "available"}
 
 
 @router.get("/overview/principal")
 def principal_overview(academic_year: str = "", student_semester: str = "", ctx=Depends(auth), s=Depends(db)):
     """Branch-leadership dashboard aggregates, calculated only from domain records."""
     require(gate(s, ctx, "analytics", "view")[0])
-    terms = [row[0] for row in s.query(D.AcademicCalendarEntry.term).distinct().all() if row[0]]
-    def academic_year_for(term):
-        try:
-            y = int(str(term)[:4])
-            return f"{y - 1 if str(term).lower().endswith('even') else y}-{str((y if str(term).lower().endswith('even') else y + 1))[-2:]}"
-        except (TypeError, ValueError): return ""
-    years = sorted(set(filter(None, (academic_year_for(t) for t in terms))), reverse=True)
-    selected_year = academic_year if academic_year in years else (years[0] if years else "")
-    # Class-allocated applicants are provisional students until Finance clears fees.
-    student_query = _real_students(s.query(D.Student)).filter(D.Student.status.in_(["active", "provisional"]))
-    student_query = _student_scope(
-        s.query(D.Student).filter(D.Student.status == "active"), ctx
-    )
+    # Batches are the same academic-year dimension used by the student risk
+    # register. Keeping this source shared makes the dashboard drill-down exact.
+    tenant_id = ctx["tenant_id"]
+    campus = _authenticated_campus_scope(s, ctx)
+    student_query = _student_scope(s, s.query(D.Student).filter(D.Student.tenant_id == tenant_id, D.Student.status == "active"), ctx)
+    scoped_students = student_query.all()
+    years = sorted({_academic_year_label(row.batch) for row in scoped_students if row.batch}, reverse=True)
+    selected_year = academic_year if academic_year in years else ("2026-27" if "2026-27" in years else (years[0] if years else ""))
+    if selected_year:
+        batches = [row.batch for row in scoped_students if _academic_year_label(row.batch) == selected_year]
+        student_query = student_query.filter(D.Student.batch.in_(batches))
     try:
         selected_student_semester = int(student_semester) if student_semester else 0
     except (TypeError, ValueError):
@@ -931,27 +332,56 @@ def principal_overview(academic_year: str = "", student_semester: str = "", ctx=
         next_month = (month.replace(day=28) + timedelta(days=4)).replace(day=1)
         rows = [r for r in attendance if month <= r.on_date < next_month]
         trend.append({"label": month.strftime("%b"), "value": round(100 * sum(1 for r in rows if r.present) / len(rows), 1) if rows else None})
+    risk_backlogs = _backlog_summary(s, student_ids)
+    attendance_totals = _attendance_totals(s, student_ids)
+    risk_ids = {row.id for row in students if _student_risk_payload(row, risk_backlogs[row.id], attendance_totals)["at_risk"]}
     cgpas = [row.cgpa or 0 for row in students]
     avg_cgpa = round(sum(cgpas) / len(cgpas), 2) if cgpas else 0
     pass_rate = round(100 * sum(1 for x in cgpas if x >= 4.5) / len(cgpas), 1) if cgpas else None
     bands = {"distinction": sum(1 for x in cgpas if x >= 7.5), "first": sum(1 for x in cgpas if 6 <= x < 7.5), "second": sum(1 for x in cgpas if 4.5 <= x < 6), "others": sum(1 for x in cgpas if x < 4.5)}
-    open_complaints = s.query(D.Complaint).filter(D.Complaint.status != "resolved").count()
-    pending_workflows = s.query(WorkflowInstance).filter(WorkflowInstance.office_n == ctx["office_n"], WorkflowInstance.state.in_(["submitted", "under_review", "reviewed", "escalated"])).all()
-    assessments = s.query(D.Assessment).count(); marks = s.query(D.Mark).count()
-    asset_maintenance = s.query(D.Asset).filter(D.Asset.status == "maintenance").count()
-    notifications = s.query(Notification).filter(Notification.user_id == ctx["sub"]).order_by(desc(Notification.created_at)).limit(6).all()
+    workflow_query = s.query(WorkflowInstance).filter(
+        WorkflowInstance.tenant_id == tenant_id,
+        WorkflowInstance.office_n == ctx["office_n"],
+        WorkflowInstance.state.in_(["submitted", "under_review", "reviewed", "escalated"]),
+    )
+    asset_query = s.query(D.Asset).filter(D.Asset.tenant_id == tenant_id, D.Asset.status == "maintenance")
+    faculty_query = s.query(D.StaffMember).filter(D.StaffMember.tenant_id == tenant_id, D.StaffMember.status == "active")
+    procurement_query = s.query(WorkflowInstance).filter(
+        WorkflowInstance.tenant_id == tenant_id,
+        WorkflowInstance.process_key == "purchase_request",
+        WorkflowInstance.state.in_(["submitted", "under_review", "reviewed", "escalated"]),
+    )
+    if campus:
+        # These models have authoritative scope IDs, so campus Principals see
+        # only their campus records rather than every record in the tenant.
+        workflow_query = workflow_query.filter(WorkflowInstance.campus_scope_id == campus.id)
+        asset_query = asset_query.filter(D.Asset.campus_scope_id == campus.id)
+        faculty_query = faculty_query.filter(D.StaffMember.campus_scope_id == campus.id)
+        procurement_query = procurement_query.filter(WorkflowInstance.campus_scope_id == campus.id)
+    pending_workflows = workflow_query.all()
+    asset_maintenance = asset_query.count()
+    faculty_count = faculty_query.count()
+    # Complaints, assessments, result sheets, and sections have no canonical
+    # campus field yet.  Do not label tenant-wide numbers as campus KPIs.
+    campus_limited = campus is not None
+    assessments = None if campus_limited else s.query(D.Assessment).filter(D.Assessment.tenant_id == tenant_id).count()
+    marks = None if campus_limited else s.query(D.Mark).filter(D.Mark.tenant_id == tenant_id).count()
+    notifications = s.query(Notification).filter(Notification.tenant_id == tenant_id, Notification.user_id == ctx["sub"]).order_by(desc(Notification.created_at)).limit(6).all()
     return {
         "filters": {"academic_years": years, "selected_year": selected_year, "selected_student_semester": selected_student_semester, "student_semesters": list(range(1, 9))},
-        "kpis": {"students": len(students), "faculty": s.query(D.StaffMember).filter(D.StaffMember.status == "active").count(), "attendance": attendance_pct, "decisions": len(pending_workflows), "risk_students": sum(1 for x in cgpas if x < 6), "critical_alerts": sum(1 for n in notifications if n.severity == "critical")},
+        "kpis": {"students": len(students), "faculty": faculty_count, "attendance": attendance_pct, "decisions": len(pending_workflows), "risk_students": len(risk_ids), "critical_alerts": sum(1 for n in notifications if n.severity == "critical")},
         "attendance": {"today": attendance_pct, "today_records": len(today_rows), "trend": trend},
-        "performance": {"average_cgpa": avg_cgpa, "pass_rate": pass_rate, "bands": bands, "at_risk": sum(1 for x in cgpas if x < 6), "backlogs": sum(1 for x in cgpas if x < 4.5)},
-        "examinations": {"sections": s.query(D.Section).count(), "assessments": assessments, "marks_submitted": marks, "pending_moderation": s.query(D.ResultSheet).filter(D.ResultSheet.status != "published").count()},
-        "welfare": {"at_risk": sum(1 for x in cgpas if x < 6), "grievances": s.query(D.Complaint).filter(D.Complaint.kind == "Grievance", D.Complaint.status != "resolved").count(), "discipline": s.query(D.Complaint).filter(D.Complaint.kind == "Discipline", D.Complaint.status != "resolved").count(), "critical": s.query(D.Complaint).filter(D.Complaint.severity == "high", D.Complaint.status != "resolved").count()},
-        # Procurement and asset-request records are not modelled yet.  Return
-        # an explicit unavailable value rather than presenting a fabricated 0.
-        "operations": {"maintenance": asset_maintenance, "procurement": None, "asset_requests": None, "facilities": asset_maintenance},
+        "performance": {"average_cgpa": avg_cgpa, "pass_rate": pass_rate, "bands": bands, "at_risk": len(risk_ids), "backlogs": sum(1 for item in risk_backlogs.values() if item["current"] > 0)},
+        "examinations": {"sections": None if campus_limited else s.query(D.Section).filter(D.Section.tenant_id == tenant_id).count(), "assessments": assessments, "marks_submitted": marks, "pending_moderation": None if campus_limited else s.query(D.ResultSheet).filter(D.ResultSheet.tenant_id == tenant_id, D.ResultSheet.status != "published").count()},
+        "welfare": {"at_risk": len(risk_ids), "grievances": None if campus_limited else s.query(D.Complaint).filter(D.Complaint.tenant_id == tenant_id, D.Complaint.kind == "Grievance", D.Complaint.status != "resolved").count(), "discipline": None if campus_limited else s.query(D.Complaint).filter(D.Complaint.tenant_id == tenant_id, D.Complaint.kind == "Discipline", D.Complaint.status != "resolved").count(), "critical": None if campus_limited else s.query(D.Complaint).filter(D.Complaint.tenant_id == tenant_id, D.Complaint.severity == "high", D.Complaint.status != "resolved").count()},
+        # Procurement is an authoritative campus-scoped workflow count.
+        # There is no separate asset-request or facilities-alert model, so
+        # those cards remain explicitly unavailable rather than duplicating
+        # maintenance figures or presenting a hard-coded zero.
+        "operations": {"maintenance": asset_maintenance, "procurement": procurement_query.count(), "asset_requests": None, "facilities": None},
         "workflows": [{"id": w.id, "title": w.title, "label": w.process_key.replace('_', ' ').title(), "state": w.state, "initiator": w.initiator_name or "Request"} for w in pending_workflows[:5]],
         "notifications": [{"id": n.id, "title": n.title, "severity": n.severity, "created_at": n.created_at.isoformat()} for n in notifications],
+        "data_scope": "campus" if campus_limited else "tenant",
     }
 
 
@@ -998,8 +428,10 @@ def _percent_delta(current: float, previous: float) -> dict:
 @router.get("/overview/chairman")
 def chairman_overview(start: str = "", end: str = "", ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "governance", "view")[0])
+    tenant_id = ctx["tenant_id"]
 
     available_snapshots = (s.query(D.InstitutionSnapshot)
+                           .filter(D.InstitutionSnapshot.tenant_id == tenant_id)
                            .order_by(D.InstitutionSnapshot.snapshot_month.desc()).all())
     latest_snapshot = available_snapshots[0] if available_snapshots else None
     selected_start = date.fromisoformat(start) if start else (
@@ -1011,9 +443,11 @@ def chairman_overview(start: str = "", end: str = "", ctx=Depends(auth), s=Depen
     previous_end = _month_end(previous_start)
 
     snapshot = (s.query(D.InstitutionSnapshot)
-                .filter(D.InstitutionSnapshot.snapshot_month == selected_start).first())
+                .filter(D.InstitutionSnapshot.tenant_id == tenant_id,
+                        D.InstitutionSnapshot.snapshot_month == selected_start).first())
     previous_snapshot = (s.query(D.InstitutionSnapshot)
-                         .filter(D.InstitutionSnapshot.snapshot_month == previous_start).first())
+                         .filter(D.InstitutionSnapshot.tenant_id == tenant_id,
+                                 D.InstitutionSnapshot.snapshot_month == previous_start).first())
 
     current_outstanding = snapshot.outstanding_fees if snapshot else 0
     previous_outstanding = previous_snapshot.outstanding_fees if previous_snapshot else 0
@@ -1022,54 +456,54 @@ def chairman_overview(start: str = "", end: str = "", ctx=Depends(auth), s=Depen
     ) if previous_outstanding else 0
 
     acc_total = (s.query(D.Accreditation)
-                 .filter(D.Accreditation.status == "active",
+                 .filter(D.Accreditation.tenant_id == tenant_id, D.Accreditation.status == "active",
                          D.Accreditation.awarded_on <= selected_end).count())
     acc_current = (s.query(D.Accreditation)
-                   .filter(D.Accreditation.awarded_on >= selected_start,
+                   .filter(D.Accreditation.tenant_id == tenant_id, D.Accreditation.awarded_on >= selected_start,
                            D.Accreditation.awarded_on <= selected_end).count())
     acc_previous = (s.query(D.Accreditation)
-                    .filter(D.Accreditation.awarded_on >= previous_start,
+                    .filter(D.Accreditation.tenant_id == tenant_id, D.Accreditation.awarded_on >= previous_start,
                             D.Accreditation.awarded_on <= previous_end).count())
 
     partner_total = (s.query(D.Partner)
-                     .filter(D.Partner.status == "active",
+                     .filter(D.Partner.tenant_id == tenant_id, D.Partner.status == "active",
                              D.Partner.started_on <= selected_end).count())
     partner_current = (s.query(D.Partner)
-                       .filter(D.Partner.started_on >= selected_start,
+                       .filter(D.Partner.tenant_id == tenant_id, D.Partner.started_on >= selected_start,
                                D.Partner.started_on <= selected_end).count())
     partner_previous = (s.query(D.Partner)
-                        .filter(D.Partner.started_on >= previous_start,
+                        .filter(D.Partner.tenant_id == tenant_id, D.Partner.started_on >= previous_start,
                                 D.Partner.started_on <= previous_end).count())
 
     esc_total = (s.query(WorkflowInstance)
-                 .filter(WorkflowInstance.state == "escalated",
+                 .filter(WorkflowInstance.tenant_id == tenant_id, WorkflowInstance.state == "escalated",
                          WorkflowInstance.updated_at <= datetime.combine(selected_end, datetime.max.time()))
                  .count())
     esc_current = (s.query(WorkflowInstance)
-                   .filter(WorkflowInstance.state == "escalated",
+                   .filter(WorkflowInstance.tenant_id == tenant_id, WorkflowInstance.state == "escalated",
                            WorkflowInstance.updated_at >= datetime.combine(selected_start, datetime.min.time()),
                            WorkflowInstance.updated_at <= datetime.combine(selected_end, datetime.max.time()))
                    .count())
     esc_previous = (s.query(WorkflowInstance)
-                    .filter(WorkflowInstance.state == "escalated",
+                    .filter(WorkflowInstance.tenant_id == tenant_id, WorkflowInstance.state == "escalated",
                             WorkflowInstance.updated_at >= datetime.combine(previous_start, datetime.min.time()),
                             WorkflowInstance.updated_at <= datetime.combine(previous_end, datetime.max.time()))
                     .count())
 
     institution = {
-        "schools": s.query(D.School).filter(D.School.status == "active").count(),
-        "departments": s.query(D.Department).count(),
-        "programs": s.query(D.Program).count(),
-        "campuses": s.query(OrgScope).filter(OrgScope.level == "campus").count(),
-        "total_staff": snapshot.total_staff if snapshot else s.query(D.StaffMember).count(),
+        "schools": s.query(D.School).filter(D.School.tenant_id == tenant_id, D.School.status == "active").count(),
+        "departments": s.query(D.Department).filter(D.Department.tenant_id == tenant_id).count(),
+        "programs": s.query(D.Program).filter(D.Program.tenant_id == tenant_id).count(),
+        "campuses": s.query(OrgScope).filter(OrgScope.tenant_id == tenant_id, OrgScope.level == "campus").count(),
+        "total_staff": snapshot.total_staff if snapshot else s.query(D.StaffMember).filter(D.StaffMember.tenant_id == tenant_id).count(),
         "non_teaching_staff": snapshot.non_teaching_staff if snapshot else 0,
-        "active_users": snapshot.active_users if snapshot else s.query(User).filter(User.status == "active").count(),
+        "active_users": snapshot.active_users if snapshot else s.query(User).filter(User.tenant_id == tenant_id, User.status == "active").count(),
         "system_uptime": snapshot.system_uptime if snapshot else 99.0,
     }
 
     ytd_start = date(selected_end.year, 1, 1)
     entries = (s.query(D.FinancialEntry)
-               .filter(D.FinancialEntry.recorded_on >= ytd_start,
+               .filter(D.FinancialEntry.tenant_id == tenant_id, D.FinancialEntry.recorded_on >= ytd_start,
                        D.FinancialEntry.recorded_on <= selected_end).all())
     income_entries = [row for row in entries if row.entry_type == "income"]
     expense_entries = [row for row in entries if row.entry_type == "expense"]
@@ -1087,7 +521,7 @@ def chairman_overview(start: str = "", end: str = "", ctx=Depends(auth), s=Depen
 
     pending_states = ["submitted", "under_review", "reviewed", "escalated"]
     approval_rows = (s.query(WorkflowInstance.title, func.count(WorkflowInstance.id))
-                     .filter(WorkflowInstance.state.in_(pending_states))
+                     .filter(WorkflowInstance.tenant_id == tenant_id, WorkflowInstance.state.in_(pending_states))
                      .group_by(WorkflowInstance.title).all())
     preferred = [
         "Campus Development Plan",
@@ -1102,12 +536,9 @@ def chairman_overview(start: str = "", end: str = "", ctx=Depends(auth), s=Depen
         "status": "Pending",
     } for title in preferred]
 
-    chairman = s.query(User).filter(User.username == "chairman").first()
-    alert_rows = []
-    if chairman:
-        alert_rows = (s.query(Notification)
-                      .filter(Notification.user_id == chairman.id)
-                      .order_by(Notification.created_at.desc()).limit(4).all())
+    alert_rows = (s.query(Notification)
+                  .filter(Notification.tenant_id == tenant_id, Notification.user_id == ctx["sub"])
+                  .order_by(Notification.created_at.desc()).limit(4).all())
     alerts = [{
         "title": row.title,
         "body": row.body,
@@ -1183,8 +614,10 @@ def chairman_overview(start: str = "", end: str = "", ctx=Depends(auth), s=Depen
 @router.get("/overview/chairman/outstanding-fees")
 def chairman_outstanding_fees(start: str = "", ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "governance", "view")[0])
+    tenant_id = ctx["tenant_id"]
 
     available = (s.query(D.OutstandingFeeSnapshot)
+                 .filter(D.OutstandingFeeSnapshot.tenant_id == tenant_id)
                  .order_by(D.OutstandingFeeSnapshot.snapshot_month.desc()).all())
     latest = available[0] if available else None
     selected_start = date.fromisoformat(start) if start else (
@@ -1193,7 +626,8 @@ def chairman_outstanding_fees(start: str = "", ctx=Depends(auth), s=Depends(db))
     selected_start = _month_start(selected_start)
 
     current = (s.query(D.OutstandingFeeSnapshot)
-               .filter(D.OutstandingFeeSnapshot.snapshot_month == selected_start).first())
+               .filter(D.OutstandingFeeSnapshot.tenant_id == tenant_id,
+                       D.OutstandingFeeSnapshot.snapshot_month == selected_start).first())
     if not current and latest:
         current = latest
         selected_start = latest.snapshot_month
@@ -1210,11 +644,13 @@ def chairman_outstanding_fees(start: str = "", ctx=Depends(auth), s=Depends(db))
         }
 
     previous = (s.query(D.OutstandingFeeSnapshot)
-                .filter(D.OutstandingFeeSnapshot.snapshot_month < selected_start)
+                .filter(D.OutstandingFeeSnapshot.tenant_id == tenant_id,
+                        D.OutstandingFeeSnapshot.snapshot_month < selected_start)
                 .order_by(D.OutstandingFeeSnapshot.snapshot_month.desc()).first())
 
     trend_rows = (s.query(D.OutstandingFeeSnapshot)
-                  .filter(D.OutstandingFeeSnapshot.snapshot_month <= selected_start)
+                  .filter(D.OutstandingFeeSnapshot.tenant_id == tenant_id,
+                          D.OutstandingFeeSnapshot.snapshot_month <= selected_start)
                   .order_by(D.OutstandingFeeSnapshot.snapshot_month.desc()).limit(6).all())
     trend_rows = list(reversed(trend_rows))
 
@@ -1253,14 +689,7 @@ def chairman_outstanding_fees(start: str = "", ctx=Depends(auth), s=Depends(db))
 # --------------------------------------------------------------------------- #
 #  CALENDAR HUB
 # --------------------------------------------------------------------------- #
-CALENDAR_ACADEMIC_EDITORS = {1, 2, 4, 5, 17}
-# Calendar changes are governed by the Dean.  Operational staff submit proposals;
-# the legacy CRUD routes below remain readable for already-published milestones.
-CALENDAR_ACADEMIC_EDITORS = {6}
-# Calendar changes are operational requests. The Dean independently reviews
-# them and must never originate work that reaches their own approval queue.
-CALENDAR_PROPOSERS = {42}
-ACADEMIC_PROPOSAL_STATES = {"DRAFT", "SUBMITTED", "UNDER_REVIEW", "CLARIFICATION_REQUIRED", "RESUBMITTED", "APPROVED", "REJECTED", "RETURNED", "ESCALATED", "IMPLEMENTED", "CLOSED"}
+CALENDAR_ACADEMIC_EDITORS = {1, 2, 4, 5}
 
 
 def _month_label(d: date) -> str:
@@ -1317,51 +746,6 @@ def _academic_entry_editable(ctx, row) -> bool:
     return ctx["office_n"] in CALENDAR_ACADEMIC_EDITORS and row.status != "deleted"
 
 
-def _proposal_version(s, proposal):
-    return (s.query(D.AcademicProposalVersion)
-            .filter(D.AcademicProposalVersion.proposal_id == proposal.id,
-                    D.AcademicProposalVersion.version_no == proposal.version_no).first())
-
-
-def _proposal_payload(s, proposal):
-    version = _proposal_version(s, proposal)
-    data = json.loads(version.payload_json or "{}") if version else {}
-    events = (s.query(D.AcademicProposalEvent)
-              .filter(D.AcademicProposalEvent.proposal_id == proposal.id)
-              .order_by(D.AcademicProposalEvent.created_at).all())
-    return {"id": proposal.id, "type": proposal.proposal_type, "title": proposal.title,
-            "state": proposal.state, "version_no": proposal.version_no,
-            "status_version": proposal.status_version, "due_at": proposal.due_at.isoformat() if proposal.due_at else None,
-            "submitted_by": proposal.submitted_by, "submitted_office_n": proposal.submitted_office_n,
-            "implementation_ref": proposal.implementation_ref, "payload": data,
-            "events": [{"from": item.from_state, "to": item.to_state, "reason": item.reason,
-                        "actor_id": item.actor_id, "office_n": item.actor_office_n,
-                        "at": item.created_at.isoformat() if item.created_at else None} for item in events]}
-
-
-def _proposal_event(s, proposal, ctx, previous, target, reason=""):
-    s.add(D.AcademicProposalEvent(id=uid(), tenant_id=TENANT, proposal_id=proposal.id,
-                                  from_state=previous, to_state=target, actor_id=ctx["sub"],
-                                  actor_office_n=ctx["office_n"], reason=reason))
-
-
-def _proposal_notice(s, user_id, title, body, severity="action"):
-    s.add(Notification(id=uid(), tenant_id=TENANT, user_id=user_id, severity=severity,
-                       title=title, body=body))
-
-
-def _calendar_impact(s, payload):
-    """Identify affected published operational records before a Dean decision."""
-    start = date.fromisoformat(payload["start_date"])
-    end = date.fromisoformat(payload.get("end_date") or payload["start_date"])
-    timetable = s.query(D.TimetableEntry).filter(D.TimetableEntry.status == "active").all()
-    affected_timetable = [row.id for row in timetable if row.effective_from and row.effective_from <= end and (not row.effective_to or row.effective_to >= start)]
-    exams = s.query(D.ExamScheduleEntry).filter(D.ExamScheduleEntry.status.in_(["scheduled", "rescheduled"])).all()
-    affected_exams = [row.id for row in exams if row.start_at and start <= row.start_at.date() <= end]
-    return {"timetable_entries": affected_timetable, "exam_schedule_entries": affected_exams,
-            "requires_exception_review": bool(affected_timetable or affected_exams)}
-
-
 def _event_payload(event_id, title, category, audience, start_dt, end_dt,
                    *, all_day=False, location="", description="", source_type="manual",
                    source_ref="", color="", status="published", editable=False,
@@ -1395,26 +779,26 @@ def _linked_student(s, ctx):
     st = s.query(D.Student).filter(D.Student.user_id == ctx["sub"]).first()
     if st:
         return st
-    scope_ref = ctx.get("scope_ref", "")
+    scope_ref = ctx["scope_ref"]
     if ctx["office_n"] in {36, 37} and scope_ref and not scope_ref.startswith("scope_"):
-        st = s.query(D.Student).get(scope_ref)
+        st = s.get(D.Student, scope_ref)
     if st:
         return st
-    login = s.query(User).get(ctx["sub"])
+    login = s.get(User, ctx["sub"])
     if login and login.username in {"student", "parent"}:
         return s.query(D.Student).order_by(D.Student.cgpa.desc()).first()
     return None
 
 
-def _fanout_notification(s, audience: str, title: str, body: str, severity="info"):
+def _fanout_notification(s, ctx, audience: str, title: str, body: str, severity="info"):
     tokens = {item.strip().lower() for item in (audience or "all").split(",") if item.strip()}
-    users = s.query(User).filter(User.status == "active").all()
+    users = s.query(User).filter(User.tenant_id == ctx["tenant_id"], User.status == "active").all()
     notified = set()
     for user in users:
         if user.id in notified:
             continue
         if _audience_visible(",".join(tokens) if tokens else "all", _audiences_for_office(user.office_n)):
-            s.add(Notification(id=uid(), tenant_id=TENANT, user_id=user.id,
+            s.add(Notification(id=uid(), tenant_id=ctx["tenant_id"], user_id=user.id,
                                severity=severity, title=title, body=body))
             notified.add(user.id)
     if notified:
@@ -1436,17 +820,11 @@ class CalendarEventIn(BaseModel):
 
 class AcademicCalendarIn(BaseModel):
     term: str
-    academic_year: str = ""
-    program_id: str | None = None
-    department_id: str | None = None
-    student_year: int | None = Field(default=None, ge=1, le=4)
     title: str
     category: str = "Teaching"
     campus: str = "All Campuses"
     start_date: str
     end_date: str = ""
-    start_time: str = ""
-    end_time: str = ""
     description: str = ""
     status: str = "published"
 
@@ -1454,6 +832,8 @@ class AcademicCalendarIn(BaseModel):
 @router.get("/calendar")
 def calendar_view(start: str = "", ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "calendar", "view")[0])
+    campus = _campus_scope_for_campus_head(s, ctx) if ctx.get("office_n") == 3 else None
+    tenant_id = ctx["tenant_id"]
     month_start = _parse_month(start)
     month_end = _month_end(month_start)
     start_dt = datetime.combine(month_start, datetime.min.time())
@@ -1462,11 +842,12 @@ def calendar_view(start: str = "", ctx=Depends(auth), s=Depends(db)):
 
     events = []
 
-    manual_rows = (s.query(D.CalendarEvent)
+    manual_query = (s.query(D.CalendarEvent)
                    .filter(D.CalendarEvent.status != "deleted",
                            D.CalendarEvent.start_at <= end_dt,
-                           func.coalesce(D.CalendarEvent.end_at, D.CalendarEvent.start_at) >= start_dt)
-                   .order_by(D.CalendarEvent.start_at, D.CalendarEvent.title).all())
+                           func.coalesce(D.CalendarEvent.end_at, D.CalendarEvent.start_at) >= start_dt,
+                           D.CalendarEvent.tenant_id == tenant_id))
+    manual_rows = [] if campus else manual_query.order_by(D.CalendarEvent.start_at, D.CalendarEvent.title).all()
     for row in manual_rows:
         if not _audience_visible(row.audience, viewer_tokens):
             continue
@@ -1478,11 +859,14 @@ def calendar_view(start: str = "", ctx=Depends(auth), s=Depends(db)):
             editable=_calendar_event_editable(ctx, row), module_key="calendar"
         ))
 
-    academic_rows = (s.query(D.AcademicCalendarEntry)
+    academic_query = (s.query(D.AcademicCalendarEntry)
                      .filter(D.AcademicCalendarEntry.status != "deleted",
                              D.AcademicCalendarEntry.start_date <= month_end,
-                             func.coalesce(D.AcademicCalendarEntry.end_date, D.AcademicCalendarEntry.start_date) >= month_start)
-                     .order_by(D.AcademicCalendarEntry.start_date, D.AcademicCalendarEntry.title).all())
+                             func.coalesce(D.AcademicCalendarEntry.end_date, D.AcademicCalendarEntry.start_date) >= month_start,
+                             D.AcademicCalendarEntry.tenant_id == tenant_id))
+    if campus:
+        academic_query = academic_query.filter(D.AcademicCalendarEntry.campus.in_([campus.name, "All Campuses"]))
+    academic_rows = academic_query.order_by(D.AcademicCalendarEntry.start_date, D.AcademicCalendarEntry.title).all()
     for row in academic_rows:
         acad_start = datetime.combine(row.start_date, datetime.min.time())
         acad_end = datetime.combine(row.end_date or row.start_date, datetime.max.time())
@@ -1493,9 +877,10 @@ def calendar_view(start: str = "", ctx=Depends(auth), s=Depends(db)):
             status=row.status, editable=False, module_key="academic_calendar"
         ))
 
-    drive_rows = (s.query(D.PlacementDrive)
+    drive_rows = ([] if campus else s.query(D.PlacementDrive)
                   .filter(D.PlacementDrive.date >= month_start,
-                          D.PlacementDrive.date <= month_end).all())
+                          D.PlacementDrive.date <= month_end,
+                          D.PlacementDrive.tenant_id == tenant_id).all())
     for row in drive_rows:
         drive_dt = datetime.combine(row.date, datetime.min.time())
         events.append(_event_payload(
@@ -1634,7 +1019,7 @@ def create_calendar_event(body: CalendarEventIn, ctx=Depends(auth), s=Depends(db
     start_at = _parse_datetime_value(body.start_at)
     end_at = _parse_datetime_value(body.end_at, end=True) or start_at
     row = D.CalendarEvent(
-        id=uid(), tenant_id=TENANT, title=body.title, category=body.category,
+        id=uid(), tenant_id=ctx["tenant_id"], title=body.title, category=body.category,
         audience=body.audience or "all", start_at=start_at, end_at=end_at,
         all_day=body.all_day, location=body.location, description=body.description,
         owner_office_n=ctx["office_n"], source_type="manual", source_ref="",
@@ -1647,7 +1032,7 @@ def create_calendar_event(body: CalendarEventIn, ctx=Depends(auth), s=Depends(db
                 f"calendar:{row.id}", "", row.status,
                 f"Created calendar event '{row.title}'")
     _fanout_notification(
-        s, row.audience,
+        s, ctx, row.audience,
         f"Calendar updated: {row.title}",
         f"{row.category} event scheduled on {row.start_at.strftime('%d %b %Y %H:%M')}.",
         severity="info",
@@ -1662,7 +1047,7 @@ def create_calendar_event(body: CalendarEventIn, ctx=Depends(auth), s=Depends(db
 
 @router.put("/calendar/{event_id}")
 def update_calendar_event(event_id: str, body: CalendarEventIn, ctx=Depends(auth), s=Depends(db)):
-    row = s.get(D.CalendarEvent, event_id)
+    row = s.query(D.CalendarEvent).filter(D.CalendarEvent.id == event_id, D.CalendarEvent.tenant_id == ctx["tenant_id"]).first()
     if not row or row.status == "deleted":
         raise HTTPException(404, "Calendar event not found")
     if row.source_type != "manual":
@@ -1689,7 +1074,7 @@ def update_calendar_event(event_id: str, body: CalendarEventIn, ctx=Depends(auth
                 f"calendar:{row.id}", prev, row.status,
                 f"Updated calendar event '{row.title}'")
     _fanout_notification(
-        s, row.audience,
+        s, ctx, row.audience,
         f"Calendar revised: {row.title}",
         f"{row.category} event details were updated for {row.start_at.strftime('%d %b %Y %H:%M')}.",
         severity="action",
@@ -1704,7 +1089,7 @@ def update_calendar_event(event_id: str, body: CalendarEventIn, ctx=Depends(auth
 
 @router.delete("/calendar/{event_id}")
 def delete_calendar_event(event_id: str, ctx=Depends(auth), s=Depends(db)):
-    row = s.get(D.CalendarEvent, event_id)
+    row = s.query(D.CalendarEvent).filter(D.CalendarEvent.id == event_id, D.CalendarEvent.tenant_id == ctx["tenant_id"]).first()
     if not row or row.status == "deleted":
         raise HTTPException(404, "Calendar event not found")
     dec, _ = gate(s, ctx, "calendar", "delete")
@@ -1722,165 +1107,31 @@ def delete_calendar_event(event_id: str, ctx=Depends(auth), s=Depends(db)):
     return {"ok": True, "decision": dec.as_dict()}
 
 
-class AcademicCalendarProposalIn(AcademicCalendarIn):
-    rationale: str = ""
-    due_at: str = ""
-
-
-class AcademicProposalTransitionIn(BaseModel):
-    expected_status_version: int = Field(ge=0)
-    reason: str = ""
-
-
-@router.get("/academic-calendar/proposals")
-def academic_calendar_proposals(state: str = "", ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academic_calendar", "view", governance=True)[0])
-    # Academic Office proposals are institution-scoped and deliberately have no
-    # department reference. Query ownership directly so a returned proposal is
-    # never hidden from the actor that must revise and resubmit it.
-    query = (s.query(D.AcademicProposal).filter(
-        D.AcademicProposal.tenant_id == ctx["tenant_id"],
-        D.AcademicProposal.proposal_type == "calendar",
-        D.AcademicProposal.submitted_by == ctx["sub"],
-    ) if ctx["office_n"] == 42 else scoped_academic_query(s, D.AcademicProposal, ctx).filter(D.AcademicProposal.proposal_type == "calendar"))
-    if state:
-        query = query.filter(D.AcademicProposal.state == state.upper())
-    if ctx["office_n"] == 42:
-        # Academic Office operates at faculty/institution scope and can create
-        # a calendar proposal with no department reference.  Its own queue is
-        # therefore ownership-scoped, not artificially filtered to a missing
-        # department identifier.
-        pass
-    elif ctx["office_n"] != 6:
-        query = query.filter(D.AcademicProposal.scope_ref == (actor_department_id(s, ctx) or "__no_scope__"))
-    rows = query.order_by(desc(D.AcademicProposal.updated_at)).all()
-    return {"proposals": [_proposal_payload(s, row) for row in rows],
-            "can_propose": ctx["office_n"] in CALENDAR_PROPOSERS,
-            "can_decide": ctx["office_n"] == 6}
-
-
-@router.get("/academic-calendar/proposals/{proposal_id}")
-def academic_calendar_proposal_detail(proposal_id: str, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academic_calendar", "view", governance=True)[0])
-    proposal = require_academic_object(s, ctx, s.get(D.AcademicProposal, proposal_id), "read", "Calendar proposal")
-    if proposal.proposal_type != "calendar": raise HTTPException(404, "Calendar proposal not found")
-    return {"proposal": _proposal_payload(s, proposal)}
-
-
-@router.post("/academic-calendar/proposals")
-def create_academic_calendar_proposal(body: AcademicCalendarProposalIn, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academic_calendar", "view", governance=True)[0])
-    if ctx["office_n"] not in CALENDAR_PROPOSERS:
-        raise HTTPException(403, "Only an authorized Academic Office or Academic Coordinator actor can propose calendar changes")
-    if not body.title.strip() or not body.term.strip():
-        raise HTTPException(422, "Title and term are required")
-    start = date.fromisoformat(body.start_date)
-    end = date.fromisoformat(body.end_date) if body.end_date else start
-    if end < start:
-        raise HTTPException(422, "End date cannot be before start date")
-    payload = body.model_dump(exclude={"rationale", "due_at", "status"})
-    payload["end_date"] = end.isoformat()
-    payload["impact"] = _calendar_impact(s, payload)
-    now = datetime.utcnow()
-    proposal = D.AcademicProposal(id=uid(), tenant_id=TENANT, proposal_type="calendar",
-                                  title=body.title.strip(), scope_level="department" if ctx["office_n"] != 6 else "faculty",
-                                  scope_ref=actor_department_id(s, ctx) or "", state="DRAFT", version_no=1,
-                                  submitted_by=ctx["sub"], submitted_office_n=ctx["office_n"],
-                                  assigned_to_office_n=6,
-                                  due_at=datetime.fromisoformat(body.due_at) if body.due_at else now + timedelta(days=5),
-                                  created_at=now, updated_at=now)
-    s.add(proposal); s.flush()
-    s.add(D.AcademicProposalVersion(id=uid(), tenant_id=TENANT, proposal_id=proposal.id,
-                                    version_no=1, payload_json=json.dumps(payload),
-                                    rationale=body.rationale.strip(), created_by=ctx["sub"]))
-    _proposal_event(s, proposal, ctx, "", "DRAFT", body.rationale)
-    s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.calendar.proposal.create",
-                f"academic_proposal:{proposal.id}", "", "DRAFT", body.rationale)
-    return {"proposal": _proposal_payload(s, proposal)}
-
-
-@router.post("/academic-calendar/proposals/{proposal_id}/submit")
-def submit_academic_calendar_proposal(proposal_id: str, body: AcademicProposalTransitionIn, ctx=Depends(auth), s=Depends(db)):
-    proposal = require_tenant(s.get(D.AcademicProposal, proposal_id), ctx, "Calendar proposal")
-    if proposal.proposal_type != "calendar": raise HTTPException(404, "Calendar proposal not found")
-    if proposal.submitted_by != ctx["sub"] or proposal.state not in {"DRAFT", "RETURNED", "CLARIFICATION_REQUIRED"}: raise HTTPException(409, "Proposal cannot be submitted in its current state")
-    if proposal.status_version != body.expected_status_version: raise HTTPException(409, "Proposal changed; reload before submitting")
-    previous = proposal.state; proposal.state = "RESUBMITTED" if previous in {"RETURNED", "CLARIFICATION_REQUIRED"} else "SUBMITTED"; proposal.status_version += 1; proposal.updated_at = datetime.utcnow()
-    _proposal_event(s, proposal, ctx, previous, proposal.state, body.reason)
-    dean = s.query(User).filter(User.office_n == 6).first()
-    if dean: _proposal_notice(s, dean.id, "Academic calendar decision required", proposal.title)
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.calendar.proposal.submit", f"academic_proposal:{proposal.id}", previous, proposal.state, body.reason, commit=False); s.commit()
-    return {"proposal": _proposal_payload(s, proposal)}
-
-
-@router.post("/academic-calendar/proposals/{proposal_id}/decision/{decision}")
-def decide_academic_calendar_proposal(proposal_id: str, decision: str, body: AcademicProposalTransitionIn, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academic_calendar", "approve_proposal" if decision.lower() == "approve" else "reject_proposal")[0])
-    proposal = require_academic_object(s, ctx, s.query(D.AcademicProposal).filter(D.AcademicProposal.id == proposal_id).with_for_update().first(), "approve", "Calendar proposal")
-    prevent_self_approval(proposal, ctx)
-    if proposal.proposal_type != "calendar": raise HTTPException(404, "Calendar proposal not found")
-    target = {"approve": "APPROVED", "reject": "REJECTED", "return": "RETURNED", "clarification": "CLARIFICATION_REQUIRED", "escalate": "ESCALATED"}.get(decision.lower())
-    if not target or proposal.state not in {"SUBMITTED", "RESUBMITTED", "UNDER_REVIEW"}: raise HTTPException(409, "Invalid calendar decision")
-    validate_transition(s, proposal, target, body.expected_status_version, ctx, body.reason)
-    if proposal.status_version != body.expected_status_version: raise HTTPException(409, "Proposal changed; reload before deciding")
-    claim_proposal_transition(s, proposal, body.expected_status_version, {"SUBMITTED", "RESUBMITTED", "UNDER_REVIEW"})
-    if target in {"REJECTED", "RETURNED", "CLARIFICATION_REQUIRED", "ESCALATED"} and not body.reason.strip(): raise HTTPException(422, "A decision reason is required")
-    if target == "APPROVED":
-        data = json.loads(_proposal_version(s, proposal).payload_json)
-        # Do not publish overlapping examination windows for the same scope.
-        if "exam" in str(data.get("category", "")).lower():
-            start = date.fromisoformat(data["start_date"]); end = date.fromisoformat(data["end_date"])
-            conflicts = s.query(D.AcademicCalendarEntry).filter(
-                D.AcademicCalendarEntry.tenant_id == ctx["tenant_id"],
-                D.AcademicCalendarEntry.status != "deleted",
-                D.AcademicCalendarEntry.category.ilike("%exam%"),
-                D.AcademicCalendarEntry.start_date <= end,
-                D.AcademicCalendarEntry.end_date >= start,
-            ).all()
-            campus = data.get("campus", "All Campuses")
-            conflicts = [row for row in conflicts if campus == "All Campuses" or row.campus == "All Campuses" or row.campus == campus]
-            if conflicts:
-                raise HTTPException(409, f"Exam window overlaps existing event: {conflicts[0].title}")
-    previous = proposal.state; proposal.state = target; proposal.status_version += 1; proposal.updated_at = datetime.utcnow()
-    if target == "ESCALATED": proposal.escalated_to_office_n = 5
-    if target == "APPROVED":
-        entry = D.AcademicCalendarEntry(id=uid(), tenant_id=TENANT, term=data["term"], title=data["title"], category=data.get("category", "Teaching"), campus=data.get("campus", "All Campuses"), start_date=date.fromisoformat(data["start_date"]), end_date=date.fromisoformat(data["end_date"]), description=data.get("description", ""), status="published", owner_office_n=6, created_by=proposal.submitted_by, updated_by=ctx["sub"])
-        s.add(entry); s.flush(); proposal.implementation_ref = entry.id
-    _proposal_event(s, proposal, ctx, previous, target, body.reason)
-    submitter = s.get(User, proposal.submitted_by)
-    if submitter: _proposal_notice(s, submitter.id, f"Calendar proposal {target.lower().replace('_', ' ')}", proposal.title, "info" if target == "APPROVED" else "action")
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.calendar.proposal.decision", f"academic_proposal:{proposal.id}", previous, target, body.reason, commit=False); s.commit()
-    return {"proposal": _proposal_payload(s, proposal)}
-
-
 @router.get("/academic-calendar")
-def academic_calendar(term: str = "", academic_year: str = "", program_id: str = "", department_id: str = "", student_year: int | None = None, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academic_calendar", "view", governance=True)[0])
-    term_rows = (s.query(D.AcademicCalendarEntry.term)
-                 .filter(D.AcademicCalendarEntry.status != "deleted")
+def academic_calendar(term: str = "", ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "academic_calendar", "view")[0])
+    campus = _campus_scope_for_campus_head(s, ctx) if ctx.get("office_n") == 3 else None
+    tenant_id = ctx["tenant_id"]
+    base_query = s.query(D.AcademicCalendarEntry).filter(
+        D.AcademicCalendarEntry.status != "deleted",
+        D.AcademicCalendarEntry.tenant_id == tenant_id)
+    if campus:
+        base_query = base_query.filter(D.AcademicCalendarEntry.campus.in_([campus.name, "All Campuses"]))
+    term_rows = (base_query.with_entities(D.AcademicCalendarEntry.term)
                  .distinct().order_by(D.AcademicCalendarEntry.term.desc()).all())
     term_options = [row[0] for row in term_rows]
     selected_term = term if term in term_options else (term_options[0] if term_options else "")
 
-    query = s.query(D.AcademicCalendarEntry).filter(D.AcademicCalendarEntry.tenant_id == ctx["tenant_id"], D.AcademicCalendarEntry.status != "deleted")
+    query = base_query
     if selected_term:
         query = query.filter(D.AcademicCalendarEntry.term == selected_term)
-    if academic_year:
-        query = query.filter(D.AcademicCalendarEntry.academic_year == academic_year)
-    if program_id:
-        query = query.filter(D.AcademicCalendarEntry.program_id == program_id)
-    if department_id:
-        query = query.filter(D.AcademicCalendarEntry.department_id == department_id)
-    if student_year is not None:
-        query = query.filter(D.AcademicCalendarEntry.student_year == student_year)
     rows = query.order_by(D.AcademicCalendarEntry.start_date, D.AcademicCalendarEntry.title).all()
 
     summary = {
         "milestones": len(rows),
         "exam_windows": sum(1 for row in rows if "exam" in row.category.lower()),
         "breaks": sum(1 for row in rows if row.category.lower() == "break"),
-        "governed_by": "Dean Academics",
+        "governed_by": "Vice Chairman, Principal, Vice Principal, Chairman",
     }
 
     months = {}
@@ -1893,11 +1144,9 @@ def academic_calendar(term: str = "", academic_year: str = "", program_id: str =
         "end": (rows[-1].end_date or rows[-1].start_date).isoformat() if rows else "",
     }
 
-    academic_year_options = sorted({row.academic_year for row in query.all() if row.academic_year})
     return {
         "selected_term": selected_term,
         "term_options": term_options,
-        "academic_year_options": academic_year_options,
         "term_window": term_window,
         "permissions": {
             "create": can(s, ctx, "academic_calendar", "create"),
@@ -1914,21 +1163,17 @@ def academic_calendar(term: str = "", academic_year: str = "", program_id: str =
         "months": [{"label": label, "count": count} for label, count in months.items()],
         "entries": [{
             "id": row.id,
-            "academic_year": row.academic_year, "program_id": row.program_id, "department_id": row.department_id, "student_year": row.student_year,
             "term": row.term,
             "title": row.title,
             "category": row.category,
             "campus": row.campus,
             "start_date": row.start_date.isoformat(),
-            "start_time": row.start_time, "end_time": row.end_time,
             "end_date": (row.end_date or row.start_date).isoformat(),
             "description": row.description,
             "status": row.status,
             "owner_office_n": row.owner_office_n,
             "editable": _academic_entry_editable(ctx, row),
         } for row in rows],
-        "proposals": [_proposal_payload(s, row) for row in s.query(D.AcademicProposal).filter(D.AcademicProposal.tenant_id == ctx["tenant_id"], D.AcademicProposal.proposal_type == "calendar").order_by(desc(D.AcademicProposal.updated_at)).limit(25).all()],
-        "workflow_permissions": {"propose": ctx["office_n"] in CALENDAR_PROPOSERS, "decide": ctx["office_n"] == 6},
     }
 
 
@@ -1938,28 +1183,13 @@ def create_academic_calendar_entry(body: AcademicCalendarIn, ctx=Depends(auth), 
     require(dec)
     if ctx["office_n"] not in CALENDAR_ACADEMIC_EDITORS:
         raise HTTPException(403, "This office cannot manage the academic calendar")
-    if not body.title.strip() or not body.term.strip() or not body.academic_year.strip():
-        raise HTTPException(422, "Academic year, term, and title are required")
-    start = date.fromisoformat(body.start_date)
-    end = date.fromisoformat(body.end_date) if body.end_date else start
-    if end < start:
-        raise HTTPException(422, "End date cannot be earlier than start date")
-    duplicate = s.query(D.AcademicCalendarEntry).filter(
-        D.AcademicCalendarEntry.tenant_id == ctx["tenant_id"],
-        D.AcademicCalendarEntry.term == body.term,
-        D.AcademicCalendarEntry.title == body.title.strip(),
-        D.AcademicCalendarEntry.start_date == start,
-        D.AcademicCalendarEntry.status != "deleted",
-    ).first()
-    if duplicate:
-        raise HTTPException(409, "A matching academic calendar entry already exists")
     now = datetime.utcnow()
     row = D.AcademicCalendarEntry(
-        id=uid(), tenant_id=TENANT, term=body.term, academic_year=body.academic_year, program_id=body.program_id, department_id=body.department_id, student_year=body.student_year, title=body.title,
+        id=uid(), tenant_id=ctx["tenant_id"], term=body.term, title=body.title,
         category=body.category, campus=body.campus,
-        start_date=start,
-        end_date=end, start_time=body.start_time, end_time=body.end_time,
-        description=body.description, status=("draft" if ctx["office_n"] == 17 else (body.status or "published")),
+        start_date=date.fromisoformat(body.start_date),
+        end_date=date.fromisoformat(body.end_date) if body.end_date else date.fromisoformat(body.start_date),
+        description=body.description, status=body.status or "published",
         owner_office_n=ctx["office_n"], created_by=ctx["sub"], updated_by=ctx["sub"],
         created_at=now, updated_at=now
     )
@@ -1969,18 +1199,18 @@ def create_academic_calendar_entry(body: AcademicCalendarIn, ctx=Depends(auth), 
                 f"academic_calendar:{row.id}", "", row.status,
                 f"Created academic milestone '{row.title}'")
     _fanout_notification(
-        s, "all",
+        s, ctx, "all",
         f"Academic calendar updated: {row.title}",
         f"{row.term} · {row.start_date.strftime('%d %b %Y')} to {(row.end_date or row.start_date).strftime('%d %b %Y')}.",
         severity="action",
     )
     return {"entry": {
         "id": row.id,
-        "term": row.term, "academic_year": row.academic_year, "program_id": row.program_id, "department_id": row.department_id, "student_year": row.student_year,
+        "term": row.term,
         "title": row.title,
         "category": row.category,
         "campus": row.campus,
-        "start_date": row.start_date.isoformat(), "start_time": row.start_time, "end_time": row.end_time,
+        "start_date": row.start_date.isoformat(),
         "end_date": (row.end_date or row.start_date).isoformat(),
         "description": row.description,
         "status": row.status,
@@ -1991,28 +1221,20 @@ def create_academic_calendar_entry(body: AcademicCalendarIn, ctx=Depends(auth), 
 
 @router.put("/academic-calendar/{entry_id}")
 def update_academic_calendar_entry(entry_id: str, body: AcademicCalendarIn, ctx=Depends(auth), s=Depends(db)):
-    row = s.get(D.AcademicCalendarEntry, entry_id)
+    row = s.query(D.AcademicCalendarEntry).filter(D.AcademicCalendarEntry.id == entry_id, D.AcademicCalendarEntry.tenant_id == ctx["tenant_id"]).first()
     if not row or row.status == "deleted":
         raise HTTPException(404, "Academic calendar entry not found")
     dec, _ = gate(s, ctx, "academic_calendar", "edit")
     require(dec)
-    if ctx["office_n"] not in CALENDAR_ACADEMIC_EDITORS or (ctx["office_n"] == 17 and row.owner_office_n != 17 and row.created_by != ctx["sub"]):
+    if ctx["office_n"] not in CALENDAR_ACADEMIC_EDITORS:
         raise HTTPException(403, "This office cannot manage the academic calendar")
-    if row.status not in {"draft", "correction_required"}:
-        raise HTTPException(409, "Only draft or correction-required entries can be edited")
-    start = date.fromisoformat(body.start_date)
-    end = date.fromisoformat(body.end_date) if body.end_date else start
-    if end < start:
-        raise HTTPException(422, "End date cannot be earlier than start date")
     prev = row.status
     row.term = body.term
-    row.academic_year, row.program_id, row.department_id, row.student_year = body.academic_year, body.program_id, body.department_id, body.student_year
     row.title = body.title
     row.category = body.category
     row.campus = body.campus
-    row.start_date = start
-    row.end_date = end
-    row.start_time, row.end_time = body.start_time, body.end_time
+    row.start_date = date.fromisoformat(body.start_date)
+    row.end_date = date.fromisoformat(body.end_date) if body.end_date else row.start_date
     row.description = body.description
     row.status = body.status or row.status
     row.updated_by = ctx["sub"]
@@ -2022,7 +1244,7 @@ def update_academic_calendar_entry(entry_id: str, body: AcademicCalendarIn, ctx=
                 f"academic_calendar:{row.id}", prev, row.status,
                 f"Updated academic milestone '{row.title}'")
     _fanout_notification(
-        s, "all",
+        s, ctx, "all",
         f"Academic calendar revised: {row.title}",
         f"{row.term} academic timeline was updated for {row.start_date.strftime('%d %b %Y')}.",
         severity="action",
@@ -2042,62 +1264,15 @@ def update_academic_calendar_entry(entry_id: str, body: AcademicCalendarIn, ctx=
     }, "decision": dec.as_dict()}
 
 
-@router.post("/academic-calendar/{entry_id}/submit")
-def submit_academic_calendar_entry(entry_id: str, ctx=Depends(auth), s=Depends(db)):
-    row = s.get(D.AcademicCalendarEntry, entry_id)
-    if not row or row.status == "deleted": raise HTTPException(404, "Academic calendar entry not found")
-    if ctx["office_n"] != 17 or row.created_by != ctx["sub"]: raise HTTPException(403, "Only the creating Academic Coordinator may submit this draft")
-    dec, _ = gate(s, ctx, "academic_calendar", "edit"); require(dec)
-    if row.status not in {"draft", "correction_required"}: raise HTTPException(409, "Only draft or correction-required calendar entries can be submitted")
-    previous = row.status
-    row.status, row.updated_by, row.updated_at = "pending_review", ctx["sub"], datetime.utcnow(); s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic_calendar.submit", f"academic_calendar:{row.id}", previous, row.status, "Submitted for academic calendar review")
-    return {"status": row.status, "decision": dec.as_dict()}
-
-
-class AcademicCalendarDecisionIn(BaseModel):
-    action: str
-    reason: str = ""
-
-
-@router.post("/academic-calendar/{entry_id}/decision")
-def decide_academic_calendar_entry(entry_id: str, body: AcademicCalendarDecisionIn, ctx=Depends(auth), s=Depends(db)):
-    row = s.get(D.AcademicCalendarEntry, entry_id)
-    if not row or row.status == "deleted":
-        raise HTTPException(404, "Academic calendar entry not found")
-    if ctx["office_n"] == 17 or ctx["office_n"] not in {1, 2, 4, 5}:
-        raise HTTPException(403, "This office cannot approve academic calendar changes")
-    dec, _ = gate(s, ctx, "academic_calendar", "edit"); require(dec)
-    if row.status != "pending_review":
-        raise HTTPException(409, "Only pending calendar changes can be decided")
-    action = body.action.strip().lower()
-    if action not in {"approve", "reject", "return", "publish"}:
-        raise HTTPException(400, "Decision must be approve, reject, return, or publish")
-    if action in {"reject", "return"} and not body.reason.strip():
-        raise HTTPException(400, "A reason is required when rejecting or requesting correction")
-    if action == "publish" and row.status != "approved":
-        raise HTTPException(409, "Only approved calendar entries can be published")
-    previous = row.status
-    row.status = {"approve": "approved", "publish": "published", "return": "correction_required", "reject": "rejected"}[action]
-    row.updated_by, row.updated_at = ctx["sub"], datetime.utcnow()
-    s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic_calendar.decision",
-                f"academic_calendar:{row.id}", previous, row.status,
-                f"Academic calendar {action}: {body.reason.strip()}".strip())
-    return {"status": row.status, "decision": dec.as_dict(), "reason": body.reason.strip()}
-
-
 @router.delete("/academic-calendar/{entry_id}")
 def delete_academic_calendar_entry(entry_id: str, ctx=Depends(auth), s=Depends(db)):
-    row = s.get(D.AcademicCalendarEntry, entry_id)
+    row = s.query(D.AcademicCalendarEntry).filter(D.AcademicCalendarEntry.id == entry_id, D.AcademicCalendarEntry.tenant_id == ctx["tenant_id"]).first()
     if not row or row.status == "deleted":
         raise HTTPException(404, "Academic calendar entry not found")
     dec, _ = gate(s, ctx, "academic_calendar", "delete")
     require(dec)
-    if ctx["office_n"] not in CALENDAR_ACADEMIC_EDITORS or (ctx["office_n"] == 17 and row.owner_office_n != 17 and row.created_by != ctx["sub"]):
+    if ctx["office_n"] not in CALENDAR_ACADEMIC_EDITORS:
         raise HTTPException(403, "This office cannot manage the academic calendar")
-    if row.status not in {"draft", "correction_required"}:
-        raise HTTPException(409, "Only draft or correction-required entries can be deleted")
     prev = row.status
     row.status = "deleted"
     row.updated_by = ctx["sub"]
@@ -2115,25 +1290,96 @@ def delete_academic_calendar_entry(entry_id: str, ctx=Depends(auth), s=Depends(d
 class StudentIn(BaseModel):
     name: str
     roll_no: str = ""
-    email: str = ""
-    dept_code: str = "CSE"
-    batch: str = "2025"
+    dept_code: str
+    program_id: str
+    batch: str
     semester: int = 1
-    program_level: str = "UG"
 
 
-def _student_scope(query, ctx):
-    """Apply the authenticated campus scope; never accept campus from the browser."""
-    query = query.filter(D.Student.tenant_id == ctx.get("tenant_id", TENANT))
-    scope = (ctx.get("scope_ref") or "").strip()
-    if ctx.get("scope_level") == "campus" and scope and not scope.startswith("scope_"):
-        return query.filter(D.Student.campus == scope)
-    return query
+def _student_scope(s, query, ctx):
+    """Apply the authenticated campus scope using the canonical OrgScope record."""
+    query = query.filter(D.Student.tenant_id == ctx["tenant_id"])
+    scope = (ctx["scope_ref"] or "").strip()
+    if ctx.get("scope_level") != "campus" or not scope:
+        return query
+    tenant_id = ctx["tenant_id"]
+    campus_query = s.query(OrgScope).filter(OrgScope.tenant_id == tenant_id, OrgScope.level == "campus")
+    scope_row = campus_query.filter(OrgScope.id == scope).first() if scope.startswith("scope_") else campus_query.filter(OrgScope.name == scope).first()
+    if scope_row is None:
+        # An unresolved membership must fail closed rather than broaden to
+        # every student in the tenant.
+        return query.filter(D.Student.id == "__missing_campus_scope__")
+    return query.filter(D.Student.campus_scope_id == scope_row.id)
 
 
-def _real_students(query):
-    """Exclude development fixtures; dashboards show only real institution records."""
-    return query.filter(~D.Student.id.like("stu_%"), ~D.Student.id.like("student_app_%"))
+def _campus_scope_for_campus_head(s, ctx):
+    """Resolve Office #3 to one canonical tenant-local campus OrgScope.
+
+    Older Campus Head identities use the verified campus name as ``scope_ref``
+    (for example, ``Main Campus``).  That label is not itself authorization:
+    it must resolve to exactly one campus OrgScope in the authenticated tenant.
+    Canonical IDs continue to resolve directly.
+    """
+    if ctx.get("office_n") != 3 or ctx.get("scope_level") != "campus":
+        raise HTTPException(403, "A Campus Head campus scope is required")
+    tenant_id = ctx["tenant_id"]
+    scope_id = (ctx["scope_ref"] or "").strip()
+    scopes = (s.query(OrgScope)
+              .filter(OrgScope.tenant_id == tenant_id, OrgScope.level == "campus")
+              .filter((OrgScope.id == scope_id) | (OrgScope.name == scope_id))
+              .limit(2).all())
+    if len(scopes) != 1:
+        raise HTTPException(403, "A canonical campus scope is required")
+    return scopes[0]
+
+
+def _authenticated_campus_scope(s, ctx):
+    """Return the authenticated tenant-local campus scope, if this actor has one.
+
+    Authorization always compares the canonical ID.  The name branch only
+    supports pre-membership legacy accounts and is resolved inside the current
+    tenant before it is ever used.
+    """
+    if ctx.get("scope_level") != "campus":
+        return None
+    tenant_id, scope_ref = ctx["tenant_id"], (ctx["scope_ref"] or "").strip()
+    if not scope_ref:
+        raise HTTPException(403, "A canonical campus scope is required")
+    query = s.query(OrgScope).filter(OrgScope.tenant_id == tenant_id, OrgScope.level == "campus")
+    scope = query.filter(OrgScope.id == scope_ref).first()
+    if not scope and not scope_ref.startswith("scope_"):
+        scope = query.filter(OrgScope.name == scope_ref).first()
+    if not scope:
+        raise HTTPException(403, "A canonical campus scope is required")
+    return scope
+
+
+def _scope_filter(query, model, s, ctx):
+    """Apply tenant and canonical campus ownership to models with campus_scope_id."""
+    query = query.filter(model.tenant_id == ctx["tenant_id"])
+    campus = _authenticated_campus_scope(s, ctx)
+    if campus is not None:
+        query = query.filter(model.campus_scope_id == campus.id)
+    return query, campus
+
+
+def _validated_campus_scope_assignment(s, tenant_id, campus_scope_id):
+    """Validate an authoritative Asset/PlacementDrive ownership assignment.
+
+    Assignment is nullable for legacy records, but any non-null value must be a
+    campus OrgScope in the same tenant.  There are currently no asset or drive
+    write endpoints; this is the server-side validation boundary for any
+    future write path rather than accepting a browser-provided scope blindly.
+    """
+    if not campus_scope_id:
+        return None
+    scope = (s.query(OrgScope)
+             .filter(OrgScope.id == campus_scope_id, OrgScope.tenant_id == tenant_id,
+                     OrgScope.level == "campus")
+             .first())
+    if not scope:
+        raise HTTPException(422, "campus_scope_id must reference a campus in the authenticated tenant")
+    return scope
 
 
 def _academic_year_label(batch):
@@ -2143,23 +1389,6 @@ def _academic_year_label(batch):
         return f"{start}-{str(start + 1)[-2:]}"
     except (TypeError, ValueError):
         return str(batch or "")
-
-
-def _admission_placement_map(s, student_ids):
-    """Return the final Admission Office placement for each converted student."""
-    if not student_ids:
-        return {}
-    conversions = (s.query(D.AdmissionConversion)
-                   .filter(D.AdmissionConversion.student_id.in_(student_ids)).all())
-    application_by_student = {row.student_id: row.application_id for row in conversions if row.student_id}
-    allocations = (s.query(D.AdmissionClassAllocation)
-                   .filter(D.AdmissionClassAllocation.application_id.in_(application_by_student.values())).all()
-                   if application_by_student else [])
-    allocation_by_application = {row.application_id: row for row in allocations}
-    return {
-        student_id: allocation_by_application.get(application_id)
-        for student_id, application_id in application_by_student.items()
-    }
 
 
 def _attendance_totals(s, student_ids):
@@ -2190,21 +1419,49 @@ def _backlog_summary(s, student_ids):
     return output
 
 
+def _student_risk_payload(student, backlog, attendance):
+    """One authoritative, explainable risk evaluation for dashboard/list/detail."""
+    reasons = []
+    attendance_pct = None
+    if student.id in attendance:
+        present, total = attendance[student.id]
+        attendance_pct = round(100 * present / total, 1) if total else None
+        if attendance_pct is not None and attendance_pct < 75:
+            reasons.append("Attendance below 75%")
+    if (student.cgpa or 0) < 6.5:
+        reasons.append("CGPA below 6.5")
+    if backlog.get("current", 0) > 0:
+        reasons.append("Active examination backlog")
+    return {"at_risk": bool(reasons), "risk_level": "At Risk" if reasons else "Normal",
+            "risk_reasons": reasons, "attendance_pct": attendance_pct}
+
+
 @router.get("/students")
-def list_students(q: str = "", dept: str = "", program: str = "", academic_year: str = "", study_year: int = Query(0, ge=0), semester: int = Query(0, ge=0), section: str = "", risk: str = "", page: int = Query(1, ge=1), page_size: int = Query(25, ge=10, le=100), ctx=Depends(auth), s=Depends(db)):
+def list_students(q: str = "", dept: str = "", program: str = "", academic_year: str = "", study_year: int = 0, semester: int = 0, section: str = "", risk: str = "", page: int = 1, page_size: int = 25, ctx=Depends(auth), s=Depends(db)):
+    study_year = int(study_year or 0)
+    semester = int(semester or 0)
+    page = int(page or 1)
+    page_size = int(page_size or 25)
+    if page_size < 10: page_size = 10
+    if page_size > 100: page_size = 100
     require(gate(s, ctx, "students", "view")[0])
-    base_query = _student_scope(_real_students(s.query(D.Student)), ctx)
+    base_query = _student_scope(s, s.query(D.Student), ctx)
     scoped_students = base_query.all()
     query = base_query
+    # Keep Principal student analytics aligned with the dashboard's current
+    # academic-year scope when a caller does not explicitly choose a year.
+    if not academic_year and ctx.get("office_n") == 4:
+        years = {_academic_year_label(student.batch) for student in scoped_students if student.batch}
+        academic_year = "2026-27" if "2026-27" in years else (max(years) if years else "")
     if q:
         like = f"%{q}%"
         query = query.filter((D.Student.name.ilike(like)) | (D.Student.roll_no.ilike(like)) | (D.Student.email.ilike(like)))
     if dept:
-        d = s.query(D.Department).filter(D.Department.code == dept).first()
+        d = s.query(D.Department).filter(D.Department.tenant_id == ctx["tenant_id"], D.Department.code == dept).first()
         if d:
             query = query.filter(D.Student.dept_id == d.id)
     if program:
-        query = query.join(D.Program, D.Student.program_id == D.Program.id).filter((D.Program.code == program) | (D.Program.name == program))
+        query = query.join(D.Program, D.Student.program_id == D.Program.id).filter(D.Program.tenant_id == ctx["tenant_id"], (D.Program.code == program) | (D.Program.name == program))
     if academic_year:
         matching_batches = [student.batch for student in scoped_students if _academic_year_label(student.batch) == academic_year]
         query = query.filter(D.Student.batch.in_(matching_batches)) if matching_batches else query.filter(False)
@@ -2225,21 +1482,16 @@ def list_students(q: str = "", dept: str = "", program: str = "", academic_year:
             query = query.filter(D.Student.id.in_([sid for sid, item in summaries.items() if item["current"] == 0]))
         else:
             attendance = _attendance_totals(s, scoped_ids)
-            at_risk_ids = [sid for sid, item in summaries.items()
-                           if item["current"] > 0
-                           or (s.query(D.Student.cgpa).filter(D.Student.id == sid).scalar() or 0) < 6.5
-                           or (sid in attendance and 100 * attendance[sid][1] / attendance[sid][0] < 75)]
+            candidates = {student.id: student for student in query.all()}
+            at_risk_ids = [sid for sid, student in candidates.items()
+                           if _student_risk_payload(student, summaries[sid], attendance)["at_risk"]]
             query = query.filter(D.Student.id.in_(at_risk_ids))
     total = query.count()
     rows = (query.order_by(D.Student.roll_no)
             .offset((page - 1) * page_size)
             .limit(page_size).all())
-    dept_map = {d.id: d for d in s.query(D.Department).all()}
-    program_map = {p.id: p for p in s.query(D.Program).all()}
-    student_ids = [row.id for row in rows]
-    placement_by_student = _admission_placement_map(s, student_ids)
-    backlogs = _backlog_summary(s, student_ids)
-    attendance_by_student = _attendance_totals(s, student_ids)
+    dept_map = {d.id: d for d in s.query(D.Department).filter(D.Department.tenant_id == ctx["tenant_id"]).all()}
+    program_map = {p.id: p for p in s.query(D.Program).filter(D.Program.tenant_id == ctx["tenant_id"]).all()}
     all_students = query.all()
     all_backlogs = _backlog_summary(s, [student.id for student in all_students])
     attendance_totals = _attendance_totals(s, [student.id for student in all_students])
@@ -2248,29 +1500,34 @@ def list_students(q: str = "", dept: str = "", program: str = "", academic_year:
     attendance_values = []
     cgpas = []
     for student in all_students:
+        risk = _student_risk_payload(student, all_backlogs[student.id], attendance_totals)
         academic = (student.cgpa or 0) < 6.5
         current_backlogs = all_backlogs[student.id]["current"]
         if academic: risk_summary["academic_risk"] += 1
         if current_backlogs: risk_summary["backlogs"] += 1
         else: risk_summary["no_backlogs"] += 1
-        if student.id in attendance_totals:
-            pct = 100 * attendance_totals[student.id][1] / attendance_totals[student.id][0]
+        if risk["attendance_pct"] is not None:
+            pct = risk["attendance_pct"]
             attendance_values.append(pct)
             if pct < 75: risk_summary["attendance_risk"] += 1
         if student.cgpa is not None: cgpas.append(student.cgpa)
-        if academic or current_backlogs or (student.id in attendance_totals and 100 * attendance_totals[student.id][1] / attendance_totals[student.id][0] < 75): risk_summary["at_risk"] += 1
+        if risk["at_risk"]: risk_summary["at_risk"] += 1
     if attendance_values: risk_summary["average_attendance"] = round(sum(attendance_values) / len(attendance_values), 1)
     if cgpas: risk_summary["average_cgpa"] = round(sum(cgpas) / len(cgpas), 2)
-    return {"students": [{
-        "id": r.id, "roll_no": r.roll_no, "name": r.name, "email": r.email, "dept": dept_map.get(r.dept_id).code if r.dept_id in dept_map else "", "department_name": dept_map.get(r.dept_id).name if r.dept_id in dept_map else "",
-        "program": program_map.get(r.program_id).name if r.program_id in program_map else "", "program_code": program_map.get(r.program_id).code if r.program_id in program_map else "",
-        "batch": r.batch, "semester": r.semester, "section": r.section,
-        "group": placement_by_student.get(r.id).group_name if placement_by_student.get(r.id) else "",
-        "campus": r.campus, "cgpa": r.cgpa,
-        "status": r.status, "hosteller": r.hosteller, "scholarship": r.scholarship,
-        "attendance_pct": round(100 * attendance_by_student[r.id][1] / attendance_by_student[r.id][0], 1) if r.id in attendance_by_student else None,
-        "current_backlogs": backlogs[r.id]["current"], "backlog_status": "Outstanding" if backlogs[r.id]["current"] else ("Cleared" if backlogs[r.id]["cleared"] else "No history"),
-    } for r in rows], "total": total, "page": page, "page_size": page_size,
+    page_backlogs = _backlog_summary(s, [row.id for row in rows])
+    page_attendance = _attendance_totals(s, [row.id for row in rows])
+    student_rows = []
+    for r in rows:
+        risk = _student_risk_payload(r, page_backlogs[r.id], page_attendance)
+        student_rows.append({
+            "id": r.id, "roll_no": r.roll_no, "name": r.name, "email": r.email, "dept": dept_map.get(r.dept_id).code if r.dept_id in dept_map else "", "department_name": dept_map.get(r.dept_id).name if r.dept_id in dept_map else "",
+            "program": program_map.get(r.program_id).name if r.program_id in program_map else "", "program_code": program_map.get(r.program_id).code if r.program_id in program_map else "",
+            "batch": r.batch, "semester": r.semester, "section": r.section, "cgpa": r.cgpa,
+            "status": r.status, "hosteller": r.hosteller, "scholarship": r.scholarship,
+            "current_backlogs": page_backlogs[r.id]["current"], "backlog_status": "Outstanding" if page_backlogs[r.id]["current"] else ("Cleared" if page_backlogs[r.id]["cleared"] else "No history"),
+            **risk,
+        })
+    return {"students": student_rows, "total": total, "page": page, "page_size": page_size,
         "total_pages": max(1, (total + page_size - 1) // page_size),
         "filter_options": {
             "academic_years": sorted({_academic_year_label(row.batch) for row in scoped_students if row.batch}, reverse=True),
@@ -2284,62 +1541,31 @@ def list_students(q: str = "", dept: str = "", program: str = "", academic_year:
             {"code": code, "name": name, "count": sum(1 for student in scoped_students if student.dept_id in dept_map and dept_map[student.dept_id].code == code)}
             for code, name in sorted({(dept_map[row.dept_id].code, dept_map[row.dept_id].name) for row in scoped_students if row.dept_id in dept_map}, key=lambda item: item[1])
         ],
-        "summary": {"all_students": total,
-                    "provisional_students": sum(1 for student in scoped_students if student.status == "provisional"),
-                    "active_students": sum(1 for student in scoped_students if student.status == "active"),
-                    **risk_summary},
+        "summary": {"all_students": total, **risk_summary},
         "can_add": can(s, ctx, "students", "add"),
         "can_edit": can(s, ctx, "students", "edit")}
-
-
-@router.get("/students/dashboard-summary")
-def student_dashboard_summary(ctx=Depends(auth), s=Depends(db)):
-    """Role-safe counts for all dashboards; records require Student-module access."""
-    students_query = _student_scope(_real_students(s.query(D.Student).filter(D.Student.tenant_id == ctx["tenant_id"])), ctx)
-    payload = {
-        "total_students": students_query.count(),
-        "provisional_students": students_query.filter(D.Student.status == "provisional").count(),
-        "active_students": students_query.filter(D.Student.status == "active").count(),
-        "can_view_student_records": can(s, ctx, "students", "view"),
-        "recent_students": [],
-    }
-    if not payload["can_view_student_records"]:
-        return payload
-
-    rows = students_query.order_by(D.Student.id.desc()).limit(10).all()
-    programs = {row.id: row for row in s.query(D.Program).filter_by(tenant_id=ctx["tenant_id"]).all()}
-    placements = _admission_placement_map(s, [row.id for row in rows])
-    payload["recent_students"] = [{
-        "id": row.id, "roll_no": row.roll_no, "name": row.name,
-        "programme": programs[row.program_id].name if row.program_id in programs else "",
-        "campus": row.campus, "section": row.section,
-        "group": placements[row.id].group_name if placements.get(row.id) else "",
-        "status": row.status,
-    } for row in rows]
-    return payload
 
 
 @router.get("/students/{student_id}/profile")
 def student_profile(student_id: str, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "students", "view")[0])
-    student = _student_scope(_real_students(s.query(D.Student)), ctx).filter(D.Student.id == student_id).first()
+    student = _student_scope(s, s.query(D.Student), ctx).filter(D.Student.id == student_id).first()
     if not student:
         raise HTTPException(404, "Student was not found in your authorized campus")
-    department = s.query(D.Department).get(student.dept_id)
-    program = s.query(D.Program).get(student.program_id)
+    department = s.get(D.Department, student.dept_id)
+    program = s.get(D.Program, student.program_id)
     attendance = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.student_id == student.id).all()
-    attendance_pct = round(100 * sum(1 for row in attendance if row.present) / len(attendance), 1) if attendance else None
     enrollments = s.query(D.Enrollment).filter(D.Enrollment.student_id == student.id).all()
-    placement = _admission_placement_map(s, [student.id]).get(student.id)
     sections = {row.id: row for row in s.query(D.Section).filter(D.Section.id.in_([e.section_id for e in enrollments])).all()} if enrollments else {}
     marks = s.query(D.Mark).filter(D.Mark.student_id == student.id).all()
     backlog = _backlog_summary(s, [student.id])[student.id]
+    risk = _student_risk_payload(student, backlog, _attendance_totals(s, [student.id]))
     return {"student": {"id": student.id, "name": student.name, "roll_no": student.roll_no, "email": student.email,
             "campus": student.campus, "department": department.name if department else "", "department_code": department.code if department else "",
             "program": program.name if program else "", "program_code": program.code if program else "", "semester": student.semester,
-            "study_year": (student.semester + 1) // 2, "section": student.section,
-            "group": placement.group_name if placement else "", "status": student.status, "cgpa": student.cgpa,
-            "attendance_pct": attendance_pct, "current_backlogs": backlog["current"], "cleared_backlogs": backlog["cleared"]},
+            "study_year": (student.semester + 1) // 2, "section": student.section, "status": student.status, "cgpa": student.cgpa,
+            "attendance_pct": risk["attendance_pct"], "current_backlogs": backlog["current"], "cleared_backlogs": backlog["cleared"],
+            "academic_year": _academic_year_label(student.batch), **risk},
             "attendance": [{"date": row.on_date.isoformat(), "present": row.present} for row in attendance],
             "enrollments": [{"section": sections[e.section_id].section_code if e.section_id in sections else "", "term": sections[e.section_id].term if e.section_id in sections else "", "status": e.status, "grade": e.grade} for e in enrollments],
             "marks": [{"assessment_id": row.assessment_id, "score": row.score, "entered_at": row.entered_at.isoformat() if row.entered_at else None} for row in marks],
@@ -2351,426 +1577,68 @@ def student_profile(student_id: str, ctx=Depends(auth), s=Depends(db)):
 def add_student(body: StudentIn, ctx=Depends(auth), s=Depends(db)):
     dec, verb = gate(s, ctx, "students", "add")
     require(dec)
-    d = s.query(D.Department).filter(D.Department.code == body.dept_code).first()
+    name, dept_code = body.name.strip(), body.dept_code.strip().upper()
+    program_id, batch, roll_no = body.program_id.strip(), body.batch.strip(), body.roll_no.strip()
+    if not name or not dept_code or not program_id or not batch:
+        raise HTTPException(400, "Student name, department, program, and batch are required")
+    if body.semester not in range(1, 9):
+        raise HTTPException(400, "Semester must be between 1 and 8")
+    campus_scope = _authenticated_campus_scope(s, ctx)
+    if not campus_scope:
+        raise HTTPException(403, "A canonical campus scope is required")
+    d = (s.query(D.Department)
+         .filter(D.Department.tenant_id == ctx["tenant_id"],
+                 D.Department.code == dept_code,
+                 D.Department.campus == campus_scope.name)
+         .first())
     if not d:
-        raise HTTPException(400, "Unknown department")
-    prog = s.query(D.Program).filter(D.Program.dept_id == d.id,
-                                     D.Program.level == body.program_level).first()
+        raise HTTPException(400, "Department is not available in the authenticated campus")
+    prog = (s.query(D.Program)
+            .filter(D.Program.id == program_id, D.Program.tenant_id == ctx["tenant_id"],
+                    D.Program.dept_id == d.id)
+            .first())
+    if not prog:
+        raise HTTPException(400, "Program must belong to the authenticated tenant-local department")
     sid = uid()
-    roll = body.roll_no or f"{body.batch[2:]}{body.dept_code}{s.query(D.Student).count()+1:03d}"
-    s.add(D.Student(id=sid, tenant_id=TENANT, roll_no=roll, name=body.name,
-                    email=body.email.strip(), program_id=prog.id if prog else None,
-                    dept_id=d.id, batch=body.batch, semester=body.semester,
+    roll = roll_no or f"{batch[2:]}{dept_code}{s.query(D.Student).filter(D.Student.tenant_id == ctx['tenant_id']).count()+1:03d}"
+    if s.query(D.Student).filter(D.Student.tenant_id == ctx["tenant_id"], D.Student.roll_no == roll).first():
+        raise HTTPException(409, "A student with this roll number already exists")
+    s.add(D.Student(id=sid, tenant_id=ctx["tenant_id"], roll_no=roll, name=name,
+                    email=f"{roll.lower()}@icms.edu", program_id=prog.id if prog else None,
+                    dept_id=d.id, batch=batch, semester=body.semester,
+                    campus=campus_scope.name, campus_scope_id=campus_scope.id,
                     section="A", status="active", cgpa=0.0))
     s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "student.create",
-                f"student:{sid}", "", "active", f"Admitted {body.name} ({roll})")
+                f"student:{sid}", "", "active", f"Admitted {name} ({roll})",
+                tenant_id=ctx["tenant_id"], campus_scope_id=campus_scope.id)
     return {"id": sid, "roll_no": roll, "decision": dec.as_dict()}
 
 
 # --------------------------------------------------------------------------- #
-#  FACULTY ALLOCATION & TIMETABLE READINESS
-# --------------------------------------------------------------------------- #
-class FacultyAllocationProposalIn(BaseModel):
-    section_id: str
-    faculty_person_id: str
-    rationale: str = ""
-
-
-@router.get("/academics/allocation/proposals")
-def allocation_proposals(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view", governance=True)[0])
-    q = scoped_academic_query(s, D.AcademicProposal, ctx).filter(D.AcademicProposal.proposal_type == "allocation")
-    if ctx["office_n"] != 6: q = q.filter(D.AcademicProposal.scope_ref == (actor_department_id(s, ctx) or "__no_scope__"))
-    return {"proposals": [_proposal_payload(s, row) for row in q.order_by(desc(D.AcademicProposal.updated_at)).all()], "can_propose": ctx["office_n"] in {10, 17}, "can_decide": ctx["office_n"] == 6}
-
-
-@router.get("/academics/allocation/proposals/{proposal_id}")
-def allocation_proposal_detail(proposal_id: str, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view", governance=True)[0])
-    proposal = require_academic_object(s, ctx, s.get(D.AcademicProposal, proposal_id), "read", "Allocation proposal")
-    if proposal.proposal_type != "allocation": raise HTTPException(404, "Allocation proposal not found")
-    return {"proposal": _proposal_payload(s, proposal)}
-
-
-@router.post("/academics/allocation/proposals")
-def create_allocation_proposal(body: FacultyAllocationProposalIn, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view", governance=True)[0])
-    if ctx["office_n"] not in {10, 17}: raise HTTPException(403, "Only HOD or Academic Coordinator can propose allocations")
-    section = require_academic_object(s, ctx, s.get(D.Section, body.section_id), "create", "Section")
-    faculty = require_academic_object(s, ctx, s.get(D.StaffMember, body.faculty_person_id), "create", "Faculty member")
-    if not section or not faculty: raise HTTPException(404, "Section or faculty member not found")
-    payload = {"section_id": section.id, "faculty_person_id": faculty.id, "term": section.term, "course_id": section.course_id}
-    course = s.get(D.Course, section.course_id)
-    now = datetime.utcnow(); proposal = D.AcademicProposal(id=uid(), tenant_id=TENANT, proposal_type="allocation", title=f"Faculty allocation for {section.section_code}", scope_level="department", scope_ref=section.dept_id, school_id=section.school_id, dept_id=section.dept_id, program_id=getattr(course, "program_id", None), section_id=section.id, state="DRAFT", version_no=1, submitted_by=ctx["sub"], submitted_office_n=ctx["office_n"], assigned_to_office_n=6, due_at=now + timedelta(days=5), created_at=now, updated_at=now)
-    s.add(proposal); s.flush(); s.add(D.AcademicProposalVersion(id=uid(), tenant_id=TENANT, proposal_id=proposal.id, version_no=1, payload_json=json.dumps(payload), rationale=body.rationale.strip(), created_by=ctx["sub"])); _proposal_event(s, proposal, ctx, "", "DRAFT", body.rationale); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.allocation.proposal.create", f"academic_proposal:{proposal.id}", "", "DRAFT", body.rationale, commit=False); s.commit()
-    return {"proposal": _proposal_payload(s, proposal)}
-
-
-@router.post("/academics/allocation/proposals/{proposal_id}/submit")
-def submit_allocation_proposal(proposal_id: str, body: AcademicProposalTransitionIn, ctx=Depends(auth), s=Depends(db)):
-    proposal = require_academic_object(s, ctx, s.get(D.AcademicProposal, proposal_id), "submit", "Allocation proposal")
-    if not proposal or proposal.proposal_type != "allocation": raise HTTPException(404, "Allocation proposal not found")
-    if proposal.submitted_by != ctx["sub"] or proposal.state not in {"DRAFT", "RETURNED"} or proposal.status_version != body.expected_status_version: raise HTTPException(409, "Proposal cannot be submitted")
-    previous=proposal.state; proposal.state="RESUBMITTED" if previous == "RETURNED" else "SUBMITTED"; proposal.status_version += 1; proposal.updated_at=datetime.utcnow(); _proposal_event(s, proposal, ctx, previous, proposal.state, body.reason); dean=s.query(User).filter(User.office_n==6).first()
-    if dean: _proposal_notice(s, dean.id, "Faculty allocation decision required", proposal.title)
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.allocation.proposal.submit", f"academic_proposal:{proposal.id}", previous, proposal.state, body.reason, commit=False); s.commit(); return {"proposal": _proposal_payload(s, proposal)}
-
-
-@router.post("/academics/allocation/proposals/{proposal_id}/decision/{decision}")
-def decide_allocation_proposal(proposal_id: str, decision: str, body: AcademicProposalTransitionIn, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "approve_proposal" if decision.lower() == "approve" else "reject_proposal")[0])
-    proposal=require_academic_object(s, ctx, s.query(D.AcademicProposal).filter(D.AcademicProposal.id == proposal_id).with_for_update().first(), "approve", "Allocation proposal")
-    if proposal.submitted_by == ctx["sub"]:
-        raise HTTPException(403, "Proposal submitter cannot approve or reject their own proposal")
-    if not proposal or proposal.proposal_type != "allocation" or proposal.state not in {"SUBMITTED", "RESUBMITTED"}: raise HTTPException(409, "Invalid allocation proposal")
-    if proposal.status_version != body.expected_status_version: raise HTTPException(409, "Proposal changed; reload before deciding")
-    target={"approve":"APPROVED","reject":"REJECTED","return":"RETURNED"}.get(decision.lower())
-    if not target: raise HTTPException(422, "Unsupported allocation decision")
-    validate_transition(s, proposal, target, body.expected_status_version, ctx, body.reason)
-    claim_proposal_transition(s, proposal, body.expected_status_version, {"SUBMITTED", "RESUBMITTED"})
-    previous=proposal.state; proposal.state=target; proposal.status_version += 1; proposal.updated_at=datetime.utcnow()
-    if target=="APPROVED":
-        payload=json.loads(_proposal_version(s, proposal).payload_json); section=s.get(D.Section,payload["section_id"]); faculty=s.get(D.StaffMember,payload["faculty_person_id"])
-        if not section or not faculty: raise HTTPException(409, "Allocation target no longer exists")
-        section.faculty_person_id=faculty.id; s.add(D.FacultyAllocation(id=uid(),tenant_id=TENANT,section_id=section.id,faculty_person_id=faculty.id,term=section.term,workload_units=1,status="APPROVED",proposal_id=proposal.id,created_by=proposal.submitted_by,approved_by=ctx["sub"],created_at=datetime.utcnow(),updated_at=datetime.utcnow())); proposal.implementation_ref=section.id
-    _proposal_event(s, proposal, ctx, previous, target, body.reason); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.allocation.proposal.decision", f"academic_proposal:{proposal.id}", previous, target, body.reason, commit=False); s.commit(); return {"proposal": _proposal_payload(s, proposal)}
-
-
-@router.get("/academics/timetable/readiness")
-def timetable_readiness(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view", governance=True)[0]); resolve_decision, _ = gate(s, ctx, "academics", "resolve_exception"); sections=scoped_academic_query(s, D.Section, ctx).all(); entries=s.query(D.TimetableEntry).filter(D.TimetableEntry.tenant_id == ctx["tenant_id"], D.TimetableEntry.section_id.in_([section.id for section in sections]), D.TimetableEntry.status=="active").all(); staff={x.id:x for x in s.query(D.StaffMember).filter(D.StaffMember.tenant_id == ctx["tenant_id"]).all()}; out=[]
-    for section in sections:
-        slots=[x for x in entries if x.section_id==section.id]
-        if not section.faculty_person_id: out.append({"kind":"UNASSIGNED_FACULTY","severity":"critical","section_id":section.id,"message":f"Section {section.section_code} has no faculty assignment"})
-        for i,a in enumerate(slots):
-            for b in slots[i+1:]:
-                if a.day_of_week==b.day_of_week and a.start_time < b.end_time and b.start_time < a.end_time: out.append({"kind":"SECTION_CLASH","severity":"critical","section_id":section.id,"message":"Overlapping timetable slots"})
-    for i,a in enumerate(entries):
-        sa=s.get(D.Section,a.section_id)
-        for b in entries[i+1:]:
-            sb=s.get(D.Section,b.section_id)
-            if sa and sb and a.day_of_week==b.day_of_week and a.start_time < b.end_time and b.start_time < a.end_time and a.room and a.room==b.room: out.append({"kind":"ROOM_CLASH","severity":"critical","section_id":sa.id,"message":f"Room {a.room} is double-booked"})
-    unique_out = []
-    seen_keys = set()
-    for item in out:
-        exception_key = f"ttx_{item['kind'].lower()}_{item.get('section_id') or 'global'}"
-        if exception_key not in seen_keys:
-            seen_keys.add(exception_key)
-            unique_out.append(item)
-    out = unique_out
-    seen_exception_keys = set()
-    for item in out:
-        key=f"ttx_{item['kind'].lower()}_{item.get('section_id') or 'global'}"
-        if key in seen_exception_keys:
-            continue
-        seen_exception_keys.add(key)
-        existing=s.get(D.TimetableException,key)
-        if existing is None:
-            s.add(D.TimetableException(id=key,tenant_id=TENANT,section_id=item.get('section_id'),kind=item['kind'],severity=item['severity'],message=item['message']))
-        elif existing.status != "RESOLVED":
-            existing.message=item['message']; existing.severity=item['severity']; existing.detected_at=datetime.utcnow(); existing.status="OPEN"
-    s.commit()
-    persisted=[]
-    for item in out:
-        key=f"ttx_{item['kind'].lower()}_{item.get('section_id') or 'global'}"
-        if any(x["id"] == key for x in persisted):
-            continue
-        row=s.get(D.TimetableException,key); persisted.append({**item,"id":row.id,"status":row.status})
-    return {"exceptions": persisted, "summary":{"open":len(persisted),"critical":sum(1 for x in persisted if x["severity"]=="critical")}, "can_decide":resolve_decision.outcome in ("ALLOW", "ESCALATE"), "decision":resolve_decision.as_dict()}
-
-
-def academic_quality_risk_snapshot(s, ctx):
-    """Compute the current scoped risks and give each one a stable workflow key."""
-    departments=scoped_academic_query(s, D.Department, ctx).all(); result=[]
-    for dept in departments:
-        students=s.query(D.Student).filter(D.Student.tenant_id == ctx["tenant_id"], D.Student.dept_id==dept.id).all(); sections=s.query(D.Section).filter(D.Section.tenant_id == ctx["tenant_id"], D.Section.dept_id==dept.id).all()
-        avg=round(sum(float(x.cgpa or 0) for x in students)/len(students),2) if students else None
-        unassigned=sum(1 for x in sections if not x.faculty_person_id)
-        if (avg is not None and avg < 6.5) or unassigned:
-            severity = "critical" if (avg is not None and avg < 5.5) or unassigned >= 3 else "high" if (avg is not None and avg < 6.0) or unassigned >= 2 else "medium"
-            result.append({"source_key":f"academic_readiness:department:{dept.id}","scope_level":"department","scope_ref":dept.id,"department":dept.name,"metric_key":"academic_readiness","metric_value":avg,"threshold":6.5,"severity":severity,"deviation":f"Average CGPA {avg if avg is not None else 'N/A'}; {unassigned} unassigned sections"})
-    return result
-
-
-@router.get("/academics/quality/risks")
-def academic_quality_risks(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view", governance=True)[0])
-    return {"risks":academic_quality_risk_snapshot(s, ctx),"generated_at":datetime.utcnow().isoformat()}
-
-
-class QualityReviewIn(BaseModel):
-    title: str
-    scope_level: str = "department"
-    scope_ref: str = ""
-    metric_key: str
-    metric_value: float | None = None
-    threshold: float | None = None
-    deviation: str = ""
-    root_cause: str = ""
-    owner_id: str = ""
-    due_at: str = ""
-    effectiveness_measure: str = ""
-    source_key: str = Field(default="", max_length=160)
-
-
-class CorrectiveActionIn(BaseModel):
-    title: str
-    owner_id: str
-    deadline: str
-    priority: str = "medium"
-    escalation_target: str = ""
-
-
-def quality_review_readiness(s, review):
-    """Return the immutable workflow prerequisites used by both API and UI."""
-    actions=s.query(D.CorrectiveAction).filter(D.CorrectiveAction.review_id==review.id, D.CorrectiveAction.tenant_id==review.tenant_id).all()
-    verified=sum(1 for action in actions if action.state == "VERIFIED")
-    has_measurement=s.query(D.QualityEffectivenessMeasurement.id).filter(D.QualityEffectivenessMeasurement.review_id==review.id, D.QualityEffectivenessMeasurement.tenant_id==review.tenant_id).first() is not None
-    actions_complete=bool(actions) and verified == len(actions)
-    message=("Create and verify at least one corrective action before continuing." if not actions else "Verify every corrective action before continuing." if not actions_complete else "Record an effectiveness measurement before closing." if not has_measurement else "All closure requirements are complete.")
-    return {"action_count":len(actions),"verified_action_count":verified,"has_effectiveness_measurement":has_measurement,"can_enter_effectiveness":actions_complete,"can_close":actions_complete and has_measurement,"message":message}
-
-
-@router.get("/academics/quality/reviews")
-def quality_reviews(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view", governance=True)[0]); rows=scoped_academic_query(s, D.AcademicQualityReview, ctx).order_by(desc(D.AcademicQualityReview.updated_at)).all()
-    # ACTION_ASSIGNED was emitted by an earlier workflow revision.  Expose it
-    # as the equivalent current state so old records do not become unmanageable.
-    legacy_states = {"ACTION_ASSIGNED": "ACTION_PLAN_APPROVED"}
-    return {"states":["OPEN","INVESTIGATION","ROOT_CAUSE_CONFIRMED","ACTION_PLAN_APPROVED","ACTIONS_IN_PROGRESS","EFFECTIVENESS_REVIEW","CLOSED"],"reviews":[{"id":x.id,"title":x.title,"state":legacy_states.get(x.state, x.state),"source_key":x.source_key,"metric_key":x.metric_key,"metric_value":x.metric_value,"threshold":x.threshold,"deviation":x.deviation,"root_cause":x.root_cause,"effectiveness_measure":x.effectiveness_measure,"effectiveness_result":x.effectiveness_result,"closed_at":x.closed_at.isoformat() if x.closed_at else None,"due_at":x.due_at.isoformat() if x.due_at else None,"status_version":x.status_version,"owner_id":x.owner_id,"scope_ref":x.scope_ref,"closure":quality_review_readiness(s, x)} for x in rows],"can_manage":ctx["office_n"]==6}
-
-
-@router.post("/academics/quality/reviews")
-def create_quality_review(body: QualityReviewIn, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view", governance=True)[0])
-    if ctx["office_n"] not in {6,10,17}: raise HTTPException(403,"Only Dean, HOD, or Academic Coordinator can create quality reviews")
-    if body.scope_ref and body.scope_level == "department":
-        require_academic_object(s, ctx, s.get(D.Department, body.scope_ref), "create", "Department")
-    risk = next((item for item in academic_quality_risk_snapshot(s, ctx) if item["source_key"] == body.source_key), None) if body.source_key else None
-    if body.source_key and not risk:
-        raise HTTPException(409, "This risk is no longer active. Refresh the risk register before creating a review.")
-    if risk:
-        existing=s.query(D.AcademicQualityReview).filter(D.AcademicQualityReview.tenant_id==ctx["tenant_id"],D.AcademicQualityReview.source_key==risk["source_key"],D.AcademicQualityReview.state!="CLOSED").first()
-        if existing:
-            return {"review_id":existing.id,"state":existing.state,"reused":True}
-        title=f"Academic readiness risk — {risk['department']}"; scope_level=risk["scope_level"]; scope_ref=risk["scope_ref"]; metric_key=risk["metric_key"]; metric_value=risk["metric_value"]; threshold=risk["threshold"]; deviation=risk["deviation"]; source_key=risk["source_key"]
-    else:
-        title=body.title.strip(); scope_level=body.scope_level; scope_ref=body.scope_ref; metric_key=body.metric_key; metric_value=body.metric_value; threshold=body.threshold; deviation=body.deviation; source_key=""
-    if not title:
-        raise HTTPException(422, "A review title is required")
-    department=s.get(D.Department, scope_ref) if scope_level == "department" and scope_ref else None
-    now=datetime.utcnow(); row=D.AcademicQualityReview(id=uid(),tenant_id=TENANT,title=title,scope_level=scope_level,scope_ref=scope_ref,school_id=department.school_id if department else None,dept_id=department.id if department else None,metric_key=metric_key,metric_value=metric_value,threshold=threshold,deviation=deviation,root_cause=body.root_cause,owner_id=body.owner_id,effectiveness_measure=body.effectiveness_measure,due_at=datetime.fromisoformat(body.due_at) if body.due_at else now+timedelta(days=14),source_key=source_key,created_by=ctx["sub"],created_at=now,updated_at=now); s.add(row)
-    try:
-        s.commit()
-    except IntegrityError:
-        s.rollback()
-        existing=s.query(D.AcademicQualityReview).filter(D.AcademicQualityReview.tenant_id==ctx["tenant_id"],D.AcademicQualityReview.source_key==source_key,D.AcademicQualityReview.state!="CLOSED").first()
-        if existing:
-            return {"review_id":existing.id,"state":existing.state,"reused":True}
-        raise
-    write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.quality.review.create",f"quality_review:{row.id}","","OPEN",deviation); return {"review_id":row.id,"state":row.state,"reused":False}
-
-
-class QualityReviewTransitionIn(BaseModel):
-    target_state: str
-    expected_status_version: int = Field(ge=0)
-    effectiveness_result: str = ""
-    reason: str = ""
-
-
-class EffectivenessMeasurementIn(BaseModel):
-    measure: str
-    result: str
-    value: float | None = None
-
-
-@router.post("/academics/quality/reviews/{review_id}/effectiveness")
-def record_effectiveness(review_id: str, body: EffectivenessMeasurementIn, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "manage_quality")[0])
-    review=require_academic_object(s, ctx, s.get(D.AcademicQualityReview, review_id), "verify", "Quality review")
-    if review.state != "EFFECTIVENESS_REVIEW": raise HTTPException(409, "Review must be in effectiveness review")
-    row=D.QualityEffectivenessMeasurement(id=uid(),tenant_id=TENANT,review_id=review.id,measure=body.measure.strip(),result=body.result.strip(),value=body.value,measured_by=ctx["sub"]); s.add(row); review.effectiveness_measure=body.measure.strip(); review.effectiveness_result=body.result.strip(); review.updated_at=datetime.utcnow(); s.commit()
-    return {"id":row.id,"review_id":review.id,"measured_at":row.measured_at.isoformat()}
-
-
-@router.get("/academics/quality/reviews/{review_id}/effectiveness")
-def effectiveness_history(review_id: str, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view", governance=True)[0])
-    review=require_academic_object(s, ctx, s.get(D.AcademicQualityReview, review_id), "read", "Quality review")
-    rows=s.query(D.QualityEffectivenessMeasurement).filter(D.QualityEffectivenessMeasurement.tenant_id==TENANT,D.QualityEffectivenessMeasurement.review_id==review.id).order_by(D.QualityEffectivenessMeasurement.measured_at).all()
-    return {"review_id":review.id,"measurements":[{"id":x.id,"measure":x.measure,"result":x.result,"value":x.value,"measured_by":x.measured_by,"measured_at":x.measured_at.isoformat()} for x in rows]}
-
-
-@router.post("/academics/quality/reviews/{review_id}/transition")
-def transition_quality_review(review_id: str, body: QualityReviewTransitionIn, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "manage_quality")[0])
-    review=require_academic_object(s, ctx, s.get(D.AcademicQualityReview, review_id), "verify", "Quality review")
-    target=body.target_state.upper()
-    allowed={"OPEN":{"INVESTIGATION"},"INVESTIGATION":{"ROOT_CAUSE_CONFIRMED","OPEN"},"ROOT_CAUSE_CONFIRMED":{"ACTION_PLAN_APPROVED"},"ACTION_PLAN_APPROVED":{"ACTIONS_IN_PROGRESS"},"ACTIONS_IN_PROGRESS":{"EFFECTIVENESS_REVIEW"},"EFFECTIVENESS_REVIEW":{"CLOSED","ACTIONS_IN_PROGRESS"},"CLOSED":set()}
-    if review.state == "ACTION_ASSIGNED":
-        # Compatibility for records created before the state machine was
-        # consolidated.  Persist the normalized state on their next action.
-        review.state = "ACTION_PLAN_APPROVED"
-    if target not in allowed.get(review.state, set()): raise HTTPException(409, f"Transition {review.state} -> {target} is not allowed")
-    if review.status_version != body.expected_status_version: raise HTTPException(409, "Review changed; reload before transitioning")
-    readiness=quality_review_readiness(s, review)
-    if target == "EFFECTIVENESS_REVIEW" and not readiness["can_enter_effectiveness"]:
-        raise HTTPException(409, readiness["message"])
-    if target == "CLOSED":
-        if not readiness["can_close"]:
-            raise HTTPException(409, readiness["message"])
-        review.closed_at=datetime.utcnow()
-    previous=review.state; review.state=target; review.status_version+=1; review.updated_at=datetime.utcnow(); s.commit()
-    write_audit(s, ctx["sub"], actor_name(s,ctx), ctx["office_n"], "academic.quality.review.transition", f"quality_review:{review.id}", previous, target, body.reason)
-    return {"review_id":review.id,"state":review.state,"status_version":review.status_version}
-
-
-@router.post("/academics/quality/reviews/{review_id}/actions")
-def create_corrective_action(review_id: str, body: CorrectiveActionIn, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "manage_quality")[0])
-    review=require_academic_object(s, ctx, s.get(D.AcademicQualityReview,review_id), "assign", "Quality review")
-    if review.state == "ACTION_ASSIGNED": review.state = "ACTION_PLAN_APPROVED"
-    if review.state not in {"ACTION_PLAN_APPROVED", "ACTIONS_IN_PROGRESS"}:
-        raise HTTPException(409, "Corrective actions can be assigned only after the action plan is approved")
-    review_scope = hierarchy(s, review)
-    if body.priority not in {"low", "medium", "high", "critical"}: raise HTTPException(422, "Invalid action priority")
-    action=D.CorrectiveAction(id=uid(),tenant_id=TENANT,review_id=review_id,school_id=review_scope.school_id,dept_id=review_scope.dept_id,program_id=review_scope.program_id,section_id=review_scope.section_id,title=body.title.strip(),owner_id=body.owner_id,deadline=datetime.fromisoformat(body.deadline),priority=body.priority,escalation_target=body.escalation_target,created_by=ctx["sub"]); s.add(action); review.state="ACTIONS_IN_PROGRESS"; review.status_version+=1; review.updated_at=datetime.utcnow(); s.commit(); write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.quality.action.create",f"corrective_action:{action.id}","ACTION_PLAN_APPROVED","ACTIONS_IN_PROGRESS",body.title); owner=s.get(User,body.owner_id); owner and _proposal_notice(s,owner.id,"Corrective action assigned",body.title); return {"action_id":action.id,"state":action.state}
-
-
-@router.get("/academics/quality/actions")
-def corrective_actions(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view", governance=True)[0])
-    # Scope governs departmental oversight, but an action owner must always be
-    # able to see their own assigned work—even for a legacy action whose
-    # hierarchy columns were not populated when it was created.
-    scoped_rows=scoped_academic_query(s, D.CorrectiveAction, ctx).all()
-    owned_rows=s.query(D.CorrectiveAction).filter(D.CorrectiveAction.tenant_id==ctx["tenant_id"],D.CorrectiveAction.owner_id==ctx["sub"]).all()
-    rows=sorted({row.id: row for row in [*scoped_rows, *owned_rows]}.values(), key=lambda row: row.deadline or datetime.max)
-    now=datetime.utcnow()
-    return {"actions":[{"id":x.id,"review_id":x.review_id,"title":x.title,"owner_id":x.owner_id,"deadline":x.deadline.isoformat() if x.deadline else None,"state":"OVERDUE" if x.state in {"OPEN","IN_PROGRESS"} and x.deadline and x.deadline<now else x.state,"priority":x.priority,"progress":x.progress,"evidence_versions":json.loads(x.evidence_versions or "[]"),"owner_acknowledged":x.owner_acknowledged,"escalation_target":x.escalation_target,"verification_result":x.verification_result,"evidence":x.evidence,"status_version":x.status_version} for x in rows],"overdue":sum(1 for x in rows if x.state in {"OPEN","IN_PROGRESS"} and x.deadline and x.deadline<now)}
-
-
-class ActionUpdateIn(BaseModel):
-    evidence: str = ""
-    expected_status_version: int = Field(ge=0)
-    progress: float = Field(default=100, ge=0, le=100)
-    owner_acknowledged: bool = False
-    verification_result: str = ""
-
-
-@router.post("/academics/quality/actions/{action_id}/submit")
-def submit_corrective_action(action_id: str, body: ActionUpdateIn, ctx=Depends(auth), s=Depends(db)):
-    action=require_tenant(s.get(D.CorrectiveAction,action_id), ctx, "Corrective action")
-    if action.owner_id != ctx["sub"] or action.status_version != body.expected_status_version: raise HTTPException(403,"Only the action owner can submit current evidence")
-    action.evidence=body.evidence.strip(); action.evidence_versions=json.dumps(json.loads(action.evidence_versions or "[]") + [{"version": len(json.loads(action.evidence_versions or "[]"))+1, "evidence": action.evidence, "at": datetime.utcnow().isoformat()}]); action.progress=body.progress; action.owner_acknowledged=body.owner_acknowledged; action.state="EVIDENCE_SUBMITTED"; action.status_version+=1; action.updated_at=datetime.utcnow(); s.commit(); return {"state":action.state,"progress":action.progress}
-
-
-@router.post("/academics/quality/actions/{action_id}/verify")
-def verify_corrective_action(action_id: str, body: ActionUpdateIn, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "manage_quality")[0])
-    action=require_academic_object(s, ctx, s.get(D.CorrectiveAction,action_id), "verify", "Corrective action")
-    if ctx["office_n"] != 6:
-        raise HTTPException(403, "Only Dean Academics may independently verify corrective-action evidence")
-    if action.owner_id == ctx["sub"]:
-        raise HTTPException(403, "Action owners submit evidence; a different Dean reviewer must verify it")
-    if action.status_version != body.expected_status_version: raise HTTPException(409,"Action changed or not found")
-    if not action.evidence.strip(): raise HTTPException(422,"Evidence is required before verification")
-    action.state="VERIFIED"; action.verified_by=ctx["sub"]; action.verification_result=body.verification_result.strip() or "Evidence verified"; action.status_version+=1; action.updated_at=datetime.utcnow(); review=s.get(D.AcademicQualityReview,action.review_id); review.verified_by=ctx["sub"]
-    # A review must not enter effectiveness assessment while another assigned
-    # action is still open. This keeps multi-action reviews coherent.
-    remaining=s.query(D.CorrectiveAction).filter(D.CorrectiveAction.review_id==review.id,D.CorrectiveAction.tenant_id==TENANT,D.CorrectiveAction.state!="VERIFIED").count()
-    if remaining == 0:
-        review.state="EFFECTIVENESS_REVIEW"
-    review.updated_at=datetime.utcnow(); s.commit(); write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.quality.action.verify",f"corrective_action:{action.id}","EVIDENCE_SUBMITTED","VERIFIED",body.evidence); return {"state":action.state,"review_state":review.state,"remaining_actions":remaining}
-
-
 #  ACADEMICS: courses & sections
 # --------------------------------------------------------------------------- #
-class ProgramIn(BaseModel):
-    department_id: str
-    code: str
-    name: str
-    level: str = "UG"
-    duration_years: int = Field(ge=1, le=10)
-
-
-@router.get("/academics/programmes")
-def list_programmes(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view")[0])
-    departments = {row.id: row for row in s.query(D.Department).filter_by(tenant_id=ctx["tenant_id"]).all()}
-    programmes = s.query(D.Program).filter_by(tenant_id=ctx["tenant_id"]).order_by(D.Program.name).all()
-    return {"programmes": [{"id": row.id, "code": row.code, "name": row.name, "level": row.level,
-             "duration_years": row.duration_years, "department_id": row.dept_id,
-             "department": departments[row.dept_id].name if row.dept_id in departments else ""} for row in programmes],
-            "departments": [{"id": row.id, "code": row.code, "name": row.name} for row in departments.values()]}
-
-
-@router.post("/academics/programmes")
-def create_programme(body: ProgramIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "academics", "create_program")
-    require(dec)
-    code, name, level = body.code.strip().upper(), body.name.strip(), body.level.strip().upper()
-    if not code or not name or level not in {"UG", "PG", "DIPLOMA", "PHD", "CERTIFICATE"}:
-        raise HTTPException(422, "Programme code, name, and a valid level are required")
-    department = s.get(D.Department, body.department_id)
-    if not department or department.tenant_id != ctx["tenant_id"]:
-        raise HTTPException(404, "Department not found")
-    if s.query(D.Program).filter(D.Program.tenant_id == ctx["tenant_id"], D.Program.code == code).first():
-        raise HTTPException(409, "A programme with this code already exists")
-    row = D.Program(id=uid(), tenant_id=ctx["tenant_id"], dept_id=department.id, code=code, name=name,
-                    level=level, duration_years=body.duration_years)
-    s.add(row); s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academics.programme.create",
-                f"programme:{row.id}", "", "active", f"{row.code} - {row.name}")
-    return {"id": row.id, "decision": {"outcome": "ALLOW", "reason": "Programme created successfully"}}
-
-
 @router.get("/academics/courses")
 def list_courses(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view")[0])
-    dept_map = {d.id: d.code for d in s.query(D.Department).all()}
-    program_map = {p.id: p.name for p in s.query(D.Program).all()}
-    course_query = s.query(D.Course)
-    if ctx["office_n"] == 10:
-        staff = _staff_profile(s, ctx)
-        if staff and staff.dept_id: course_query = course_query.filter(D.Course.dept_id == staff.dept_id)
-    rows = course_query.order_by(D.Course.code).all()
-    course_ids = {row.id for row in rows}
-    sections = s.query(D.Section).filter(D.Section.tenant_id == ctx["tenant_id"], D.Section.course_id.in_(course_ids) if course_ids else text("1=0")).all()
-    staff_map = {row.id: row.name for row in s.query(D.StaffMember).filter(D.StaffMember.tenant_id == ctx["tenant_id"]).all()}
-    result_rows = s.query(D.StudentSubjectResult).filter(D.StudentSubjectResult.tenant_id == ctx["tenant_id"], D.StudentSubjectResult.course_id.in_(course_ids) if course_ids else text("1=0"), D.StudentSubjectResult.outcome.in_(["passed", "failed"])).all()
-    results_by_course = {}
-    for result in result_rows: results_by_course.setdefault(result.course_id, []).append(result.outcome == "passed")
-    outcomes_by_course = {course_id: 0 for course_id in course_ids}
-    for outcome in s.query(D.CourseOutcome).filter(D.CourseOutcome.tenant_id == ctx["tenant_id"], D.CourseOutcome.course_id.in_(course_ids) if course_ids else text("1=0"), D.CourseOutcome.active == True).all(): outcomes_by_course[outcome.course_id] = outcomes_by_course.get(outcome.course_id, 0) + 1
-    sections_by_course = {}
-    for section in sections: sections_by_course.setdefault(section.course_id, []).append(section)
+    dept_map = {d.id: d.code for d in s.query(D.Department).filter(D.Department.tenant_id == ctx["tenant_id"]).all()}
+    program_map = {p.id: p.name for p in s.query(D.Program).filter(D.Program.tenant_id == ctx["tenant_id"]).all()}
+    rows = s.query(D.Course).filter(D.Course.tenant_id == ctx["tenant_id"]).order_by(D.Course.code).all()
     return {"courses": [{
         "id": r.id, "code": r.code, "title": r.title, "credits": r.credits,
-        "semester": r.semester, "dept": dept_map.get(r.dept_id, ""), "program_id": r.program_id,
+        "semester": r.semester, "dept": dept_map.get(r.dept_id, ""),
         "program": program_map.get(r.program_id, "B.Tech"), "regulation": r.regulation or "R2023",
         "course_type": r.course_type or "Core", "category": r.category or "Professional Core",
         "ltp": r.ltp or "", "prerequisite": r.prerequisite or "", "status": r.status or "Active",
         "description": r.description or "",
-        "sections": len(sections_by_course.get(r.id, [])),
-        "faculty": sorted({staff_map.get(x.faculty_person_id, "Unassigned") for x in sections_by_course.get(r.id, [])}),
-        "unassigned_sections": sum(1 for x in sections_by_course.get(r.id, []) if not x.faculty_person_id),
-        "outcome_count": outcomes_by_course.get(r.id, 0),
-        "pass_rate": round(100 * sum(results_by_course.get(r.id, [])) / len(results_by_course[r.id]), 1) if results_by_course.get(r.id) else None,
     } for r in rows], "can_create": can(s, ctx, "academics", "create_course")}
-
-
-@router.get("/academics/programs")
-def list_academic_programs(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view")[0])
-    return {"programs": [{"id": p.id, "code": p.code, "name": p.name, "level": p.level} for p in s.query(D.Program).filter_by(tenant_id=TENANT).order_by(D.Program.code).all()]}
 
 
 class CourseIn(BaseModel):
     code: str
     title: str
     dept_code: str
+    program_id: str = ""
     credits: int = 3
     semester: int = 1
     program: str = "B.Tech"
@@ -2782,929 +1650,206 @@ class CourseIn(BaseModel):
     description: str = ""
 
 
-class CurriculumProposalIn(BaseModel):
-    course_id: str = ""
-    code: str
-    title: str
-    dept_code: str
-    credits: int = Field(default=3, ge=1, le=30)
-    semester: int = Field(default=1, ge=1, le=16)
-    regulation: str = "R2023"
-    course_type: str = "Core"
-    category: str = "Professional Core"
-    ltp: str = "3-0-0"
-    prerequisite: str = ""
-    description: str = ""
-    effective_term: str
-    rationale: str = ""
-
-
-class ProgramProposalIn(BaseModel):
-    program_id: str = ""
+class DepartmentIn(BaseModel):
     code: str
     name: str
-    dept_code: str
+
+
+class ProgramIn(BaseModel):
+    code: str
+    name: str
+    dept_id: str
     level: str = "UG"
-    duration_years: int = Field(default=4, ge=1, le=10)
-    effective_term: str
-    rationale: str = ""
+    duration_years: int = 4
 
 
-@router.get("/programs/proposals")
-def program_proposals(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view", governance=True)[0])
-    query = scoped_academic_query(s, D.AcademicProposal, ctx).filter(
-        D.AcademicProposal.proposal_type == "program",
-    )
-    if ctx["office_n"] != 6:
-        query = query.filter(D.AcademicProposal.scope_ref == (actor_department_id(s, ctx) or "__no_scope__"))
-    departments = scoped_academic_query(s, D.Department, ctx).order_by(D.Department.name).all()
-    terms = s.query(D.AcademicYear, D.Semester).join(
-        D.Semester, D.Semester.academic_year_id == D.AcademicYear.id
-    ).filter(
-        D.AcademicYear.tenant_id == ctx["tenant_id"],
-        D.AcademicYear.is_active == True,
-        D.Semester.is_active == True,
-    ).order_by(D.AcademicYear.start_date.desc(), D.Semester.sequence).all()
-    return {
-        "proposals": [_proposal_payload(s, row) for row in query.order_by(desc(D.AcademicProposal.updated_at)).all()],
-        "can_propose": ctx["office_n"] in {10, 17, 41},
-        "can_decide": ctx["office_n"] == 6,
-        "form_options": {
-            "departments": [{"id": row.id, "code": row.code, "name": row.name} for row in departments],
-            "effective_terms": [{"value": f"{year.name} · {semester.name}", "label": f"{year.name} · {semester.name}"} for year, semester in terms],
-        },
-    }
+def _catalog_campus_name(s, ctx) -> str:
+    """Resolve a tenant-local canonical campus for catalog and student writes."""
+    scope = (ctx["scope_ref"] or "").strip()
+    row = (s.query(OrgScope)
+           .filter(OrgScope.tenant_id == ctx["tenant_id"], OrgScope.level == "campus")
+           .filter(or_(OrgScope.id == scope, OrgScope.name == scope)).first())
+    if not row:
+        raise HTTPException(403, "A canonical campus scope is required")
+    return row.name
 
 
-@router.get("/programs/proposals/{proposal_id}")
-def program_proposal_detail(proposal_id: str, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view", governance=True)[0])
-    proposal = require_academic_object(s, ctx, s.get(D.AcademicProposal, proposal_id), "read", "Programme proposal")
-    if proposal.proposal_type != "program": raise HTTPException(404, "Programme proposal not found")
-    return {"proposal": _proposal_payload(s, proposal)}
+def _catalog_departments(s, ctx):
+    """Return catalog departments visible in the authenticated campus.
+
+    Department has a legacy campus-name column rather than a canonical scope
+    foreign key. The name is used only after resolving the authoritative
+    tenant-local OrgScope from the authenticated context.
+    """
+    query = s.query(D.Department).filter(D.Department.tenant_id == ctx["tenant_id"])
+    campus = _authenticated_campus_scope(s, ctx)
+    if campus is not None:
+        query = query.filter(D.Department.campus == campus.name)
+    return query, campus
 
 
-@router.post("/programs/proposals")
-def create_program_proposal(body: ProgramProposalIn, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s,ctx,"academics","view", governance=True)[0])
-    if ctx["office_n"] not in {10,17,41}: raise HTTPException(403,"Only HOD, Academic Coordinator, or Program Coordinator can propose programmes")
-    dept=require_academic_object(s, ctx, s.query(D.Department).filter(D.Department.tenant_id == ctx["tenant_id"], D.Department.code==body.dept_code).first(), "create", "Department")
-    staff=s.query(D.StaffMember).filter(D.StaffMember.dept_id==dept.id,D.StaffMember.status=="active").count(); courses=s.query(D.Course).filter(D.Course.dept_id==dept.id).count()
-    payload=body.model_dump(); payload["dept_id"]=dept.id; payload["feasibility"]={"active_faculty":staff,"available_courses":courses,"ready":staff>=1 and courses>=1}
-    now=datetime.utcnow(); p=D.AcademicProposal(id=uid(),tenant_id=TENANT,proposal_type="program",title=f"Programme proposal: {body.code.upper()} — {body.name}",scope_level="department",scope_ref=dept.id,school_id=dept.school_id,dept_id=dept.id,state="DRAFT",version_no=1,submitted_by=ctx["sub"],submitted_office_n=ctx["office_n"],assigned_to_office_n=6,due_at=now+timedelta(days=15),created_at=now,updated_at=now);s.add(p);s.flush();s.add(D.AcademicProposalVersion(id=uid(),tenant_id=TENANT,proposal_id=p.id,version_no=1,payload_json=json.dumps(payload),rationale=body.rationale,created_by=ctx["sub"]));_proposal_event(s,p,ctx,"","DRAFT",body.rationale);write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.program.proposal.create",f"academic_proposal:{p.id}","","DRAFT",body.rationale,commit=False);s.commit();return {"proposal":_proposal_payload(s,p)}
+def _manage_catalog(s, ctx):
+    dec, _ = gate(s, ctx, "academics", "create_course")
+    require(dec)
+    return dec
 
 
-@router.post("/programs/proposals/{proposal_id}/submit")
-def submit_program_proposal(proposal_id:str,body:AcademicProposalTransitionIn,ctx=Depends(auth),s=Depends(db)):
-    p=require_academic_object(s, ctx, s.query(D.AcademicProposal).filter(D.AcademicProposal.id == proposal_id).with_for_update().first(), "submit", "Programme proposal")
-    if not p or p.proposal_type!="program" or p.submitted_by!=ctx["sub"] or p.state not in {"DRAFT", "RETURNED"} or p.status_version!=body.expected_status_version: raise HTTPException(409,"Programme proposal cannot be submitted")
-    previous=p.state; p.state="RESUBMITTED" if previous == "RETURNED" else "SUBMITTED";p.status_version+=1;p.updated_at=datetime.utcnow();_proposal_event(s,p,ctx,previous,p.state,body.reason);write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.program.proposal.submit",f"academic_proposal:{p.id}",previous,p.state,body.reason,commit=False);s.commit();return {"proposal":_proposal_payload(s,p)}
-
-
-@router.post("/programs/proposals/{proposal_id}/decision/{decision}")
-def decide_program_proposal(proposal_id:str,decision:str,body:AcademicProposalTransitionIn,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s, ctx, "academics", "approve_proposal" if decision.lower() == "approve" else "reject_proposal")[0])
-    p=require_tenant(s.get(D.AcademicProposal,proposal_id), ctx, "Programme proposal")
-    prevent_self_approval(p, ctx)
-    if not p or p.proposal_type!="program" or p.state not in {"SUBMITTED", "RESUBMITTED"} or p.status_version!=body.expected_status_version: raise HTTPException(409,"Invalid programme decision")
-    target={"approve":"APPROVED","reject":"REJECTED","return":"RETURNED","escalate":"ESCALATED"}.get(decision.lower())
-    if not target: raise HTTPException(422,"Unsupported decision")
-    validate_transition(s, p, target, body.expected_status_version, ctx, body.reason)
-    claim_proposal_transition(s, p, body.expected_status_version, {"SUBMITTED", "RESUBMITTED"})
-    data=json.loads(_proposal_version(s,p).payload_json)
-    if target=="APPROVED" and not data["feasibility"]["ready"]: raise HTTPException(409,"Programme lacks faculty or course readiness; escalate or revise")
-    previous=p.state;p.state=target;p.status_version+=1;p.updated_at=datetime.utcnow()
-    if target=="APPROVED":
-        program=require_academic_object(s, ctx, s.get(D.Program,data.get("program_id")), "approve", "Program") if data.get("program_id") else None
-        if not program: program=D.Program(id=uid(),tenant_id=TENANT,dept_id=data["dept_id"],code=data["code"].upper(),name=data["name"],level=data["level"],duration_years=data["duration_years"]);s.add(program);s.flush()
-        else: program.code=data["code"].upper();program.name=data["name"];program.level=data["level"];program.duration_years=data["duration_years"]
-        p.implementation_ref=program.id
-    if target=="ESCALATED":p.escalated_to_office_n=4
-    _proposal_event(s,p,ctx,previous,target,body.reason);write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.program.proposal.decision",f"academic_proposal:{p.id}",previous,target,body.reason,commit=False);s.commit();return {"proposal":_proposal_payload(s,p)}
-
-
-@router.get("/academics/committees")
-def committees(ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","view", governance=True)[0]); return {"committees":[{"id":x.id,"name":x.name,"type":x.committee_type,"chair_id":x.chair_id,"status":x.status,"permissions":json.loads(x.permissions_json or "[]")} for x in scoped_academic_query(s, D.AcademicCommittee, ctx).all()]}
-
-class CommitteeIn(BaseModel): name:str; committee_type:str; chair_id:str=""; permissions:list[str]=["view","record","assign","verify"]
-class CommitteeUpdateIn(BaseModel): name:str; committee_type:str; chair_id:str=""; status:str="active"; permissions:list[str]=["view","record","assign","verify"]
-class MeetingIn(BaseModel): committee_id:str; meeting_at:str; agenda:str=""
-class ResolutionIn(BaseModel): title:str; decision:str; linked_proposal_id:str=""; linked_quality_action_id:str=""; linked_planning_item_id:str=""
-
-def require_committee_permission(s, ctx, committee_id, permission):
-    committee=require_academic_object(s,ctx,s.get(D.AcademicCommittee,committee_id),"read","Committee")
-    if ctx["office_n"] == 6: return committee
-    member=s.query(D.CommitteeMember).filter(D.CommitteeMember.tenant_id==TENANT,D.CommitteeMember.committee_id==committee.id,D.CommitteeMember.user_id==ctx["sub"],D.CommitteeMember.active==True).first()
-    if not member or permission not in json.loads(committee.permissions_json or "[]"):
-        raise HTTPException(403,"Committee permission denied")
-    return committee
-
-@router.post("/academics/committees")
-def create_committee(body:CommitteeIn,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s, ctx, "academics", "manage_committee", governance=True)[0])
-    row=D.AcademicCommittee(id=uid(),tenant_id=TENANT,name=body.name,committee_type=body.committee_type,chair_id=body.chair_id,permissions_json=json.dumps(body.permissions));s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.create",f"committee:{row.id}","","active",body.name);return {"id":row.id,"status":row.status,"permissions":body.permissions}
-
-@router.put("/academics/committees/{committee_id}")
-def update_committee(committee_id:str,body:CommitteeUpdateIn,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","manage_committee", governance=True)[0]); row=require_academic_object(s,ctx,s.get(D.AcademicCommittee,committee_id),"edit","Committee")
-    if body.chair_id and not s.get(User,body.chair_id): raise HTTPException(404,"Chair user not found")
-    previous=row.status; row.name=body.name.strip(); row.committee_type=body.committee_type.strip(); row.chair_id=body.chair_id.strip(); row.status=body.status; row.permissions_json=json.dumps(body.permissions); s.commit(); write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.update",f"committee:{row.id}",previous,row.status,body.name); return {"id":row.id,"name":row.name,"type":row.committee_type,"chair_id":row.chair_id,"status":row.status,"permissions":body.permissions}
-
-@router.post("/academics/committees/meetings")
-def create_meeting(body:MeetingIn,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s, ctx, "academics", "manage_committee", governance=True)[0])
-    require_committee_permission(s,ctx,body.committee_id,"record")
-    row=D.CommitteeMeeting(id=uid(),tenant_id=TENANT,committee_id=body.committee_id,meeting_at=datetime.fromisoformat(body.meeting_at),agenda=body.agenda,created_by=ctx["sub"]);s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.meeting.create",f"committee_meeting:{row.id}","","SCHEDULED",body.agenda);return {"id":row.id,"status":row.status}
-
-@router.get("/academics/committees/{committee_id}/meetings")
-def committee_meetings(committee_id:str,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","view", governance=True)[0]); require_academic_object(s,ctx,s.get(D.AcademicCommittee,committee_id),"read","Committee")
-    rows=s.query(D.CommitteeMeeting).filter(D.CommitteeMeeting.tenant_id==TENANT,D.CommitteeMeeting.committee_id==committee_id).order_by(desc(D.CommitteeMeeting.meeting_at)).all()
-    return {"meetings":[{"id":x.id,"meeting_at":x.meeting_at.isoformat(),"agenda":x.agenda,"minutes":x.minutes,"status":x.status,"agenda_status":x.agenda_status,"minutes_status":x.minutes_status} for x in rows]}
-
-class CommitteeTransitionIn(BaseModel): target_status:str; reason:str=""; content:str=""
-
-@router.post("/academics/committees/meetings/{meeting_id}/transition")
-def transition_meeting(meeting_id:str,body:CommitteeTransitionIn,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","manage_committee", governance=True)[0]); row=require_academic_object(s,ctx,s.get(D.CommitteeMeeting,meeting_id),"edit","Committee meeting"); require_committee_permission(s,ctx,row.committee_id,"record"); target=body.target_status.upper()
-    if target not in {"AGENDA_APPROVED","HELD","MINUTES_DRAFT","MINUTES_FINAL"}: raise HTTPException(422,"Unknown meeting status")
-    if target=="AGENDA_APPROVED" and not row.agenda.strip(): raise HTTPException(422,"Agenda is required")
-    if target in {"MINUTES_DRAFT","MINUTES_FINAL"} and body.content.strip(): row.minutes=body.content.strip()
-    if target=="AGENDA_APPROVED": row.agenda_status="APPROVED"
-    if target=="MINUTES_DRAFT": row.minutes_status="DRAFT"
-    if target=="MINUTES_FINAL": row.minutes_status="FINAL"
-    row.status=target; s.commit(); return {"id":row.id,"status":row.status,"agenda_status":row.agenda_status,"minutes_status":row.minutes_status}
-
-@router.post("/academics/committees/meetings/{meeting_id}/resolutions")
-def create_resolution(meeting_id:str,body:ResolutionIn,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s, ctx, "academics", "manage_committee", governance=True)[0])
-    require_academic_object(s, ctx, s.get(D.CommitteeMeeting,meeting_id), "create", "Committee meeting")
-    meeting=require_academic_object(s,ctx,s.get(D.CommitteeMeeting,meeting_id),"create","Committee meeting")
-    require_committee_permission(s,ctx,meeting.committee_id,"record")
-    if meeting.minutes_status != "FINAL": raise HTTPException(409,"Minutes must be finalized before recording a resolution")
-    row=D.CommitteeResolution(id=uid(),tenant_id=TENANT,meeting_id=meeting_id,title=body.title,decision=body.decision,linked_proposal_id=body.linked_proposal_id,linked_quality_action_id=body.linked_quality_action_id,linked_planning_item_id=body.linked_planning_item_id);s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.resolution.create",f"committee_resolution:{row.id}","","DRAFT",body.decision);return {"id":row.id,"status":row.status}
-
-@router.get("/academics/committees/{committee_id}/resolutions")
-def committee_resolutions(committee_id:str,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","view", governance=True)[0]); require_academic_object(s,ctx,s.get(D.AcademicCommittee,committee_id),"read","Committee")
-    rows=s.query(D.CommitteeResolution).join(D.CommitteeMeeting,D.CommitteeResolution.meeting_id==D.CommitteeMeeting.id).filter(D.CommitteeMeeting.committee_id==committee_id,D.CommitteeResolution.tenant_id==TENANT).all()
-    return {"resolutions":[{"id":x.id,"meeting_id":x.meeting_id,"title":x.title,"decision":x.decision,"status":x.status,"linked_proposal_id":x.linked_proposal_id,"linked_quality_action_id":x.linked_quality_action_id,"linked_planning_item_id":x.linked_planning_item_id} for x in rows]}
-
-@router.post("/academics/committees/resolutions/{resolution_id}/transition")
-def transition_resolution(resolution_id:str,body:CommitteeTransitionIn,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","manage_committee", governance=True)[0]); row=require_academic_object(s,ctx,s.get(D.CommitteeResolution,resolution_id),"approve","Committee resolution"); meeting=s.get(D.CommitteeMeeting,row.meeting_id); require_committee_permission(s,ctx,meeting.committee_id,"approve"); target=body.target_status.upper()
-    if target not in {"APPROVED","REJECTED"}: raise HTTPException(422,"Resolution must be approved or rejected")
-    row.status=target; row.approved_by=ctx["sub"]; row.approved_at=datetime.utcnow(); s.commit(); return {"id":row.id,"status":row.status}
-
-class MemberIn(BaseModel): user_id:str; role:str="member"
-@router.post("/academics/committees/{committee_id}/members")
-def add_committee_member(committee_id:str,body:MemberIn,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s, ctx, "academics", "manage_committee", governance=True)[0])
-    require_academic_object(s, ctx, s.get(D.AcademicCommittee,committee_id), "create", "Committee")
-    if not s.get(User,body.user_id): raise HTTPException(404,"User not found")
-    if s.query(D.CommitteeMember).filter(D.CommitteeMember.tenant_id == ctx["tenant_id"], D.CommitteeMember.committee_id == committee_id, D.CommitteeMember.user_id == body.user_id, D.CommitteeMember.active == True).first(): raise HTTPException(409,"User is already an active committee member")
-    row=D.CommitteeMember(id=uid(),tenant_id=TENANT,committee_id=committee_id,user_id=body.user_id,role=body.role);s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.member.add",f"committee_member:{row.id}","","active",body.user_id);return {"id":row.id}
-
-@router.delete("/academics/committees/{committee_id}/members/{member_id}")
-def remove_committee_member(committee_id:str,member_id:str,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","manage_committee", governance=True)[0]); require_committee_permission(s,ctx,committee_id,"assign")
-    row=s.query(D.CommitteeMember).filter(D.CommitteeMember.tenant_id==TENANT,D.CommitteeMember.id==member_id,D.CommitteeMember.committee_id==committee_id,D.CommitteeMember.active==True).first()
-    if not row: raise HTTPException(404,"Active committee member not found")
-    row.active=False; s.commit(); return {"id":row.id,"active":False}
-
-@router.get("/academics/committees/{committee_id}/members")
-def committee_members(committee_id:str,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","view", governance=True)[0]); committee=require_academic_object(s, ctx, s.get(D.AcademicCommittee, committee_id), "read", "Committee");return {"members":[{"id":x.id,"user_id":x.user_id,"role":x.role} for x in s.query(D.CommitteeMember).filter(D.CommitteeMember.tenant_id == ctx["tenant_id"], D.CommitteeMember.committee_id==committee.id,D.CommitteeMember.active==True).all()]}
-
-class CommitteeActionIn(BaseModel): title:str; owner_id:str; deadline:str=""
-@router.post("/academics/committees/resolutions/{resolution_id}/actions")
-def committee_action(resolution_id:str,body:CommitteeActionIn,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s, ctx, "academics", "manage_committee", governance=True)[0])
-    resolution=require_academic_object(s, ctx, s.get(D.CommitteeResolution,resolution_id), "create", "Committee resolution")
-    meeting=s.get(D.CommitteeMeeting,resolution.meeting_id); require_committee_permission(s,ctx,meeting.committee_id,"assign")
-    row=D.CommitteeActionItem(id=uid(),tenant_id=TENANT,resolution_id=resolution_id,title=body.title,owner_id=body.owner_id,deadline=datetime.fromisoformat(body.deadline) if body.deadline else None);s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.action.create",f"committee_action:{row.id}","","OPEN",body.title);return {"id":row.id,"status":row.status}
-
-@router.get("/academics/committees/action-items")
-def committee_action_items(ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","view", governance=True)[0]); rows=s.query(D.CommitteeActionItem).filter(D.CommitteeActionItem.tenant_id==TENANT).order_by(D.CommitteeActionItem.deadline).all()
-    return {"actions":[{"id":x.id,"resolution_id":x.resolution_id,"title":x.title,"owner_id":x.owner_id,"deadline":x.deadline.isoformat() if x.deadline else None,"status":x.status,"evidence":x.evidence,"verification_result":x.verification_result} for x in rows]}
-
-@router.post("/academics/committees/action-items/{action_id}/verify")
-def verify_committee_action(action_id:str,body:CommitteeTransitionIn,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","manage_committee", governance=True)[0]); row=require_academic_object(s,ctx,s.get(D.CommitteeActionItem,action_id),"verify","Committee action"); resolution=s.get(D.CommitteeResolution,row.resolution_id); meeting=s.get(D.CommitteeMeeting,resolution.meeting_id); require_committee_permission(s,ctx,meeting.committee_id,"verify")
-    if not body.content.strip(): raise HTTPException(422,"Verification evidence is required")
-    row.evidence=body.content.strip(); row.verification_result=body.reason.strip() or "Verified"; row.status="VERIFIED"; row.verified_by=ctx["sub"]; row.verified_at=datetime.utcnow(); s.commit(); return {"id":row.id,"status":row.status}
-
-@router.get("/academics/attainment")
-def attainment(program_id:str="",course_id:str="",ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","view", governance=True)[0]);
-    if program_id: require_academic_object(s, ctx, s.get(D.Program, program_id), "read", "Program")
-    courses=scoped_academic_query(s, D.Course, ctx).filter(D.Course.id==course_id).all() if course_id else scoped_academic_query(s, D.Course, ctx).all(); course_ids={x.id for x in courses}; co=s.query(D.CourseOutcome).filter(D.CourseOutcome.tenant_id == ctx["tenant_id"], D.CourseOutcome.course_id.in_(course_ids),D.CourseOutcome.active==True).all() if course_ids else []; mappings=s.query(D.OutcomeMapping).filter(D.OutcomeMapping.tenant_id == ctx["tenant_id"], D.OutcomeMapping.course_outcome_id.in_([x.id for x in co])).all() if co else []; results=s.query(D.StudentSubjectResult).filter(D.StudentSubjectResult.tenant_id == ctx["tenant_id"], D.StudentSubjectResult.course_id.in_(course_ids),D.StudentSubjectResult.outcome.in_(["passed","failed"])).all() if course_ids else []
-    by_course={};
-    for row in results: by_course.setdefault(row.course_id,[]).append(1 if row.outcome=="passed" else 0)
-    sections=s.query(D.Section).filter(D.Section.course_id.in_(course_ids)).all() if course_ids else []
-    assessments=s.query(D.Assessment).filter(D.Assessment.tenant_id==ctx["tenant_id"],D.Assessment.section_id.in_([x.id for x in sections])).all() if sections else []
-    assessment_ids={x.id for x in assessments}; assessment_maps=s.query(D.AssessmentOutcomeMapping).filter(D.AssessmentOutcomeMapping.tenant_id==ctx["tenant_id"],D.AssessmentOutcomeMapping.assessment_id.in_(assessment_ids)).all() if assessment_ids else []
-    marks=s.query(D.Mark).filter(D.Mark.tenant_id==ctx["tenant_id"],D.Mark.assessment_id.in_(assessment_ids),D.Mark.is_valid==True).all() if assessment_ids else []
-    mark_by_assessment={}
-    for mark in marks: mark_by_assessment.setdefault(mark.assessment_id,[]).append(mark)
-    by_co={}
-    for mapping in assessment_maps:
-        assessment=next((item for item in assessments if item.id==mapping.assessment_id),None)
-        values=[100*mark.score/max(assessment.max_marks,1) for mark in mark_by_assessment.get(mapping.assessment_id,[])] if assessment else []
-        if values: by_co.setdefault(mapping.course_outcome_id,[]).extend((value,mapping.weight) for value in values)
-    co_out=[]
-    for row in co:
-        values=by_co.get(row.id,[]); vals=by_course.get(row.course_id,[]); value=(sum(score*weight for score,weight in values)/sum(weight for _,weight in values)) if values else (100*sum(vals)/len(vals) if vals else None); co_out.append({"id":row.id,"code":row.code,"course_id":row.course_id,"attainment":round(value,2) if value is not None else None,"evidence":"assessment_marks" if values else "published_results"})
-    po_ids={x.program_outcome_id for x in mappings}; po=s.query(D.ProgramOutcome).filter(D.ProgramOutcome.id.in_(po_ids)).all() if po_ids else []
-    po_out=[{"id":x.id,"code":x.code,"description":x.description,"attainment":round(sum(y["attainment"] for y in co_out if y["attainment"] is not None and any(m.program_outcome_id==x.id and m.course_outcome_id==y["id"] for m in mappings))/max(1,sum(1 for y in co_out if y["attainment"] is not None and any(m.program_outcome_id==x.id and m.course_outcome_id==y["id"] for m in mappings))),2) if any(m.program_outcome_id==x.id for m in mappings) else None} for x in po]
-    return {"course_outcomes":co_out,"program_outcomes":po_out,"mapping_count":len(mappings)}
-
-@router.get("/academics/attainment/alerts")
-def attainment_alerts(program_id:str="",course_id:str="",ctx=Depends(auth),s=Depends(db)):
-    data=attainment(program_id,course_id,ctx,s); alerts=[]
-    targets={x.outcome_id:x for x in s.query(D.OutcomeAttainmentTarget).filter(D.OutcomeAttainmentTarget.tenant_id==TENANT).all()}
-    for outcome in data["course_outcomes"] + data["program_outcomes"]:
-        target=targets.get(outcome["id"]); threshold=target.threshold if target else 50
-        if outcome["attainment"] is not None and outcome["attainment"] < threshold:
-            alerts.append({"outcome_id":outcome["id"],"code":outcome["code"],"attainment":outcome["attainment"],"threshold":threshold,"severity":"critical" if outcome["attainment"] < threshold-10 else "warning"})
-    return {"alerts":alerts,"count":len(alerts),"linked_quality_reviews":sum(1 for x in s.query(D.AcademicQualityReview).filter(D.AcademicQualityReview.metric_key=="outcome_attainment").all())}
-
-
-@router.post("/academics/attainment/alerts/link-quality-reviews")
-def link_attainment_alerts(ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","manage_quality", governance=True)[0])
-    data=attainment_alerts("","",ctx,s); created=[]
-    for alert in data["alerts"]:
-        existing=s.query(D.AcademicQualityReview).filter(D.AcademicQualityReview.tenant_id==TENANT,D.AcademicQualityReview.metric_key=="outcome_attainment",D.AcademicQualityReview.scope_ref==alert["outcome_id"],D.AcademicQualityReview.state!="CLOSED").first()
-        if existing: continue
-        row=D.AcademicQualityReview(id=uid(),tenant_id=TENANT,title=f"Attainment gap: {alert['code']}",scope_level="course",scope_ref=alert["outcome_id"],metric_key="outcome_attainment",metric_value=alert["attainment"],threshold=alert["threshold"],deviation=f"{alert['code']} is below threshold",state="OPEN",created_by=ctx["sub"],updated_at=datetime.utcnow()); s.add(row); created.append(row.id)
-    s.commit(); return {"created_review_ids":created,"count":len(created)}
-
-
-@router.get("/academics/attainment/aggregate")
-def attainment_aggregate(level:str="course",term:str="",ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","view", governance=True)[0])
-    levels={"student","section","course","program","department","semester"}
-    if level not in levels: raise HTTPException(422,"Unknown attainment aggregation level")
-    sections=s.query(D.Section).filter(D.Section.tenant_id==TENANT).all(); section_map={x.id:x for x in sections}; course_map={x.id:x for x in s.query(D.Course).filter(D.Course.tenant_id==TENANT).all()}; students={x.id:x for x in s.query(D.Student).filter(D.Student.tenant_id==TENANT).all()}
-    assessments=s.query(D.Assessment).filter(D.Assessment.tenant_id==TENANT).all(); assessment_map={x.id:x for x in assessments}; marks=s.query(D.Mark).filter(D.Mark.tenant_id==TENANT,D.Mark.is_valid==True).all(); aggregates={}
-    for mark in marks:
-        assessment=assessment_map.get(mark.assessment_id); section=section_map.get(assessment.section_id) if assessment else None
-        if not section: continue
-        course=course_map.get(section.course_id); student_key=mark.student_id
-        if level=="student": key=student_key; label=students.get(student_key).name if students.get(student_key) else student_key
-        elif level=="section": key=section.id; label=section.section_code
-        elif level=="course": key=course.id if course else section.course_id; label=course.code if course else section.course_id
-        elif level=="program": key=course.program_id if course else ""; label=key
-        elif level=="department": key=course.dept_id if course else ""; label=key
-        else: key=assessment.academic_year or term or "unspecified"; label=key
-        if term and level!="semester" and (assessment.academic_year or "") != term: continue
-        score=100*mark.score/max(assessment.max_marks,1); bucket=aggregates.setdefault(key,{"id":key,"label":label,"scores":[]}); bucket["scores"].append(score)
-    result=[{"id":x["id"],"label":x["label"],"attainment":round(sum(x["scores"])/len(x["scores"]),2),"evidence_count":len(x["scores"]),"term":term} for x in aggregates.values()]
-    return {"level":level,"term":term,"aggregates":result}
-
-
-@router.get("/academics/attainment/validation")
-def attainment_validation(term:str="",ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","view", governance=True)[0])
-    assessments=s.query(D.Assessment).filter(D.Assessment.tenant_id==TENANT).all(); assessment_ids={x.id for x in assessments}
-    mappings=s.query(D.AssessmentOutcomeMapping).filter(D.AssessmentOutcomeMapping.tenant_id==TENANT,D.AssessmentOutcomeMapping.assessment_id.in_(assessment_ids)).all() if assessment_ids else []
-    marks=s.query(D.Mark).filter(D.Mark.tenant_id==TENANT,D.Mark.assessment_id.in_(assessment_ids),D.Mark.is_valid==True).all() if assessment_ids else []
-    duplicate_keys={}
-    for mark in marks: duplicate_keys[(mark.assessment_id,mark.student_id)]=duplicate_keys.get((mark.assessment_id,mark.student_id),0)+1
-    unmapped_assessments=[x.id for x in assessments if not any(m.assessment_id==x.id for m in mappings)]
-    return {"term":term,"assessments":len(assessments),"mapped_assessments":len(assessments)-len(unmapped_assessments),"marks":len(marks),"unmapped_assessment_ids":unmapped_assessments,"duplicate_mark_keys":[{"assessment_id":key[0],"student_id":key[1],"count":count} for key,count in duplicate_keys.items() if count>1],"valid":not unmapped_assessments and not any(count>1 for count in duplicate_keys.values())}
-
-@router.post("/academics/timetable/readiness/{exception_id}/resolve")
-def resolve_timetable_exception(exception_id:str,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s, ctx, "academics", "resolve_exception")[0])
-    row=require_academic_object(s, ctx, s.get(D.TimetableException,exception_id), "resolve", "Timetable exception")
-    if row.status == "RESOLVED": raise HTTPException(409,"Timetable exception is already resolved")
-    previous=row.status; row.status="RESOLVED";row.resolved_by=ctx["sub"];row.resolved_at=datetime.utcnow();s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.timetable.exception.resolve",f"timetable_exception:{row.id}",previous,row.status,"");return {"id":row.id,"status":row.status}
-
-@router.get("/academics/outcomes")
-def outcomes(program_id:str="",course_id:str="",ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","view", governance=True)[0]);
-    if program_id: require_academic_object(s, ctx, s.get(D.Program, program_id), "read", "Program")
-    if course_id: require_academic_object(s, ctx, s.get(D.Course, course_id), "read", "Course")
-    po=s.query(D.ProgramOutcome).filter(D.ProgramOutcome.tenant_id == ctx["tenant_id"],D.ProgramOutcome.program_id==program_id).all() if program_id else []; co=s.query(D.CourseOutcome).filter(D.CourseOutcome.tenant_id == ctx["tenant_id"],D.CourseOutcome.course_id==course_id).all() if course_id else []; return {"program_outcomes":[{"id":x.id,"code":x.code,"description":x.description} for x in po],"course_outcomes":[{"id":x.id,"code":x.code,"description":x.description} for x in co]}
-
-class OutcomeIn(BaseModel): code:str; description:str; program_id:str=""; course_id:str=""
-@router.post("/academics/outcomes/program")
-def add_program_outcome(body:OutcomeIn,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s, ctx, "academics", "manage_outcomes", governance=True)[0])
-    program=require_academic_object(s, ctx, s.get(D.Program, body.program_id), "create", "Program"); row=D.ProgramOutcome(id=uid(),tenant_id=TENANT,program_id=program.id,code=body.code,description=body.description);s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.outcome.program.create",f"program_outcome:{row.id}","","active",body.code);return {"id":row.id}
-@router.post("/academics/outcomes/course")
-def add_course_outcome(body:OutcomeIn,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s, ctx, "academics", "manage_outcomes", governance=True)[0])
-    course=require_academic_object(s, ctx, s.get(D.Course, body.course_id), "create", "Course"); row=D.CourseOutcome(id=uid(),tenant_id=TENANT,course_id=course.id,code=body.code,description=body.description);s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.outcome.course.create",f"course_outcome:{row.id}","","active",body.code);return {"id":row.id}
-@router.post("/academics/outcomes/map")
-def map_outcomes(body:dict,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s, ctx, "academics", "manage_outcomes", governance=True)[0])
-    course_outcome=require_academic_object(s, ctx, s.get(D.CourseOutcome, body["course_outcome_id"]), "create", "Course outcome")
-    program_outcome=require_academic_object(s, ctx, s.get(D.ProgramOutcome, body["program_outcome_id"]), "create", "Program outcome")
-    row=D.OutcomeMapping(id=uid(),tenant_id=TENANT,course_outcome_id=course_outcome.id,program_outcome_id=program_outcome.id,weight=float(body.get("weight",1)));s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.outcome.mapping.create",f"outcome_mapping:{row.id}","","active",f"{course_outcome.id}->{program_outcome.id}");return {"id":row.id}
-
-@router.post("/academics/outcomes/assessment-map")
-def map_assessment_outcome(body:dict,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","manage_outcomes", governance=True)[0])
-    assessment=require_tenant(s.get(D.Assessment,body.get("assessment_id")),ctx,"Assessment")
-    outcome=require_tenant(s.get(D.CourseOutcome,body.get("course_outcome_id")),ctx,"Course outcome")
-    weight=float(body.get("weight",1))
-    if weight <= 0: raise HTTPException(422,"Weight must be positive")
-    row=D.AssessmentOutcomeMapping(id=uid(),tenant_id=TENANT,assessment_id=assessment.id,course_outcome_id=outcome.id,weight=weight,target=float(body.get("target",60)));s.add(row);s.commit();return {"id":row.id}
-
-@router.post("/academics/outcomes/targets")
-def set_outcome_target(body:dict,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","manage_outcomes", governance=True)[0])
-    target=float(body.get("target",60)); threshold=float(body.get("threshold",50))
-    if not 0 <= threshold <= target <= 100: raise HTTPException(422,"Targets must satisfy 0 <= threshold <= target <= 100")
-    row=D.OutcomeAttainmentTarget(id=uid(),tenant_id=TENANT,outcome_type=body["outcome_type"],outcome_id=body["outcome_id"],aggregation_level=body.get("aggregation_level","course"),target=target,threshold=threshold,term=body.get("term",""));s.add(row);s.commit();return {"id":row.id,"target":row.target,"threshold":row.threshold}
-
-class PlanIn(BaseModel):
-    source_term:str
-    target_term:str
-    summary:str=""
-    risks:list[str]=[]
-    actions:list[str]=[]
-    dependencies:list[str]=[]
-    evidence_links:list[str]=[]
-    quality_review_ids:list[str]=[]
-    corrective_action_ids:list[str]=[]
-    curriculum_revision_ids:list[str]=[]
-    program_change_ids:list[str]=[]
-    faculty_allocation_ids:list[str]=[]
-    calendar_milestone_ids:list[str]=[]
-    timetable_resource_ids:list[str]=[]
-@router.post("/academics/next-semester-plans")
-def create_next_plan(body:PlanIn,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s, ctx, "academics", "manage_planning", governance=True)[0])
-    links={key:getattr(body,key) for key in ("quality_review_ids","corrective_action_ids","curriculum_revision_ids","program_change_ids","faculty_allocation_ids","calendar_milestone_ids","timetable_resource_ids")}
-    row=D.NextSemesterPlan(id=uid(),tenant_id=TENANT,source_term=body.source_term,target_term=body.target_term,summary=body.summary,risks_json=json.dumps(body.risks),actions_json=json.dumps(body.actions),dependencies_json=json.dumps(body.dependencies),evidence_links_json=json.dumps({"evidence":body.evidence_links,"links":links}),created_by=ctx["sub"]);s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.plan.create",f"next_semester_plan:{row.id}","","DRAFT",body.summary);return {"id":row.id,"state":row.state}
-@router.get("/academics/next-semester-plans")
-def next_plans(ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","view", governance=True)[0]);return {"states":["DRAFT","SUBMITTED","REVIEWED","APPROVED","EXECUTING","COMPLETED"],"plans":[{"id":x.id,"source_term":x.source_term,"target_term":x.target_term,"summary":x.summary,"state":x.state,"risks":json.loads(x.risks_json or '[]'),"actions":json.loads(x.actions_json or '[]'),"dependencies":json.loads(x.dependencies_json or '[]'),"evidence_links":json.loads(x.evidence_links_json or '[]')} for x in s.query(D.NextSemesterPlan).filter(D.NextSemesterPlan.tenant_id == ctx["tenant_id"]).order_by(desc(D.NextSemesterPlan.created_at)).all()]}
-
-@router.get("/academics/next-semester-plans/compare")
-def compare_next_plans(source_term:str, target_term:str,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","view", governance=True)[0])
-    rows=s.query(D.NextSemesterPlan).filter(D.NextSemesterPlan.tenant_id==TENANT,D.NextSemesterPlan.source_term==source_term,D.NextSemesterPlan.target_term==target_term).all()
-    return {"source_term":source_term,"target_term":target_term,"plans":[{"id":x.id,"state":x.state,"actions":json.loads(x.actions_json or '[]'),"dependencies":json.loads(x.dependencies_json or '[]'),"evidence_links":json.loads(x.evidence_links_json or '[]')} for x in rows],"summary":{"plans":len(rows),"approved":sum(1 for x in rows if x.state=="APPROVED"),"completed":sum(1 for x in rows if x.state=="COMPLETED")}}
-
-@router.post("/academics/next-semester-plans/{plan_id}/transition")
-def transition_next_plan(plan_id:str,body:CommitteeTransitionIn,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","manage_planning", governance=True)[0]); row=require_tenant(s.get(D.NextSemesterPlan,plan_id),ctx,"Next-semester plan"); target=body.target_status.upper()
-    allowed={"DRAFT":"SUBMITTED","SUBMITTED":"REVIEWED","REVIEWED":"APPROVED","APPROVED":"EXECUTING","EXECUTING":"COMPLETED"}
-    if allowed.get(row.state)!=target: raise HTTPException(409,f"Transition {row.state} -> {target} is not allowed")
-    if target=="APPROVED" and (not json.loads(row.evidence_links_json or "{}")): raise HTTPException(409,"Prior-semester evidence is required before approval")
-    row.state=target; row.approved_by=ctx["sub"] if target=="APPROVED" else row.approved_by; row.updated_at=datetime.utcnow(); s.commit(); return {"id":row.id,"state":row.state}
-
-
-# Curriculum ownership sits with the academic unit.  The Dean is the
-# independent academic authority that reviews and decides proposals, rather
-# than routinely originating the requests they must approve.
-CURRICULUM_PROPOSERS = {10, 17}
-
-
-def _curriculum_proposal_payload(s, proposal):
-    result = _proposal_payload(s, proposal)
-    course = s.get(D.Course, proposal.implementation_ref) if proposal.implementation_ref else None
-    # Implementation readiness is derived from the records created after the
-    # governed decision.  Do not present workflow guidance as if it were a
-    # completed CO/PO or delivery configuration.
-    if not course:
-        result["implementation_status"] = {
-            "course": {"complete": False, "detail": "Created only after approval"},
-            "outcomes": {"complete": False, "detail": "Not available until a course record is created"},
-            "delivery": {"complete": False, "detail": "Not available until a course record is created"},
-        }
-        return result
-    outcomes = s.query(D.CourseOutcome).filter(
-        D.CourseOutcome.tenant_id == course.tenant_id,
-        D.CourseOutcome.course_id == course.id,
-        D.CourseOutcome.active == True,
-    ).all()
-    outcome_ids = {row.id for row in outcomes}
-    mapped_outcome_ids = {
-        row.course_outcome_id for row in s.query(D.OutcomeMapping).filter(
-            D.OutcomeMapping.tenant_id == course.tenant_id,
-            D.OutcomeMapping.course_outcome_id.in_(outcome_ids) if outcome_ids else text("1=0"),
-        ).all()
-    }
-    sections = s.query(D.Section).filter(
-        D.Section.tenant_id == course.tenant_id, D.Section.course_id == course.id,
-    ).all()
-    section_ids = {row.id for row in sections}
-    scheduled_section_ids = {
-        row.section_id for row in s.query(D.TimetableEntry).filter(
-            D.TimetableEntry.tenant_id == course.tenant_id,
-            D.TimetableEntry.section_id.in_(section_ids) if section_ids else text("1=0"),
-            D.TimetableEntry.status == "active",
-        ).all()
-    }
-    assigned = sum(1 for row in sections if row.faculty_person_id)
-    scheduled = sum(1 for row in sections if row.id in scheduled_section_ids)
-    result["implementation_status"] = {
-        "course": {"complete": True, "detail": f"{course.code} — {course.title} ({course.id})"},
-        "outcomes": {
-            "complete": bool(outcomes) and len(mapped_outcome_ids) == len(outcome_ids),
-            "detail": f"{len(outcomes)} COs; {len(mapped_outcome_ids)}/{len(outcomes)} mapped to PO",
-        },
-        "delivery": {
-            "complete": bool(sections) and assigned == len(sections) and scheduled == len(sections),
-            "detail": f"{len(sections)} section(s); {assigned}/{len(sections)} faculty assigned; {scheduled}/{len(sections)} timetabled",
-        },
-    }
-    return result
-
-
-@router.get("/curriculum/proposals")
-def curriculum_proposals(state: str = "", ctx=Depends(auth), s=Depends(db)):
+@router.get("/academics/departments")
+def list_departments(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view")[0])
-    query = s.query(D.AcademicProposal).filter(D.AcademicProposal.tenant_id == ctx["tenant_id"], D.AcademicProposal.proposal_type == "curriculum")
-    if state:
-        query = query.filter(D.AcademicProposal.state == state.upper())
-    if ctx["office_n"] != 6:
-        query = query.filter(D.AcademicProposal.scope_ref == (actor_department_id(s, ctx) or "__no_scope__"))
-    allowed_departments = s.query(D.Department).filter(D.Department.tenant_id == ctx["tenant_id"])
-    if ctx["office_n"] != 6:
-        department_id = actor_department_id(s, ctx)
-        allowed_departments = allowed_departments.filter(D.Department.id == (department_id or "__no_scope__"))
-    available_programs = scoped_academic_query(s, D.Program, ctx).order_by(D.Program.name).all()
-    return {"proposals": [_curriculum_proposal_payload(s, row) for row in query.order_by(desc(D.AcademicProposal.updated_at)).all()],
-            "can_propose": ctx["office_n"] in CURRICULUM_PROPOSERS, "can_decide": ctx["office_n"] == 6,
-            "proposal_departments": [{"id": row.id, "code": row.code, "name": row.name} for row in allowed_departments.order_by(D.Department.code).all()],
-            "programs": [{"id": row.id, "code": row.code, "name": row.name} for row in available_programs]}
+    query, _ = _catalog_departments(s, ctx)
+    rows = query.order_by(D.Department.code).all()
+    return {"departments": [{"id": row.id, "code": row.code, "name": row.name, "campus": row.campus or ""}
+                            for row in rows], "can_manage": can(s, ctx, "academics", "create_course")}
 
 
-@router.get("/curriculum/proposals/{proposal_id}")
-def curriculum_proposal_detail(proposal_id: str, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view", governance=True)[0])
-    proposal = require_academic_object(s, ctx, s.get(D.AcademicProposal, proposal_id), "read", "Curriculum proposal")
-    if proposal.proposal_type != "curriculum": raise HTTPException(404, "Curriculum proposal not found")
-    return {"proposal": _curriculum_proposal_payload(s, proposal)}
+@router.post("/academics/departments")
+def create_department(body: DepartmentIn, ctx=Depends(auth), s=Depends(db)):
+    dec = _manage_catalog(s, ctx)
+    code, name = body.code.strip().upper(), body.name.strip()
+    if not code or not name:
+        raise HTTPException(400, "Department code and name are required")
+    if s.query(D.Department).filter(D.Department.tenant_id == ctx["tenant_id"], D.Department.code == code).first():
+        raise HTTPException(409, "A department with this code already exists")
+    row = D.Department(id=uid(), tenant_id=ctx["tenant_id"], code=code, name=name,
+                       campus=_catalog_campus_name(s, ctx))
+    s.add(row); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "department.create", f"department:{row.id}", "", "active", f"Created department {code}", tenant_id=ctx["tenant_id"], campus_scope_id=ctx["scope_ref"] or None)
+    return {"department": {"id": row.id, "code": row.code, "name": row.name, "campus": row.campus}, "decision": dec.as_dict()}
 
 
-@router.post("/curriculum/proposals")
-def create_curriculum_proposal(body: CurriculumProposalIn, ctx=Depends(auth), s=Depends(db)):
+@router.put("/academics/departments/{department_id}")
+def update_department(department_id: str, body: DepartmentIn, ctx=Depends(auth), s=Depends(db)):
+    dec = _manage_catalog(s, ctx)
+    query, _ = _catalog_departments(s, ctx)
+    row = query.filter(D.Department.id == department_id).first()
+    if not row: raise HTTPException(404, "Department not found")
+    code, name = body.code.strip().upper(), body.name.strip()
+    if not code or not name: raise HTTPException(400, "Department code and name are required")
+    duplicate = s.query(D.Department).filter(D.Department.tenant_id == ctx["tenant_id"], D.Department.code == code, D.Department.id != row.id).first()
+    if duplicate: raise HTTPException(409, "A department with this code already exists")
+    row.code, row.name = code, name; s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "department.update", f"department:{row.id}", "", "active", f"Updated department {code}", tenant_id=ctx["tenant_id"], campus_scope_id=ctx["scope_ref"] or None)
+    return {"department": {"id": row.id, "code": row.code, "name": row.name, "campus": row.campus}, "decision": dec.as_dict()}
+
+
+@router.delete("/academics/departments/{department_id}")
+def delete_department(department_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec = _manage_catalog(s, ctx)
+    query, _ = _catalog_departments(s, ctx)
+    row = query.filter(D.Department.id == department_id).first()
+    if not row: raise HTTPException(404, "Department not found")
+    if (s.query(D.Program).filter(D.Program.tenant_id == ctx["tenant_id"], D.Program.dept_id == row.id).count()
+            or s.query(D.Course).filter(D.Course.tenant_id == ctx["tenant_id"], D.Course.dept_id == row.id).count()
+            or s.query(D.Student).filter(D.Student.tenant_id == ctx["tenant_id"], D.Student.dept_id == row.id).count()):
+        raise HTTPException(409, "Department cannot be deleted while it has programs, courses, or students")
+    s.delete(row); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "department.delete", f"department:{department_id}", "active", "deleted", "Deleted department", tenant_id=ctx["tenant_id"], campus_scope_id=ctx["scope_ref"] or None)
+    return {"ok": True, "decision": dec.as_dict()}
+
+
+@router.get("/academics/programs")
+def list_programs(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view")[0])
-    if ctx["office_n"] not in CURRICULUM_PROPOSERS:
-        raise HTTPException(403, "Only an HOD or Academic Coordinator can propose curriculum changes")
-    dept = require_academic_object(s, ctx, s.query(D.Department).filter(D.Department.tenant_id == ctx["tenant_id"], D.Department.code == body.dept_code.strip()).first(), "create", "Department")
-    existing = require_academic_object(s, ctx, s.get(D.Course, body.course_id), "create", "Course") if body.course_id else None
-    if existing and existing.dept_id != dept.id: raise HTTPException(403, "Course is outside the selected department scope")
-    code = body.code.strip().upper()
-    duplicate = s.query(D.Course).filter(D.Course.code == code).first()
-    if duplicate and (not existing or duplicate.id != existing.id): raise HTTPException(409, "Course code already exists")
-    payload = body.model_dump()
-    payload["code"] = code; payload["dept_id"] = dept.id
-    title = f"{'Revise' if existing else 'Add'} {code} — {body.title.strip()}"
-    now = datetime.utcnow()
-    proposal = D.AcademicProposal(id=uid(), tenant_id=TENANT, proposal_type="curriculum", title=title,
-                                  scope_level="department", scope_ref=dept.id, school_id=dept.school_id, dept_id=dept.id, program_id=getattr(existing, "program_id", None), state="DRAFT", version_no=1, submitted_by=ctx["sub"], submitted_office_n=ctx["office_n"],
-                                  assigned_to_office_n=6, due_at=now + timedelta(days=10), created_at=now, updated_at=now)
-    s.add(proposal); s.flush()
-    s.add(D.AcademicProposalVersion(id=uid(), tenant_id=TENANT, proposal_id=proposal.id, version_no=1,
-                                    payload_json=json.dumps(payload), rationale=body.rationale.strip(), created_by=ctx["sub"]))
-    _proposal_event(s, proposal, ctx, "", "DRAFT", body.rationale)
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.curriculum.proposal.create", f"academic_proposal:{proposal.id}", "", "DRAFT", body.rationale, commit=False); s.commit()
-    return {"proposal": _curriculum_proposal_payload(s, proposal)}
+    department_query, _ = _catalog_departments(s, ctx)
+    departments = {row.id: row for row in department_query.all()}
+    rows = (s.query(D.Program).filter(D.Program.tenant_id == ctx["tenant_id"], D.Program.dept_id.in_(departments))
+            .order_by(D.Program.code).all())
+    return {"programs": [{"id": row.id, "code": row.code, "name": row.name, "level": row.level,
+                          "duration_years": row.duration_years, "dept_id": row.dept_id,
+                          "department": departments[row.dept_id].name if row.dept_id in departments else ""}
+                         for row in rows], "can_manage": can(s, ctx, "academics", "create_course")}
 
 
-@router.post("/curriculum/proposals/{proposal_id}/submit")
-def submit_curriculum_proposal(proposal_id: str, body: AcademicProposalTransitionIn, ctx=Depends(auth), s=Depends(db)):
-    proposal = require_academic_object(s, ctx, s.get(D.AcademicProposal, proposal_id), "submit", "Curriculum proposal")
-    if not proposal or proposal.proposal_type != "curriculum": raise HTTPException(404, "Curriculum proposal not found")
-    if proposal.submitted_by != ctx["sub"] or proposal.state not in {"DRAFT", "RETURNED", "CLARIFICATION_REQUIRED"}: raise HTTPException(409, "Proposal cannot be submitted in its current state")
-    if proposal.status_version != body.expected_status_version: raise HTTPException(409, "Proposal changed; reload before submitting")
-    previous = proposal.state; proposal.state = "RESUBMITTED" if previous != "DRAFT" else "SUBMITTED"; proposal.status_version += 1; proposal.updated_at = datetime.utcnow()
-    _proposal_event(s, proposal, ctx, previous, proposal.state, body.reason)
-    dean = s.query(User).filter(User.office_n == 6).first()
-    if dean: _proposal_notice(s, dean.id, "Curriculum decision required", proposal.title)
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.curriculum.proposal.submit", f"academic_proposal:{proposal.id}", previous, proposal.state, body.reason, commit=False); s.commit()
-    return {"proposal": _curriculum_proposal_payload(s, proposal)}
+def _program_values(s, body, ctx):
+    code, name, level = body.code.strip().upper(), body.name.strip(), body.level.strip().upper()
+    if not code or not name or level not in {"UG", "PG", "DOCTORAL"} or body.duration_years < 1:
+        raise HTTPException(400, "Provide program code, name, valid level, and duration")
+    query, _ = _catalog_departments(s, ctx)
+    dept = query.filter(D.Department.id == body.dept_id).first()
+    if not dept: raise HTTPException(404, "Department not found")
+    return code, name, level, dept
 
 
-@router.post("/curriculum/proposals/{proposal_id}/decision/{decision}")
-def decide_curriculum_proposal(proposal_id: str, decision: str, body: AcademicProposalTransitionIn, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "approve_proposal" if decision.lower() == "approve" else "reject_proposal")[0])
-    proposal = require_academic_object(s, ctx, s.query(D.AcademicProposal).filter(D.AcademicProposal.id == proposal_id).with_for_update().first(), "approve", "Curriculum proposal")
-    prevent_self_approval(proposal, ctx)
-    if proposal.proposal_type != "curriculum": raise HTTPException(404, "Curriculum proposal not found")
-    target = {"approve": "APPROVED", "reject": "REJECTED", "return": "RETURNED", "clarification": "CLARIFICATION_REQUIRED", "escalate": "ESCALATED"}.get(decision.lower())
-    if not target or proposal.state not in {"SUBMITTED", "RESUBMITTED"}: raise HTTPException(409, "Invalid curriculum decision")
-    validate_transition(s, proposal, target, body.expected_status_version, ctx, body.reason)
-    if proposal.status_version != body.expected_status_version: raise HTTPException(409, "Proposal changed; reload before deciding")
-    claim_proposal_transition(s, proposal, body.expected_status_version, {"SUBMITTED", "RESUBMITTED"})
-    if target != "APPROVED" and not body.reason.strip(): raise HTTPException(422, "A decision reason is required")
-    previous = proposal.state; proposal.state = target; proposal.status_version += 1; proposal.updated_at = datetime.utcnow()
-    if target == "APPROVED":
-        payload = json.loads(_proposal_version(s, proposal).payload_json)
-        required_fields = ("dept_id", "code", "title", "credits", "semester")
-        missing_fields = [field for field in required_fields if payload.get(field) in (None, "")]
-        if missing_fields:
-            s.rollback()
-            raise HTTPException(422, f"Curriculum proposal is missing required fields: {', '.join(missing_fields)}")
-        course = s.get(D.Course, payload.get("course_id")) if payload.get("course_id") else None
-        if not course:
-            course = D.Course(id=uid(), tenant_id=TENANT, dept_id=payload["dept_id"]); s.add(course)
-        for key in ("code", "title", "credits", "semester", "regulation", "course_type", "category", "ltp", "prerequisite", "description"):
-            setattr(course, key, payload.get(key, getattr(course, key, "")))
-        course.status = "Active"; s.flush(); proposal.implementation_ref = course.id
-    elif target == "ESCALATED": proposal.escalated_to_office_n = 4
-    _proposal_event(s, proposal, ctx, previous, target, body.reason)
-    submitter = s.get(User, proposal.submitted_by)
-    if submitter: _proposal_notice(s, submitter.id, f"Curriculum proposal {target.lower().replace('_', ' ')}", proposal.title, "info" if target == "APPROVED" else "action")
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.curriculum.proposal.decision", f"academic_proposal:{proposal.id}", previous, target, body.reason, commit=False); s.commit()
-    return {"proposal": _curriculum_proposal_payload(s, proposal)}
+@router.post("/academics/programs")
+def create_program(body: ProgramIn, ctx=Depends(auth), s=Depends(db)):
+    dec = _manage_catalog(s, ctx); code, name, level, dept = _program_values(s, body, ctx)
+    if s.query(D.Program).filter(D.Program.tenant_id == ctx["tenant_id"], D.Program.code == code).first():
+        raise HTTPException(409, "A program with this code already exists")
+    row = D.Program(id=uid(), tenant_id=ctx["tenant_id"], dept_id=dept.id, code=code, name=name, level=level, duration_years=body.duration_years)
+    s.add(row); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "program.create", f"program:{row.id}", "", "active", f"Created program {code}", tenant_id=ctx["tenant_id"], campus_scope_id=ctx["scope_ref"] or None)
+    return {"program": {"id": row.id, "code": row.code, "name": row.name, "dept_id": row.dept_id, "level": row.level, "duration_years": row.duration_years}, "decision": dec.as_dict()}
+
+
+@router.put("/academics/programs/{program_id}")
+def update_program(program_id: str, body: ProgramIn, ctx=Depends(auth), s=Depends(db)):
+    dec = _manage_catalog(s, ctx)
+    department_query, _ = _catalog_departments(s, ctx)
+    department_ids = [row.id for row in department_query.all()]
+    row = s.query(D.Program).filter(D.Program.id == program_id, D.Program.tenant_id == ctx["tenant_id"], D.Program.dept_id.in_(department_ids)).first()
+    if not row: raise HTTPException(404, "Program not found")
+    code, name, level, dept = _program_values(s, body, ctx)
+    duplicate = s.query(D.Program).filter(D.Program.tenant_id == ctx["tenant_id"], D.Program.code == code, D.Program.id != row.id).first()
+    if duplicate: raise HTTPException(409, "A program with this code already exists")
+    row.code, row.name, row.level, row.dept_id, row.duration_years = code, name, level, dept.id, body.duration_years; s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "program.update", f"program:{row.id}", "", "active", f"Updated program {code}", tenant_id=ctx["tenant_id"], campus_scope_id=ctx["scope_ref"] or None)
+    return {"program": {"id": row.id, "code": row.code, "name": row.name, "dept_id": row.dept_id, "level": row.level, "duration_years": row.duration_years}, "decision": dec.as_dict()}
+
+
+@router.delete("/academics/programs/{program_id}")
+def delete_program(program_id: str, ctx=Depends(auth), s=Depends(db)):
+    dec = _manage_catalog(s, ctx)
+    department_query, _ = _catalog_departments(s, ctx)
+    department_ids = [row.id for row in department_query.all()]
+    row = s.query(D.Program).filter(D.Program.id == program_id, D.Program.tenant_id == ctx["tenant_id"], D.Program.dept_id.in_(department_ids)).first()
+    if not row: raise HTTPException(404, "Program not found")
+    if (s.query(D.Course).filter(D.Course.tenant_id == ctx["tenant_id"], D.Course.program_id == row.id).count()
+            or s.query(D.Student).filter(D.Student.tenant_id == ctx["tenant_id"], D.Student.program_id == row.id).count()):
+        raise HTTPException(409, "Program cannot be deleted while it has courses or students")
+    s.delete(row); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "program.delete", f"program:{program_id}", "active", "deleted", "Deleted program", tenant_id=ctx["tenant_id"], campus_scope_id=ctx["scope_ref"] or None)
+    return {"ok": True, "decision": dec.as_dict()}
 
 
 @router.post("/academics/courses")
 def create_course(body: CourseIn, ctx=Depends(auth), s=Depends(db)):
-    raise HTTPException(410, "Curriculum changes must be submitted as governed proposals")
     dec, _ = gate(s, ctx, "academics", "create_course")
     require(dec)
     code = body.code.strip().upper()
     if not code or not body.title.strip() or body.credits < 1 or body.semester not in range(1, 9):
         raise HTTPException(400, "Provide a course code, title, valid credits, and semester (1–8).")
-    if s.query(D.Course).filter(D.Course.code == code).first():
+    if s.query(D.Course).filter(D.Course.tenant_id == ctx["tenant_id"], D.Course.code == code).first():
         raise HTTPException(400, "A course with this code already exists.")
-    dept = s.query(D.Department).filter(D.Department.code == body.dept_code).first()
+    dept = s.query(D.Department).filter(D.Department.tenant_id == ctx["tenant_id"], D.Department.code == body.dept_code).first()
     if not dept:
         raise HTTPException(400, "Choose a valid department.")
-    program = s.query(D.Program).filter(D.Program.dept_id == dept.id, D.Program.level == "UG").first()
-    course = D.Course(id=uid(), tenant_id=TENANT, dept_id=dept.id, program_id=program.id if program else None,
+    program = (s.query(D.Program).filter(D.Program.id == body.program_id, D.Program.tenant_id == ctx["tenant_id"], D.Program.dept_id == dept.id).first()
+               if body.program_id else s.query(D.Program).filter(D.Program.tenant_id == ctx["tenant_id"], D.Program.dept_id == dept.id, D.Program.level == "UG").first())
+    if body.program_id and not program:
+        raise HTTPException(400, "Program must belong to the selected tenant-local department")
+    course = D.Course(id=uid(), tenant_id=ctx["tenant_id"], dept_id=dept.id, program_id=program.id if program else None,
                       code=code, title=body.title.strip(), credits=body.credits, semester=body.semester,
                       description=body.description.strip(), regulation=body.regulation.strip() or "R2023",
                       course_type=body.course_type, category=body.category.strip() or "Professional Core",
                       ltp=body.ltp.strip(), prerequisite=body.prerequisite.strip(), status="Active")
     s.add(course); s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "course.create", f"course:{course.id}", "", "Active", f"Created {code} — {course.title}")
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "course.create", f"course:{course.id}", "", "Active", f"Created {code} — {course.title}", tenant_id=ctx["tenant_id"], campus_scope_id=ctx["scope_ref"] or None)
     return {"id": course.id, "decision": dec.as_dict()}
-
-
-class CourseOfferingIn(BaseModel):
-    course_id: str
-    program_id: str
-    academic_year: str
-    term: str
-    semester: int
-
-
-class CourseOfferingStatusIn(BaseModel):
-    status: str
-
-
-def _course_offering_payload(s, row):
-    course, program = s.get(D.Course, row.course_id), s.get(D.Program, row.program_id)
-    hod = s.query(D.HODInput).filter_by(offering_id=row.id).first()
-    sections = s.query(D.Section).filter_by(offering_id=row.id).all()
-    section_ids = [x.id for x in sections]
-    allocations = s.query(D.FacultyAllocation).filter(
-        D.FacultyAllocation.section_id.in_(section_ids) if section_ids else text("1=0")
-    ).all()
-    section_capacity = sum(x.capacity or 0 for x in sections)
-    faculty_complete = bool(hod and len([a for a in allocations if str(a.status).upper() in {"ASSIGNED", "CONFIRMED", "APPROVED"}]) >= hod.required_faculty_count)
-    sections_defined = bool(hod and len(sections) >= hod.required_sections and section_capacity >= hod.expected_capacity)
-    ready = bool(hod and hod.status == "Submitted" and sections_defined and faculty_complete)
-    return {"id": row.id, "course_id": row.course_id, "course_code": course.code if course else "",
-            "course_title": course.title if course else "", "program_id": row.program_id,
-            "program": program.name if program else "", "program_code": program.code if program else "",
-            "academic_year": row.academic_year, "term": row.term, "semester": row.semester,
-            "course_start_date": row.course_start_date.isoformat() if row.course_start_date else "",
-            "expected_completion_date": row.expected_completion_date.isoformat() if row.expected_completion_date else "",
-            "lab_marks": row.lab_marks, "mid_marks": row.mid_marks, "semester_marks": row.semester_marks,
-            "status": row.status, "created_by": row.created_by, "updated_by": row.updated_by,
-            "created_at": row.created_at.isoformat() if row.created_at else "",
-            "updated_at": row.updated_at.isoformat() if row.updated_at else "",
-            "hod_input": {"id": hod.id, "required_faculty_count": hod.required_faculty_count, "required_sections": hod.required_sections, "expected_capacity": hod.expected_capacity, "delivery_type": hod.delivery_type, "remarks": hod.remarks, "status": hod.status} if hod else None,
-            "faculty_allocations": [{"id": a.id, "faculty_id": a.faculty_person_id, "section_id": a.section_id, "status": a.status, "faculty": (s.get(D.StaffMember, a.faculty_person_id).name if s.get(D.StaffMember, a.faculty_person_id) else "")} for a in allocations],
-            "sections": [{"id": x.id, "section": x.section_code, "faculty": s.get(D.StaffMember, x.faculty_person_id).name if x.faculty_person_id and s.get(D.StaffMember, x.faculty_person_id) else "—", "room": x.room, "schedule": x.schedule, "capacity": x.capacity, "enrolled": s.query(D.Enrollment).filter_by(section_id=x.id, status="enrolled").count(), "status": "Ready" if x.faculty_person_id else "Pending"} for x in sections],
-            "section_readiness": {"required_sections": hod.required_sections if hod else 0, "created_sections": len(sections), "required_capacity": hod.expected_capacity if hod else 0, "total_capacity": section_capacity, "faculty_assigned": faculty_complete},
-            "readiness": {"ready": ready, "hod_submitted": bool(hod and hod.status == "Submitted"), "faculty_complete": faculty_complete, "sections_defined": sections_defined}}
-
-
-def _hod_department_ids(s, ctx):
-    if ctx.get("office_n") != 10:
-        return None
-    user = s.get(User, ctx.get("sub"))
-    # The authenticated HOD's department boundary is persisted on the user
-    # record.  A department's hod_person_id points to a StaffMember, not the
-    # authority Person record, so comparing it with User.person_id silently
-    # removed the HOD's legitimate scope.
-    if user and user.scope_ref:
-        department = s.get(D.Department, user.scope_ref)
-        if department:
-            return {department.id}
-    return set()
-
-
-def _offering_in_academic_scope(s, offering, ctx):
-    allowed = _hod_department_ids(s, ctx)
-    if allowed is None:
-        return True
-    program = s.get(D.Program, offering.program_id) if offering else None
-    course = s.get(D.Course, offering.course_id) if offering else None
-    return bool((program and program.dept_id in allowed) or (course and course.dept_id in allowed))
-
-
-class HODInputIn(BaseModel):
-    required_faculty_count: int = Field(ge=0)
-    required_sections: int = Field(ge=0)
-    expected_capacity: int = Field(ge=0)
-    delivery_type: str = "theory"
-    remarks: str = ""
-
-
-class FacultyAllocationIn(BaseModel):
-    faculty_id: str
-    section_id: str = ""
-
-
-@router.get("/academics/course-offerings/{offering_id}/hod-input")
-def get_hod_input(offering_id: str, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view")[0]); row = s.query(D.HODInput).filter_by(offering_id=offering_id).first()
-    return {"hod_input": {"id": row.id, "required_faculty_count": row.required_faculty_count, "required_sections": row.required_sections, "expected_capacity": row.expected_capacity, "delivery_type": row.delivery_type, "remarks": row.remarks, "status": row.status} if row else None}
-
-
-@router.put("/academics/course-offerings/{offering_id}/hod-input")
-def save_hod_input(offering_id: str, body: HODInputIn, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] not in {10, 17}: raise HTTPException(403, "Only HOD or Academic Coordinator may maintain HOD input")
-    dec, _ = gate(s, ctx, "academics", "edit"); require(dec); offering = s.query(D.CourseOffering).filter_by(id=offering_id).first()
-    if not offering: raise HTTPException(404, "Course offering not found")
-    row = s.query(D.HODInput).filter_by(offering_id=offering_id).first() or D.HODInput(id=uid(), tenant_id=TENANT, offering_id=offering_id, created_by=ctx["sub"])
-    row.required_faculty_count, row.required_sections, row.expected_capacity, row.delivery_type, row.remarks = body.required_faculty_count, body.required_sections, body.expected_capacity, body.delivery_type, body.remarks.strip()
-    row.updated_by, row.updated_at = ctx["sub"], datetime.utcnow(); s.add(row); s.commit(); return {"hod_input": {"id": row.id, "status": row.status}, "decision": dec.as_dict()}
-
-
-@router.post("/academics/course-offerings/{offering_id}/hod-input/submit")
-def submit_hod_input(offering_id: str, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] != 10: raise HTTPException(403, "HOD submission is restricted to the HOD office")
-    dec, _ = gate(s, ctx, "academics", "edit"); require(dec); row = s.query(D.HODInput).filter_by(offering_id=offering_id).first()
-    if not row: raise HTTPException(404, "Save HOD input before submitting")
-    row.status, row.updated_by, row.updated_at = "Submitted", ctx["sub"], datetime.utcnow(); s.commit(); return {"status": row.status, "decision": dec.as_dict()}
-
-
-@router.get("/academics/course-offerings/{offering_id}/faculty-allocations")
-def list_faculty_allocations(offering_id: str, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view")[0]); return {"allocations": _course_offering_payload(s, s.query(D.CourseOffering).get(offering_id))["faculty_allocations"]}
-
-
-@router.post("/academics/course-offerings/{offering_id}/faculty-allocations")
-def create_faculty_allocation(offering_id: str, body: FacultyAllocationIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "academics", "assign_faculty"); require(dec); offering = s.query(D.CourseOffering).filter_by(id=offering_id).first(); faculty = s.get(D.StaffMember, body.faculty_id)
-    if not offering or not faculty: raise HTTPException(404, "Offering or faculty not found")
-    if body.section_id and not s.query(D.Section).filter_by(id=body.section_id, offering_id=offering_id, course_id=offering.course_id).first(): raise HTTPException(400, "Section does not belong to this offering")
-    existing = s.query(D.FacultyAllocation).filter(
-        D.FacultyAllocation.section_id == body.section_id,
-        D.FacultyAllocation.faculty_person_id == body.faculty_id,
-        D.FacultyAllocation.status.in_(["PROPOSED", "APPROVED"]),
-    ).first()
-    if existing: raise HTTPException(409, "Faculty is already assigned to this section")
-    row = D.FacultyAllocation(id=uid(), tenant_id=TENANT, section_id=body.section_id or None,
-                              faculty_person_id=body.faculty_id, term=offering.term,
-                              workload_units=1, status="PROPOSED", created_by=ctx["sub"])
-    s.add(row); s.commit(); return {"id": row.id, "status": row.status, "decision": dec.as_dict()}
-
-
-@router.get("/academics/course-offerings/{offering_id}/readiness")
-def course_offering_readiness(offering_id: str, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view")[0]); offering = s.query(D.CourseOffering).filter_by(id=offering_id).first()
-    if not offering: raise HTTPException(404, "Course offering not found")
-    return {"readiness": _course_offering_payload(s, offering)["readiness"]}
-
-
-class CurriculumExecutionIssueIn(BaseModel):
-    offering_id: str
-    issue_type: str
-    description: str = ""
-    responsible_role: str = "Curriculum Officer"
-    status: str = "Open"
-
-class CurriculumExecutionUpdateIn(BaseModel):
-    course_start_date: str | None = None
-    expected_completion_date: str | None = None
-    execution_duration_months: int | None = Field(default=None, ge=1, le=60)
-    execution_status: str = ""
-    execution_remarks: str = ""
-    lab_marks: int | None = Field(default=None, ge=0)
-    mid_marks: int | None = Field(default=None, ge=0)
-    semester_marks: int | None = Field(default=None, ge=0)
-    mid1_completion_percentage: int | None = Field(default=None, ge=0, le=100)
-    mid2_remaining_syllabus_percentage: int | None = Field(default=None, ge=0, le=100)
-
-
-def _execution_payload(s, offering):
-    base = _course_offering_payload(s, offering)
-    plans = s.query(D.TimetablePlanWorkflow).filter_by(offering_id=offering.id).all()
-    timetable = "Ready" if any(p.status in {"Approved", "Published", "Closed"} for p in plans) else ("In Review" if plans else "Not Ready")
-    issues = s.query(D.CurriculumExecutionIssue).filter_by(offering_id=offering.id).order_by(desc(D.CurriculumExecutionIssue.updated_at)).all()
-    issue_payload = [{"id": i.id, "issue_type": i.issue_type, "description": i.description, "status": i.status,
-                      "responsible_role": i.responsible_role, "created_by": i.created_by,
-                      "created_at": i.created_at.isoformat() if i.created_at else "",
-                      "updated_at": i.updated_at.isoformat() if i.updated_at else ""} for i in issues]
-    readiness = base["readiness"]
-    offering_section_ids = [x.id for x in s.query(D.Section.id).filter(D.Section.offering_id == offering.id).all()]
-    sessions = s.query(D.ClassSession).filter(
-        D.ClassSession.section_id.in_(offering_section_ids) if offering_section_ids else text("1=0")
-    ).all()
-    completed_sessions = sum(x.status in {"Completed", "Complete"} for x in sessions)
-    progress = round(completed_sessions * 100 / len(sessions)) if sessions else 0
-    open_issue = any(i.status != "Resolved" for i in issues)
-    if offering.actual_completion_date:
-        derived = "Completed"
-    elif open_issue:
-        derived = "Gap / Issue"
-    elif offering.expected_completion_date and offering.expected_completion_date < date.today():
-        derived = "Delayed"
-    elif offering.execution_status in {"In Progress", "On Track"}:
-        derived = offering.execution_status
-    else:
-        derived = "Not Started"
-    allocations = base.get("faculty_allocations", [])
-    faculty_names = ", ".join(dict.fromkeys(a["faculty"] for a in allocations if a.get("faculty")))
-    return {**base, "curriculum_status": getattr(s.get(D.Course, offering.course_id), "status", "Unknown"),
-            "department_id": s.get(D.Program, offering.program_id).dept_id if s.get(D.Program, offering.program_id) else "",
-            "department": s.get(D.Department, s.get(D.Program, offering.program_id).dept_id).name if s.get(D.Program, offering.program_id) else "",
-            "student_year": (int(offering.semester) + 1) // 2 if offering.semester else None,
-            "faculty": faculty_names or "—",
-            "faculty_readiness": "Ready" if readiness["faculty_complete"] else "Not Ready",
-            "timetable_readiness": timetable, "execution_issues": issue_payload,
-            "execution_status": derived, "course_start_date": offering.course_start_date.isoformat() if offering.course_start_date else "",
-            "expected_completion_date": offering.expected_completion_date.isoformat() if offering.expected_completion_date else "",
-            "execution_duration_months": offering.execution_duration_months,
-            "lab_marks": offering.lab_marks,
-            "mid_marks": offering.mid_marks,
-            "semester_marks": offering.semester_marks,
-            "mid1_completion_percentage": offering.mid1_completion_percentage,
-            "mid2_remaining_syllabus_percentage": offering.mid2_remaining_syllabus_percentage,
-            "actual_completion_date": offering.actual_completion_date.isoformat() if offering.actual_completion_date else "", "progress": progress,
-            "execution_remarks": offering.execution_remarks or "", "class_sessions": [{"id": x.id, "status": x.status, "date": x.session_date.isoformat() if x.session_date else ""} for x in sessions]}
-
-
-@router.get("/academics/curriculum-execution")
-def curriculum_execution(academic_year: str = "", student_year: int | None = None, program_id: str = "", department_id: str = "", term: str = "", faculty_id: str = "", execution_status: str = "", ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view")[0])
-    rows = s.query(D.CourseOffering).filter_by(tenant_id=TENANT).order_by(desc(D.CourseOffering.updated_at)).all()
-    items = [_execution_payload(s, row) for row in rows if _offering_in_academic_scope(s, row, ctx)]
-    items = [x for x in items if (not academic_year or x.get("academic_year") == academic_year) and (not student_year or x.get("student_year") == student_year) and (not program_id or x.get("program_id") == program_id) and (not department_id or x.get("department_id") == department_id) and (not term or x.get("term") == term) and (not faculty_id or any(str(a.get("faculty_id")) == str(faculty_id) for a in x.get("faculty_allocations", []))) and (not execution_status or x.get("execution_status") == execution_status)]
-    return {"items": items, "can_manage": can(s, ctx, "academics", "edit"), "summary": {k: sum(1 for x in items if x["execution_status"] == v) for k,v in {"total":"__all__","not_started":"Not Started","in_progress":"In Progress","on_track":"On Track","delayed":"Delayed","completed":"Completed","gap":"Gap / Issue"}.items()}}
-
-@router.put("/academics/curriculum-execution/{offering_id}")
-def update_curriculum_execution(offering_id: str, body: CurriculumExecutionUpdateIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "academics", "edit"); require(dec)
-    row = s.query(D.CourseOffering).filter_by(id=offering_id, tenant_id=TENANT).first()
-    if not row or not _offering_in_academic_scope(s, row, ctx): raise HTTPException(404, "Course offering not found")
-    try:
-        start = date.fromisoformat(body.course_start_date) if body.course_start_date else row.course_start_date
-        expected = date.fromisoformat(body.expected_completion_date) if body.expected_completion_date else row.expected_completion_date
-    except ValueError:
-        raise HTTPException(400, "Use valid ISO dates (YYYY-MM-DD)")
-    if start and expected and expected < start: raise HTTPException(400, "Expected completion cannot be before the course start date")
-    if body.course_start_date is not None and body.expected_completion_date is None:
-        expected = row.expected_completion_date
-    if body.expected_completion_date is not None and body.course_start_date is None:
-        start = row.course_start_date
-    if start and body.execution_duration_months:
-        month = start.month - 1 + body.execution_duration_months
-        year, month = start.year + month // 12, month % 12 + 1
-        import calendar
-        calculated = date(year, month, min(start.day, calendar.monthrange(year, month)[1]))
-        if expected and expected != calculated: raise HTTPException(400, "Expected date conflicts with the configured duration")
-        expected = calculated
-    if body.course_start_date is not None or body.expected_completion_date is not None or body.execution_duration_months is not None:
-        row.course_start_date, row.execution_duration_months, row.expected_completion_date = start, body.execution_duration_months, expected
-    row.lab_marks, row.mid_marks, row.semester_marks = body.lab_marks, body.mid_marks, body.semester_marks
-    row.mid1_completion_percentage = body.mid1_completion_percentage
-    row.mid2_remaining_syllabus_percentage = body.mid2_remaining_syllabus_percentage
-    if body.execution_remarks is not None: row.execution_remarks = body.execution_remarks.strip()
-    if body.execution_status in {"Not Started", "In Progress", "On Track"}: row.execution_status = body.execution_status
-    if body.execution_status == "Completed": row.actual_completion_date, row.execution_completed_by, row.execution_completed_at, row.execution_status = date.today(), ctx["sub"], datetime.utcnow(), "Completed"
-    row.updated_by, row.updated_at = ctx["sub"], datetime.utcnow(); s.commit()
-    return {"item": _execution_payload(s, row), "decision": dec.as_dict()}
-
-
-@router.post("/academics/curriculum-execution/issues")
-def create_curriculum_execution_issue(body: CurriculumExecutionIssueIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "academics", "edit"); require(dec)
-    if body.status not in {"Open", "Under Review", "Resolved"}: raise HTTPException(400, "Invalid issue status")
-    offering = s.query(D.CourseOffering).filter_by(id=body.offering_id, tenant_id=TENANT).first()
-    if not offering: raise HTTPException(404, "Course offering not found")
-    now, who = datetime.utcnow(), actor_name(s, ctx)
-    row = D.CurriculumExecutionIssue(id=uid(), tenant_id=TENANT, offering_id=offering.id,
-        issue_type=body.issue_type.strip(), description=body.description.strip(), status=body.status,
-        responsible_role=body.responsible_role.strip() or "Curriculum Officer", created_by=who, updated_by=who,
-        created_at=now, updated_at=now)
-    s.add(row); s.commit()
-    write_audit(s, ctx["sub"], who, ctx["office_n"], "curriculum_execution.issue", f"issue:{row.id}", "", row.status, row.issue_type)
-    return {"issue": _execution_payload(s, offering)["execution_issues"][0], "decision": dec.as_dict()}
-
-
-@router.put("/academics/curriculum-execution/issues/{issue_id}")
-def update_curriculum_execution_issue(issue_id: str, body: CurriculumExecutionIssueIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "academics", "edit"); require(dec)
-    if body.status not in {"Open", "Under Review", "Resolved"}: raise HTTPException(400, "Invalid issue status")
-    row = s.query(D.CurriculumExecutionIssue).filter_by(id=issue_id, tenant_id=TENANT).first()
-    if not row: raise HTTPException(404, "Issue not found")
-    previous = row.status; row.issue_type, row.description, row.status, row.responsible_role = body.issue_type.strip(), body.description.strip(), body.status, body.responsible_role.strip() or row.responsible_role
-    row.updated_by, row.updated_at = actor_name(s, ctx), datetime.utcnow(); s.commit()
-    write_audit(s, ctx["sub"], row.updated_by, ctx["office_n"], "curriculum_execution.issue", f"issue:{row.id}", previous, row.status, row.issue_type)
-    return {"status": row.status, "decision": dec.as_dict()}
-
-
-@router.get("/academics/course-offerings")
-def list_course_offerings(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view")[0])
-    rows = s.query(D.CourseOffering).filter_by(tenant_id=TENANT).order_by(D.CourseOffering.academic_year.desc(), D.CourseOffering.semester, D.CourseOffering.id).all()
-    rows = [row for row in rows if _offering_in_academic_scope(s, row, ctx)]
-    return {"offerings": [_course_offering_payload(s, row) for row in rows],
-            "can_create": can(s, ctx, "academics", "create_course"), "can_edit": can(s, ctx, "academics", "edit"),
-            "can_approve": False, "can_publish": False}
-
-
-@router.get("/academics/course-offerings/{offering_id}")
-def get_course_offering(offering_id: str, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view")[0])
-    row = s.query(D.CourseOffering).filter_by(id=offering_id, tenant_id=TENANT).first()
-    if not row: raise HTTPException(404, "Course offering not found")
-    if not _offering_in_academic_scope(s, row, ctx): raise HTTPException(404, "Course offering not found")
-    return {"offering": _course_offering_payload(s, row)}
-
-
-@router.post("/academics/course-offerings")
-def create_course_offering(body: CourseOfferingIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "academics", "create_course")
-    require(dec)
-    course, program = s.get(D.Course, body.course_id), s.get(D.Program, body.program_id)
-    if not course or not program or course.program_id not in (None, program.id): raise HTTPException(400, "Choose a valid course and program")
-    if body.semester != course.semester or body.semester not in range(1, 9): raise HTTPException(400, "Semester must match the catalog course")
-    if not body.academic_year.strip() or not body.term.strip(): raise HTTPException(400, "Academic year and term are required")
-    if s.query(D.CourseOffering).filter_by(tenant_id=TENANT, course_id=course.id, program_id=program.id, academic_year=body.academic_year.strip(), term=body.term.strip()).first(): raise HTTPException(409, "This course is already offered for the selected term")
-    now, who = datetime.utcnow(), actor_name(s, ctx)
-    row = D.CourseOffering(id=uid(), tenant_id=TENANT, course_id=course.id, program_id=program.id, academic_year=body.academic_year.strip(), term=body.term.strip(), semester=body.semester, status="Draft", created_by=who, updated_by=who, created_at=now, updated_at=now)
-    s.add(row); s.commit(); write_audit(s, ctx["sub"], who, ctx["office_n"], "course_offering.create", f"course_offering:{row.id}", "", row.status, course.code)
-    return {"offering": _course_offering_payload(s, row), "decision": dec.as_dict()}
-
-
-@router.put("/academics/course-offerings/{offering_id}")
-def update_course_offering(offering_id: str, body: CourseOfferingIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "academics", "edit")
-    require(dec)
-    row = s.query(D.CourseOffering).filter_by(id=offering_id, tenant_id=TENANT).first()
-    if not row: raise HTTPException(404, "Course offering not found")
-    if row.status not in {"Draft", "HOD Input Pending", "Ready"}: raise HTTPException(409, "Only editable offerings can be updated")
-    course, program = s.get(D.Course, body.course_id), s.get(D.Program, body.program_id)
-    if not course or not program or body.semester != course.semester: raise HTTPException(400, "Choose a valid course, program, and catalog semester")
-    previous = row.status
-    row.course_id, row.program_id, row.academic_year, row.term, row.semester = course.id, program.id, body.academic_year.strip(), body.term.strip(), body.semester
-    row.updated_by, row.updated_at = actor_name(s, ctx), datetime.utcnow(); s.commit()
-    write_audit(s, ctx["sub"], row.updated_by, ctx["office_n"], "course_offering.update", f"course_offering:{row.id}", previous, row.status, course.code)
-    return {"offering": _course_offering_payload(s, row), "decision": dec.as_dict()}
-
-
-@router.post("/academics/course-offerings/{offering_id}/status")
-def change_course_offering_status(offering_id: str, body: CourseOfferingStatusIn, ctx=Depends(auth), s=Depends(db)):
-    allowed = {"Draft", "HOD Input Pending", "Ready", "Approved", "Published", "Closed"}
-    if body.status not in allowed: raise HTTPException(400, "Invalid offering status")
-    if body.status in {"Approved", "Published", "Closed"}: raise HTTPException(403, "This status requires an approval/publishing capability not granted to Office 17")
-    dec, _ = gate(s, ctx, "academics", "edit"); require(dec)
-    row = s.query(D.CourseOffering).filter_by(id=offering_id, tenant_id=TENANT).first()
-    if not row: raise HTTPException(404, "Course offering not found")
-    if row.status == "Closed": raise HTTPException(409, "Closed offerings cannot change status")
-    previous = row.status; row.status, row.updated_by, row.updated_at = body.status, actor_name(s, ctx), datetime.utcnow(); s.commit()
-    write_audit(s, ctx["sub"], row.updated_by, ctx["office_n"], "course_offering.status", f"course_offering:{row.id}", previous, row.status, "Offering status changed")
-    return {"offering": _course_offering_payload(s, row), "decision": dec.as_dict()}
 
 
 @router.get("/academics/sections")
 def list_sections(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view")[0])
-    course_map = {c.id: (c.code, c.title, c.semester) for c in s.query(D.Course).all()}
-    program_map = {p.id: p for p in s.query(D.Program).all()}
-    offering_map = {o.id: o for o in s.query(D.CourseOffering).all()}
-    department_map = {d.id: d for d in s.query(D.Department).all()}
-    fac_map = {f.id: f.name for f in s.query(D.StaffMember).all()}
-    rows = s.query(D.Section).limit(200).all()
-    rows = [r for r in rows if not r.offering_id or _offering_in_academic_scope(s, s.get(D.CourseOffering, r.offering_id), ctx)]
-    course_map = {c.id: (c.code, c.title, c.semester) for c in scoped_academic_query(s, D.Course, ctx).all()}
+    course_map = {c.id: (c.code, c.title) for c in s.query(D.Course).filter(D.Course.tenant_id == ctx["tenant_id"]).all()}
     fac_map = {f.id: f.name for f in s.query(D.StaffMember).filter(D.StaffMember.tenant_id == ctx["tenant_id"]).all()}
-    section_query = scoped_academic_query(s, D.Section, ctx)
-    rows = section_query.limit(200).all()
+    rows = s.query(D.Section).filter(D.Section.tenant_id == ctx["tenant_id"]).limit(200).all()
     out = []
     for r in rows:
-        cc, ct, semester = course_map.get(r.course_id, ("", "", None))
-        offering = offering_map.get(r.offering_id)
-        program = program_map.get(offering.program_id) if offering else None
-        department = department_map.get(program.dept_id) if program else department_map.get(r.dept_id)
-        enrolled = s.query(D.Enrollment).filter(D.Enrollment.section_id == r.id,
+        cc, ct = course_map.get(r.course_id, ("", ""))
+        enrolled = s.query(D.Enrollment).filter(D.Enrollment.tenant_id == ctx["tenant_id"], D.Enrollment.section_id == r.id,
                                                 D.Enrollment.status == "enrolled").count()
-        out.append({"id": r.id, "offering_id": r.offering_id, "course_code": cc, "course_title": ct, "semester": semester,
-                    "program_id": program.id if program else "", "program_code": program.code if program else "",
-                    "program": program.name if program else "", "department_id": department.id if department else "",
-                    "department": department.name if department else "",
+        out.append({"id": r.id, "course_code": cc, "course_title": ct,
                     "section": r.section_code, "term": r.term,
                     "faculty": fac_map.get(r.faculty_person_id, "—"),
                     "room": r.room, "schedule": r.schedule,
@@ -3716,7 +1861,6 @@ def list_sections(ctx=Depends(auth), s=Depends(db)):
 
 class SectionIn(BaseModel):
     course_id: str
-    offering_id: str = Field(min_length=1)
     section_code: str = "A"
     faculty_id: str = ""
     room: str = ""
@@ -3727,37 +1871,30 @@ class SectionIn(BaseModel):
 def create_section(body: SectionIn, ctx=Depends(auth), s=Depends(db)):
     dec, verb = gate(s, ctx, "academics", "create_section")
     require(dec)
-    c = s.query(D.Course).get(body.course_id)
+    c = s.query(D.Course).filter(D.Course.id == body.course_id, D.Course.tenant_id == ctx["tenant_id"]).first()
     if not c:
         raise HTTPException(400, "Unknown course")
-    offering = s.query(D.CourseOffering).filter_by(id=body.offering_id, tenant_id=TENANT).first()
-    if not offering or offering.course_id != c.id: raise HTTPException(400, "Section course does not match the selected offering")
-    if not _offering_in_academic_scope(s, offering, ctx): raise HTTPException(404, "Course offering not found")
-    existing = s.query(D.Section).filter_by(offering_id=offering.id, section_code=body.section_code).first()
-    if existing: raise HTTPException(409, "This section already exists for the offering")
-    hod_input = s.query(D.HODInput).filter_by(offering_id=offering.id).first()
-    if not hod_input or hod_input.status != "Submitted": raise HTTPException(409, "Submit HOD requirements before creating sections")
-    if hod_input.required_sections < 1: raise HTTPException(409, "HOD requirements must request at least one section")
-    if s.query(D.Section).filter_by(offering_id=offering.id).count() >= hod_input.required_sections:
-        raise HTTPException(409, "The required number of sections for this offering already exists")
-    c = require_academic_object(s, ctx, s.get(D.Course, body.course_id), "create", "Course")
+    if body.faculty_id and not s.query(D.StaffMember).filter(D.StaffMember.id == body.faculty_id, D.StaffMember.tenant_id == ctx["tenant_id"]).first():
+        raise HTTPException(400, "Faculty must belong to the authenticated tenant")
+    campus = _authenticated_campus_scope(s, ctx)
     sid = uid()
-    s.add(D.Section(id=sid, tenant_id=TENANT, course_id=c.id, offering_id=offering.id, dept_id=c.dept_id,
-                    term=offering.term, section_code=body.section_code,
-                    faculty_person_id=None, room=body.room,
+    s.add(D.Section(id=sid, tenant_id=ctx["tenant_id"], course_id=c.id, dept_id=c.dept_id,
+                    campus_scope_id=campus.id if campus else None,
+                    term="2025-Odd", section_code=body.section_code,
+                    faculty_person_id=body.faculty_id or None, room=body.room,
                     schedule=body.schedule, capacity=60, scope_ref=c.dept_id))
     s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "section.create",
-                f"section:{sid}", "", "open", f"Section {c.code}-{body.section_code}")
+                f"section:{sid}", "", "open", f"Section {c.code}-{body.section_code}", tenant_id=ctx["tenant_id"], campus_scope_id=campus.id if campus else None)
     return {"id": sid, "decision": dec.as_dict()}
 
 
 @router.get("/academics/section/{section_id}/timetable")
 def section_timetable(section_id: str, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view")[0])
-    section = require_academic_object(s, ctx, _section_or_404(s, section_id), "read", "Section")
+    section = _section_or_404(s, ctx, section_id)
     rows = (s.query(D.TimetableEntry)
-            .filter(D.TimetableEntry.section_id == section.id)
+            .filter(D.TimetableEntry.tenant_id == ctx["tenant_id"], D.TimetableEntry.section_id == section.id)
             .order_by(D.TimetableEntry.day_of_week, D.TimetableEntry.start_time).all())
     return {
         "entries": [{
@@ -3776,111 +1913,6 @@ def section_timetable(section_id: str, ctx=Depends(auth), s=Depends(db)):
     }
 
 
-def _clock_minutes(value: str) -> int:
-    try:
-        hours, minutes = (int(part) for part in str(value or '').split(':', 1))
-        return hours * 60 + minutes
-    except (TypeError, ValueError):
-        return -1
-
-
-@router.get("/academics/conflicts")
-def academic_conflicts(academic_year: str = "", student_year: int | None = None, program_id: str = "", department_id: str = "", conflict_type: str = "", severity: str = "", status: str = "", resolved: str = "", ctx=Depends(auth), s=Depends(db)):
-    """Compute current timetable conflicts from persisted active entries.
-
-    This is deliberately read-only: re-planning remains subject to the existing
-    timetable mutation capability and section ownership checks.
-    """
-    require(gate(s, ctx, "academics", "view")[0])
-    sections = {row.id: row for row in s.query(D.Section).all()}
-    courses = {row.id: row for row in s.query(D.Course).all()}
-    entries = [row for row in s.query(D.TimetableEntry).filter(D.TimetableEntry.status == "active").all()
-               if row.section_id in sections]
-    conflicts = []
-    for index, left in enumerate(entries):
-        left_section = sections[left.section_id]
-        left_course = courses.get(left_section.course_id)
-        left_start, left_end = _clock_minutes(left.start_time), _clock_minutes(left.end_time)
-        if left_start < 0 or left_end <= left_start:
-            continue
-        for right in entries[index + 1:]:
-            if left.day_of_week != right.day_of_week:
-                continue
-            right_start, right_end = _clock_minutes(right.start_time), _clock_minutes(right.end_time)
-            if right_start < 0 or right_end <= right_start or left_start >= right_end or right_start >= left_end:
-                continue
-            right_section = sections[right.section_id]
-            right_course = courses.get(right_section.course_id)
-            kinds = []
-            if left_section.faculty_person_id and left_section.faculty_person_id == right_section.faculty_person_id:
-                kinds.append("faculty_overlap")
-            if left.room and right.room and left.room.strip().lower() == right.room.strip().lower():
-                kinds.append("lab_conflict" if "lab" in left.room.lower() else "room_conflict")
-            if left_section.dept_id == right_section.dept_id and left_section.term == right_section.term:
-                kinds.append("student_cohort_overlap")
-            kinds = list(dict.fromkeys(kinds))
-            for kind in kinds:
-                    key = f"{kind}:{min(left.id, right.id)}:{max(left.id, right.id)}"
-                    severity_value = "Critical" if kind == "student_cohort_overlap" else ("High" if kind in {"faculty_overlap", "lab_conflict"} else "Medium")
-                    saved = s.query(D.TimetableConflict).filter(D.TimetableConflict.conflict_key == key).first()
-                    if not saved:
-                        saved = D.TimetableConflict(id=uid(), tenant_id=TENANT, conflict_key=key, conflict_type=kind, severity=severity_value, left_entry_id=left.id, right_entry_id=right.id, detected_at=datetime.utcnow(), updated_at=datetime.utcnow())
-                        s.add(saved)
-                    elif saved.status != "Resolved":
-                        saved.severity = severity_value
-                    conflicts.append({
-                    "id": saved.id, "conflict_key": key, "type": kind,
-                    "severity": saved.severity, "status": saved.status, "detected_at": (saved.detected_at or datetime.utcnow()).isoformat(),
-                    "day_of_week": left.day_of_week, "start_time": max(left.start_time, right.start_time),
-                    "end_time": min(left.end_time, right.end_time),
-                    "left": {"entry_id": left.id, "section_id": left.section_id,
-                              "section": left_section.section_code, "course": left_course.code if left_course else ""},
-                    "right": {"entry_id": right.id, "section_id": right.section_id,
-                               "section": right_section.section_code, "course": right_course.code if right_course else ""},
-                    "resolution_note": saved.resolution_note, "resolved_by": saved.resolved_by, "resolved_at": saved.resolved_at.isoformat() if saved.resolved_at else "",
-                    "academic_year": getattr(left_section, "academic_year", "") or left_section.term, "student_year": getattr(left_section, "year", None),
-                    "program_id": getattr(left_section, "program_id", "") or (s.get(D.CourseOffering, left_section.offering_id).program_id if left_section.offering_id and s.get(D.CourseOffering, left_section.offering_id) else ""), "department_id": left_section.dept_id,
-                    "department_name": s.get(D.Department, left_section.dept_id).name if s.get(D.Department, left_section.dept_id) else "",
-                    "program_name": s.get(D.Program, getattr(left_section, "program_id", "") or (s.get(D.CourseOffering, left_section.offering_id).program_id if left_section.offering_id and s.get(D.CourseOffering, left_section.offering_id) else "")).name if s.get(D.Program, getattr(left_section, "program_id", "") or (s.get(D.CourseOffering, left_section.offering_id).program_id if left_section.offering_id and s.get(D.CourseOffering, left_section.offering_id) else "")) else "",
-                    "left": {"entry_id": left.id, "section_id": left.section_id, "section": left_section.section_code, "course": left_course.code if left_course else "", "course_name": left_course.title if left_course else "", "faculty": left_section.faculty_person_id or "", "room": left.room},
-                    "right": {"entry_id": right.id, "section_id": right.section_id, "section": right_section.section_code, "course": right_course.code if right_course else "", "course_name": right_course.title if right_course else "", "faculty": right_section.faculty_person_id or "", "room": right.room},
-                    })
-    s.commit()
-    if ctx.get("office_n") == 10:
-        allowed = set(_hod_department_ids(s, ctx))
-        conflicts = [x for x in conflicts if x["department_id"] in allowed or x["right"]["section_id"] in {z.section_id for z in entries if z.section_id and sections[z.section_id].dept_id in allowed}]
-    if academic_year: conflicts = [x for x in conflicts if x["academic_year"] == academic_year]
-    if student_year is not None: conflicts = [x for x in conflicts if x["student_year"] == student_year]
-    if program_id: conflicts = [x for x in conflicts if x["program_id"] == program_id]
-    if department_id: conflicts = [x for x in conflicts if x["department_id"] == department_id]
-    if conflict_type: conflicts = [x for x in conflicts if x["type"] == conflict_type]
-    if severity: conflicts = [x for x in conflicts if x["severity"] == severity]
-    if status: conflicts = [x for x in conflicts if x["status"] == status]
-    if resolved in {"true", "1", "yes"}: conflicts = [x for x in conflicts if x["status"] == "Resolved"]
-    elif resolved in {"false", "0", "no"}: conflicts = [x for x in conflicts if x["status"] != "Resolved"]
-    summary = {"total_active": sum(x["status"] != "Resolved" for x in conflicts), "critical": sum(x["severity"] == "Critical" for x in conflicts), "high": sum(x["severity"] == "High" for x in conflicts), "faculty": sum(x["type"] == "faculty_overlap" for x in conflicts), "room": sum(x["type"] == "room_conflict" for x in conflicts), "student": sum(x["type"] == "student_cohort_overlap" for x in conflicts), "lab": sum(x["type"] == "lab_conflict" for x in conflicts), "resolved": sum(x["status"] == "Resolved" for x in conflicts)}
-    return {"conflicts": conflicts, "summary": summary, "can_manage": can(s, ctx, "academics", "manage_timetable")}
-
-
-class ConflictResolveIn(BaseModel):
-    note: str = ""
-
-@router.post("/academics/conflicts/{conflict_id}/resolve")
-def resolve_academic_conflict(conflict_id: str, body: ConflictResolveIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "academics", "manage_timetable"); require(dec)
-    row = s.get(D.TimetableConflict, conflict_id)
-    if not row: raise HTTPException(404, "Conflict not found")
-    if ctx.get("office_n") == 10:
-        allowed = set(_hod_department_ids(s, ctx)); left = s.get(D.TimetableEntry, row.left_entry_id); right = s.get(D.TimetableEntry, row.right_entry_id)
-        if not left or not right or s.get(D.Section, left.section_id).dept_id not in allowed:
-            raise HTTPException(403, "You are not authorized to resolve this conflict")
-    if not body.note.strip(): raise HTTPException(400, "Resolution note is required")
-    row.status, row.resolution_note, row.resolved_by, row.resolved_at, row.updated_at = "Resolved", body.note.strip(), ctx["sub"], datetime.utcnow(), datetime.utcnow()
-    s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academics.conflict.resolve", f"conflict:{row.id}", "Active", "Resolved", body.note.strip())
-    return {"status": row.status, "decision": dec.as_dict()}
-
-
 class TimetableEntryIn(BaseModel):
     day_of_week: int
     start_time: str
@@ -3891,44 +1923,16 @@ class TimetableEntryIn(BaseModel):
     effective_to: str = ""
 
 
-def _validate_timetable_slot(s, section, body, exclude_id=""):
-    """Validate time ranges and prevent section, room, or faculty clashes."""
-    from datetime import datetime as _dt
-    try:
-        start = _dt.strptime(body.start_time, "%H:%M").time()
-        end = _dt.strptime(body.end_time, "%H:%M").time()
-    except ValueError:
-        raise HTTPException(422, "Start and end time must use HH:MM format")
-    if end <= start:
-        raise HTTPException(422, "End time must be later than start time")
-    rows = s.query(D.TimetableEntry, D.Section).join(D.Section, D.Section.id == D.TimetableEntry.section_id).filter(
-        D.TimetableEntry.tenant_id == section.tenant_id,
-        D.TimetableEntry.status == "active",
-        D.TimetableEntry.day_of_week == int(body.day_of_week),
-    ).all()
-    room = (body.room or section.room or "").strip().lower()
-    for row, other in rows:
-        if row.id == exclude_id or row.start_time >= body.end_time or row.end_time <= body.start_time:
-            continue
-        same_section = other.id == section.id
-        same_room = room and (row.room or "").strip().lower() == room
-        same_faculty = section.faculty_person_id and other.faculty_person_id == section.faculty_person_id
-        if same_section or same_room or same_faculty:
-            kind = "section" if same_section else ("room" if same_room else "faculty")
-            raise HTTPException(409, f"Timetable conflict: overlapping {kind} slot")
-
-
 @router.post("/academics/section/{section_id}/timetable")
 def create_timetable_entry(section_id: str, body: TimetableEntryIn, ctx=Depends(auth), s=Depends(db)):
     dec, _ = gate(s, ctx, "academics", "manage_timetable")
     require(dec)
-    section = require_academic_object(s, ctx, _section_or_404(s, section_id), "create", "Section")
+    section = _section_or_404(s, ctx, section_id)
     if not _can_manage_section_for_timetable(s, ctx, section):
         raise HTTPException(403, "You are not authorized to manage the timetable for this section")
-    _validate_timetable_slot(s, section, body)
     who = actor_name(s, ctx)
     row = D.TimetableEntry(
-        id=uid(), tenant_id=TENANT, section_id=section.id,
+        id=uid(), tenant_id=ctx["tenant_id"], section_id=section.id,
         day_of_week=max(0, min(6, int(body.day_of_week))),
         start_time=body.start_time, end_time=body.end_time,
         room=body.room or section.room, building=body.building,
@@ -3948,13 +1952,12 @@ def create_timetable_entry(section_id: str, body: TimetableEntryIn, ctx=Depends(
 def update_timetable_entry(entry_id: str, body: TimetableEntryIn, ctx=Depends(auth), s=Depends(db)):
     dec, _ = gate(s, ctx, "academics", "manage_timetable")
     require(dec)
-    row = s.query(D.TimetableEntry).filter(D.TimetableEntry.tenant_id == ctx["tenant_id"], D.TimetableEntry.id == entry_id).first()
+    row = s.query(D.TimetableEntry).filter(D.TimetableEntry.id == entry_id, D.TimetableEntry.tenant_id == ctx["tenant_id"]).first()
     if not row:
         raise HTTPException(404, "Timetable entry not found")
-    section = require_academic_object(s, ctx, _section_or_404(s, row.section_id), "edit", "Section")
+    section = _section_or_404(s, ctx, row.section_id)
     if not _can_manage_section_for_timetable(s, ctx, section):
         raise HTTPException(403, "You are not authorized to manage the timetable for this section")
-    _validate_timetable_slot(s, section, body, row.id)
     prev_state = row.status
     row.day_of_week = max(0, min(6, int(body.day_of_week)))
     row.start_time = body.start_time
@@ -3976,10 +1979,10 @@ def update_timetable_entry(entry_id: str, body: TimetableEntryIn, ctx=Depends(au
 def deactivate_timetable_entry(entry_id: str, ctx=Depends(auth), s=Depends(db)):
     dec, _ = gate(s, ctx, "academics", "manage_timetable")
     require(dec)
-    row = s.query(D.TimetableEntry).filter(D.TimetableEntry.tenant_id == ctx["tenant_id"], D.TimetableEntry.id == entry_id).first()
+    row = s.query(D.TimetableEntry).filter(D.TimetableEntry.id == entry_id, D.TimetableEntry.tenant_id == ctx["tenant_id"]).first()
     if not row:
         raise HTTPException(404, "Timetable entry not found")
-    section = require_academic_object(s, ctx, _section_or_404(s, row.section_id), "edit", "Section")
+    section = _section_or_404(s, ctx, row.section_id)
     if not _can_manage_section_for_timetable(s, ctx, section):
         raise HTTPException(403, "You are not authorized to manage the timetable for this section")
     prev_state = row.status
@@ -3993,166 +1996,11 @@ def deactivate_timetable_entry(entry_id: str, ctx=Depends(auth), s=Depends(db)):
     return {"status": row.status, "decision": dec.as_dict()}
 
 
-def _timetable_plan_payload(row):
-    return {"id": row.id, "offering_id": row.offering_id, "section_id": row.section_id, "timetable_entry_id": row.timetable_entry_id, "status": row.status, "last_action": row.last_action, "reason": row.reason, "submitted_by": row.submitted_by, "updated_by": row.updated_by, "updated_at": row.updated_at.isoformat() if row.updated_at else ""}
-
-
-@router.get("/academics/timetable-plans")
-def list_timetable_plans(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view")[0])
-    return {"plans": [_timetable_plan_payload(x) for x in s.query(D.TimetablePlanWorkflow).filter_by(tenant_id=TENANT).order_by(D.TimetablePlanWorkflow.updated_at.desc()).all()]}
-
-
-@router.post("/academics/timetable-plans/submit")
-def submit_timetable_plan(body: dict, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "academics", "manage_timetable"); require(dec)
-    entry = s.get(D.TimetableEntry, body.get("timetable_entry_id")); section = s.get(D.Section, body.get("section_id"))
-    if not entry or not section or entry.section_id != section.id or not section.faculty_person_id or not entry.room or not entry.day_of_week >= 0 or not entry.start_time or not entry.end_time: raise HTTPException(400, "A complete section timetable with assigned faculty is required")
-    offering_id = body.get("offering_id") or section.offering_id
-    if not offering_id: raise HTTPException(400, "Timetable plan must belong to a course offering")
-    # Existing conflict engine is authoritative; reject any active overlap involving this entry.
-    others = s.query(D.TimetableEntry).filter(D.TimetableEntry.status == "active", D.TimetableEntry.day_of_week == entry.day_of_week, D.TimetableEntry.id != entry.id).all()
-    for other in others:
-        if other.day_of_week == entry.day_of_week and _clock_minutes(entry.start_time) < _clock_minutes(other.end_time) and _clock_minutes(other.start_time) < _clock_minutes(entry.end_time):
-            other_section = s.get(D.Section, other.section_id)
-            if (entry.room and entry.room == other.room) or (section.faculty_person_id and other_section and section.faculty_person_id == other_section.faculty_person_id): raise HTTPException(409, "Unresolved timetable conflict exists")
-    row = s.query(D.TimetablePlanWorkflow).filter_by(timetable_entry_id=entry.id).first() or D.TimetablePlanWorkflow(id=uid(), tenant_id=TENANT, offering_id=offering_id, section_id=section.id, timetable_entry_id=entry.id, created_at=datetime.utcnow())
-    row.status, row.last_action, row.reason, row.submitted_by, row.updated_by, row.updated_at = "HOD Review", "Submitted for HOD review", "", ctx["sub"], ctx["sub"], datetime.utcnow(); s.add(row); s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "timetable_plan.submit", f"timetable_plan:{row.id}", "Draft", row.status, "Submitted for HOD review")
-    return {"plan": _timetable_plan_payload(row), "decision": dec.as_dict()}
-
-
-@router.post("/academics/timetable-plans/{plan_id}/hod-decision")
-def timetable_hod_decision(plan_id: str, body: dict, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] != 10: raise HTTPException(403, "Only the HOD office may review this stage")
-    dec, _ = gate(s, ctx, "approvals", "approve" if body.get("action") == "approve" else "reject"); require(dec)
-    row = s.get(D.TimetablePlanWorkflow, plan_id)
-    if not row or row.status != "HOD Review": raise HTTPException(409, "Plan is not awaiting HOD review")
-    action = body.get("action"); row.status = "VP Review" if action == "approve" else "HOD Returned"
-    row.last_action, row.reason, row.updated_by, row.updated_at = f"HOD {action}", body.get("reason", "").strip(), ctx["sub"], datetime.utcnow(); s.commit(); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "timetable_plan.hod_decision", f"timetable_plan:{row.id}", "HOD Review", row.status, row.reason)
-    return {"plan": _timetable_plan_payload(row), "decision": dec.as_dict()}
-
-
-@router.post("/academics/timetable-plans/{plan_id}/vp-decision")
-def timetable_vp_decision(plan_id: str, body: dict, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] != 5: raise HTTPException(403, "Only the Vice Principal office may review this stage")
-    dec, _ = gate(s, ctx, "approvals", "approve" if body.get("action") == "approve" else "reject"); require(dec)
-    row = s.get(D.TimetablePlanWorkflow, plan_id)
-    if not row or row.status != "VP Review": raise HTTPException(409, "Plan is not awaiting VP review")
-    action = body.get("action"); row.status = "Approved" if action == "approve" else "VP Returned"; row.last_action, row.reason, row.updated_by, row.updated_at = f"VP {action}", body.get("reason", "").strip(), ctx["sub"], datetime.utcnow(); s.commit(); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "timetable_plan.vp_decision", f"timetable_plan:{row.id}", "VP Review", row.status, row.reason)
-    return {"plan": _timetable_plan_payload(row), "decision": dec.as_dict()}
-
-
-@router.post("/academics/timetable-plans/{plan_id}/publish")
-def publish_timetable_plan(plan_id: str, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] != 5: raise HTTPException(403, "Only the Vice Principal office may publish a timetable")
-    dec, _ = gate(s, ctx, "approvals", "approve"); require(dec)
-    row = s.get(D.TimetablePlanWorkflow, plan_id)
-    if not row or row.status != "Approved": raise HTTPException(409, "Only approved plans can be published")
-    row.status, row.last_action, row.updated_by, row.updated_at = "Published", "Timetable published", ctx["sub"], datetime.utcnow(); s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "timetable_plan.publish", f"timetable_plan:{row.id}", "Approved", "Published", "Timetable published")
-    return {"plan": _timetable_plan_payload(row), "decision": dec.as_dict()}
-
-
-@router.post("/academics/timetable-plans/{plan_id}/close")
-def close_timetable_plan(plan_id: str, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] != 5: raise HTTPException(403, "Only the Vice Principal office may close a timetable")
-    dec, _ = gate(s, ctx, "approvals", "approve"); require(dec)
-    row = s.get(D.TimetablePlanWorkflow, plan_id)
-    if not row or row.status != "Published": raise HTTPException(409, "Only published plans can be closed")
-    row.status, row.last_action, row.updated_by, row.updated_at = "Closed", "Timetable closed", ctx["sub"], datetime.utcnow(); s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "timetable_plan.close", f"timetable_plan:{row.id}", "Published", "Closed", "Timetable closed")
-    return {"plan": _timetable_plan_payload(row), "decision": dec.as_dict()}
-
-
-def _session_payload(x):
-    start = getattr(x, "start_time", None)
-    end = getattr(x, "end_time", None)
-    scheduled_start = getattr(x, "scheduled_start", None)
-    scheduled_end = getattr(x, "scheduled_end", None)
-    return {
-        "id": x.id,
-        "timetable_plan_id": getattr(x, "timetable_plan_id", None),
-        "timetable_entry_id": getattr(x, "timetable_entry_id", None),
-        "offering_id": getattr(x, "offering_id", None),
-        "section_id": x.section_id,
-        "faculty_id": x.faculty_id,
-        "room": x.room or "",
-        "session_date": x.session_date.isoformat() if x.session_date else "",
-        "start_time": start or (scheduled_start.isoformat() if scheduled_start else ""),
-        "end_time": end or (scheduled_end.isoformat() if scheduled_end else ""),
-        "scheduled_start": scheduled_start.isoformat() if scheduled_start else None,
-        "scheduled_end": scheduled_end.isoformat() if scheduled_end else None,
-        "status": x.status,
-        "created_by": getattr(x, "created_by", ""),
-        "updated_at": x.updated_at.isoformat() if x.updated_at else "",
-    }
-
-
-@router.get("/academics/class-sessions")
-def list_class_sessions(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view")[0]); return {"sessions": [_session_payload(x) for x in s.query(D.ClassSession).filter_by(tenant_id=TENANT).order_by(D.ClassSession.session_date.desc()).all()]}
-
-
-@router.get("/academics/class-sessions/{session_id}")
-def get_class_session(session_id: str, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view")[0]); x = s.query(D.ClassSession).get(session_id)
-    if not x: raise HTTPException(404, "Class session not found")
-    return {"session": _session_payload(x)}
-
-
-@router.post("/academics/class-sessions/generate")
-def generate_class_sessions(body: dict, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "academics", "manage_timetable"); require(dec)
-    plan = s.query(D.TimetablePlanWorkflow).filter_by(id=body.get("timetable_plan_id"), status="Published").first()
-    if not plan: raise HTTPException(409, "Only published timetable plans can generate class sessions")
-    entry, section = s.get(D.TimetableEntry, plan.timetable_entry_id), s.get(D.Section, plan.section_id); d = date.fromisoformat(body.get("session_date", ""))
-    if not entry or not section: raise HTTPException(404, "Timetable section not found")
-    existing = s.query(D.ClassSession).filter_by(timetable_entry_id=entry.id, session_date=d).first()
-    if existing: return {"session": _session_payload(existing), "decision": dec.as_dict()}
-    x = D.ClassSession(id=uid(), tenant_id=TENANT, timetable_plan_id=plan.id, timetable_entry_id=entry.id, offering_id=plan.offering_id, section_id=section.id, faculty_id=section.faculty_person_id, room=entry.room, session_date=d, start_time=entry.start_time, end_time=entry.end_time, status="Planned", created_by=ctx["sub"], updated_by=ctx["sub"]); s.add(x); s.commit(); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "class_session.generate", f"class_session:{x.id}", "", x.status, "Generated from published timetable"); return {"session": _session_payload(x), "decision": dec.as_dict()}
-
-
-@router.post("/academics/class-sessions/{session_id}/transition")
-def transition_class_session(session_id: str, body: dict, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "academics", "manage_timetable"); require(dec); x = s.query(D.ClassSession).get(session_id)
-    if not x: raise HTTPException(404, "Class session not found")
-    allowed = {"Planned": {"Open", "Cancelled"}, "Open": {"In Progress", "Cancelled"}, "In Progress": {"Completed", "Cancelled"}, "Completed": set(), "Cancelled": set()}
-    if body.get("status") not in allowed.get(x.status, set()): raise HTTPException(409, "Invalid class session transition")
-    previous=x.status; x.status=body["status"]; x.updated_by=ctx["sub"]; x.updated_at=datetime.utcnow(); s.commit(); write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"class_session.status",f"class_session:{x.id}",previous,x.status,"Class session status changed"); return {"session": _session_payload(x), "decision": dec.as_dict()}
-
-
-@router.get("/portal/faculty/class-sessions")
-def faculty_class_sessions(ctx=Depends(auth), s=Depends(db)):
-    staff = s.query(D.StaffMember).filter_by(user_id=ctx["sub"]).first()
-    if not staff: raise HTTPException(403, "Faculty profile not found")
-    rows = s.query(D.ClassSession).filter_by(tenant_id=TENANT, faculty_id=staff.id).order_by(D.ClassSession.session_date, D.ClassSession.start_time).all()
-    return {"sessions": [_session_payload(x) for x in rows]}
-
-
-@router.post("/portal/faculty/class-sessions/{session_id}/check-in")
-def faculty_check_in_session(session_id: str, ctx=Depends(auth), s=Depends(db)):
-    staff = s.query(D.StaffMember).filter_by(user_id=ctx["sub"]).first(); x = s.query(D.ClassSession).get(session_id)
-    if not staff or not x or x.faculty_id != staff.id: raise HTTPException(403, "This class session is not assigned to you")
-    if x.status != "Open": raise HTTPException(409, "Only open sessions can be checked in")
-    if s.query(D.ClassSessionCheckIn).filter_by(session_id=x.id).first(): raise HTTPException(409, "Session is already checked in")
-    s.add(D.ClassSessionCheckIn(id=uid(), tenant_id=TENANT, session_id=x.id, faculty_id=staff.id, created_by=ctx["sub"])); x.status="In Progress"; x.updated_by=ctx["sub"]; x.updated_at=datetime.utcnow(); s.commit(); write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"class_session.check_in",f"class_session:{x.id}","Open","In Progress","Faculty checked in"); return {"session": _session_payload(x)}
-
-
-@router.post("/portal/faculty/class-sessions/{session_id}/complete")
-def faculty_complete_session(session_id: str, ctx=Depends(auth), s=Depends(db)):
-    staff = s.query(D.StaffMember).filter_by(user_id=ctx["sub"]).first(); x = s.query(D.ClassSession).get(session_id)
-    if not staff or not x or x.faculty_id != staff.id: raise HTTPException(403, "This class session is not assigned to you")
-    if x.status != "In Progress": raise HTTPException(409, "Only in-progress sessions can be completed")
-    x.status="Completed"; x.updated_by=ctx["sub"]; x.updated_at=datetime.utcnow(); s.commit(); write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"class_session.complete",f"class_session:{x.id}","In Progress","Completed","Faculty completed class session"); return {"session": _session_payload(x)}
-
-
 @router.get("/academics/section/{section_id}/assignments")
 def section_assignments(section_id: str, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view")[0])
-    require_academic_object(s, ctx, _section_or_404(s, section_id), "read", "Section")
     rows = (s.query(D.Assignment)
-            .filter(D.Assignment.tenant_id == ctx["tenant_id"], D.Assignment.section_id == section_id)
+            .filter(D.Assignment.section_id == section_id)
             .order_by(desc(D.Assignment.due_at), desc(D.Assignment.assigned_at)).all())
     return {"assignments": [{
         "id": row.id,
@@ -4176,12 +2024,12 @@ class AssignmentIn(BaseModel):
 def create_assignment(section_id: str, body: AssignmentIn, ctx=Depends(auth), s=Depends(db)):
     dec, _ = gate(s, ctx, "academics", "create_task")
     require(dec)
-    section = require_academic_object(s, ctx, _section_or_404(s, section_id), "create", "Section")
+    section = _section_or_404(s, ctx, section_id)
     if not _can_manage_section_for_tasks(s, ctx, section):
         raise HTTPException(403, "You cannot create tasks for this section")
     who = actor_name(s, ctx)
     row = D.Assignment(
-        id=uid(), tenant_id=TENANT, section_id=section.id,
+        id=uid(), tenant_id=ctx["tenant_id"], section_id=section.id,
         title=body.title.strip(), description=body.description.strip(),
         assigned_at=datetime.utcnow(),
         due_at=datetime.fromisoformat(body.due_at) if body.due_at else None,
@@ -4200,10 +2048,10 @@ def create_assignment(section_id: str, body: AssignmentIn, ctx=Depends(auth), s=
 def update_assignment(assignment_id: str, body: AssignmentIn, ctx=Depends(auth), s=Depends(db)):
     dec, _ = gate(s, ctx, "academics", "edit_task")
     require(dec)
-    row = s.query(D.Assignment).filter(D.Assignment.tenant_id == ctx["tenant_id"], D.Assignment.id == assignment_id).first()
+    row = s.query(D.Assignment).filter(D.Assignment.id == assignment_id, D.Assignment.tenant_id == ctx["tenant_id"]).first()
     if not row:
         raise HTTPException(404, "Assignment not found")
-    section = require_academic_object(s, ctx, _section_or_404(s, row.section_id), "edit", "Section")
+    section = _section_or_404(s, ctx, row.section_id)
     if not _can_manage_section_for_tasks(s, ctx, section):
         raise HTTPException(403, "You cannot update tasks for this section")
     prev_state = row.status
@@ -4232,28 +2080,6 @@ class AnnouncementIn(BaseModel):
     expires_at: str = ""
 
 
-def _announcement_payload(s, row):
-    department = s.get(D.Department, row.department_id) if row.department_id else None
-    program = s.get(D.Program, row.program_id) if row.program_id else None
-    section = s.get(D.Section, row.section_id) if row.section_id else None
-    return {"id": row.id, "title": row.title, "body": row.body, "audience": row.audience,
-            "department": department.name if department else "", "program": program.name if program else "",
-            "section": section.section_code if section else "", "status": row.status,
-            "created_by": row.created_by, "owner_office_n": row.owner_office_n,
-            "published_at": row.published_at.isoformat() if row.published_at else "",
-            "expires_at": row.expires_at.isoformat() if row.expires_at else "",
-            "created_at": row.created_at.isoformat() if row.created_at else "",
-            "updated_at": row.updated_at.isoformat() if row.updated_at else ""}
-
-
-@router.get("/academics/announcements")
-def list_academic_announcements(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view")[0])
-    rows = s.query(D.Announcement).filter_by(tenant_id=TENANT).order_by(desc(D.Announcement.created_at)).all()
-    return {"announcements": [_announcement_payload(s, row) for row in rows],
-            "can_publish": can(s, ctx, "academics", "publish_announcement")}
-
-
 @router.post("/academics/announcements")
 def create_announcement(body: AnnouncementIn, ctx=Depends(auth), s=Depends(db)):
     dec, _ = gate(s, ctx, "academics", "publish_announcement")
@@ -4261,7 +2087,7 @@ def create_announcement(body: AnnouncementIn, ctx=Depends(auth), s=Depends(db)):
     who = actor_name(s, ctx)
     audience = (body.audience or "department").strip().lower()
     row = D.Announcement(
-        id=uid(), tenant_id=TENANT, title=body.title.strip(), body=body.body.strip(),
+        id=uid(), tenant_id=ctx["tenant_id"], title=body.title.strip(), body=body.body.strip(),
         audience=audience, campus="", department_id=body.department_id, program_id=body.program_id,
         section_id=body.section_id, student_id=body.student_id, published_at=datetime.utcnow(),
         expires_at=datetime.fromisoformat(body.expires_at) if body.expires_at else None,
@@ -4281,13 +2107,13 @@ def create_announcement(body: AnnouncementIn, ctx=Depends(auth), s=Depends(db)):
 @router.get("/attendance/sections")
 def attendance_sections(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "attendance", "view")[0])
-    course_map = {c.id: (c.code, c.title) for c in scoped_academic_query(s, D.Course, ctx).all()}
-    rows = scoped_academic_query(s, D.Section, ctx).limit(100).all()
+    course_map = {c.id: (c.code, c.title) for c in s.query(D.Course).filter(D.Course.tenant_id == ctx["tenant_id"]).all()}
+    rows = s.query(D.Section).filter(D.Section.tenant_id == ctx["tenant_id"]).limit(100).all()
     out = []
     for r in rows:
         cc, ct = course_map.get(r.course_id, ("", ""))
-        total = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.section_id == r.id).count()
-        present = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.section_id == r.id,
+        total = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.tenant_id == ctx["tenant_id"], D.AttendanceRecord.section_id == r.id).count()
+        present = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.tenant_id == ctx["tenant_id"], D.AttendanceRecord.section_id == r.id,
                                                      D.AttendanceRecord.present == True).count()
         pct = round(100 * present / total) if total else None
         out.append({"id": r.id, "course_code": cc, "course_title": ct,
@@ -4297,124 +2123,81 @@ def attendance_sections(ctx=Depends(auth), s=Depends(db)):
 
 
 @router.get("/attendance/roster/{section_id}")
-def attendance_roster(section_id: str, class_session_id: str = "", ctx=Depends(auth), s=Depends(db)):
+def attendance_roster(section_id: str, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "attendance", "view")[0])
-    require_academic_object(s, ctx, _section_or_404(s, section_id), "read", "Section")
-    session = _session_or_404(s, class_session_id) if class_session_id else None
-    if session:
-        staff = _faculty_or_403(s, ctx)
-        if session.section_id != section_id or session.faculty_id != staff.id or not faculty_owns_section(s, staff.id, section_id, session.session_date):
-            raise HTTPException(403, "You are not assigned to this class session")
-        if not session.checked_in_at:
-            raise HTTPException(409, "Check in to this class session before opening its roster")
+    _section_or_404(s, ctx, section_id)
     enr = s.query(D.Enrollment).filter(D.Enrollment.tenant_id == ctx["tenant_id"], D.Enrollment.section_id == section_id,
                                        D.Enrollment.status == "enrolled").all()
-    stu_map = {st.id: st for st in s.query(D.Student).all()}
+    stu_map = {st.id: st for st in s.query(D.Student).filter(D.Student.tenant_id == ctx["tenant_id"]).all()}
     out = []
     for e in enr:
         st = stu_map.get(e.student_id)
         if not st:
             continue
-        total = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.section_id == section_id,
+        total = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.tenant_id == ctx["tenant_id"], D.AttendanceRecord.section_id == section_id,
                                                    D.AttendanceRecord.student_id == st.id).count()
-        present = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.section_id == section_id,
+        present = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.tenant_id == ctx["tenant_id"], D.AttendanceRecord.section_id == section_id,
                                                      D.AttendanceRecord.student_id == st.id,
                                                      D.AttendanceRecord.present == True).count()
-        record = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.class_session_id == session.id, D.AttendanceRecord.student_id == st.id).first() if session else None
         out.append({"student_id": st.id, "roll_no": st.roll_no, "name": st.name,
                     "present": present, "total": total,
-                    "pct": round(100 * present / total) if total else None,
-                    "attendance_record_id": record.id if record else "",
-                    "session_status": record.status if record else ""})
+                    "pct": round(100 * present / total) if total else None})
     return {"roster": out, "can_mark": can(s, ctx, "attendance", "mark")}
 
 
 class MarkAttendanceIn(BaseModel):
     section_id: str
-    session_id: str = ""
-    class_session_id: str
     present_ids: list[str] = []
     absent_ids: list[str] = []
-    statuses: dict[str, str] = {}
     on_date: str = ""
+
+
 @router.post("/attendance/mark")
 def mark_attendance(body: MarkAttendanceIn, ctx=Depends(auth), s=Depends(db)):
     dec, verb = gate(s, ctx, "attendance", "mark")
     require(dec)
-    section = require_academic_object(s, ctx, _section_or_404(s, body.section_id), "edit", "Section")
-    enrolled_ids = {row.student_id for row in s.query(D.Enrollment).filter(D.Enrollment.tenant_id == ctx["tenant_id"], D.Enrollment.section_id == section.id, D.Enrollment.status == "enrolled").all()}
-    if set(body.present_ids).union(body.absent_ids) - enrolled_ids:
-        raise HTTPException(403, "Attendance includes a student outside this section")
     d = date.fromisoformat(body.on_date) if body.on_date else date.today()
-    session = s.query(D.ClassSession).get(body.session_id) if body.session_id else None
-    if body.session_id and (not session or session.section_id != body.section_id or session.status in {"Cancelled", "Completed"} or session.status != "In Progress"): raise HTTPException(409, "Attendance requires a valid in-progress class session for this section")
-    if session:
-        staff = s.query(D.StaffMember).filter_by(user_id=ctx["sub"]).first()
-        if not staff or session.faculty_id != staff.id: raise HTTPException(403, "Only the assigned faculty may mark this session attendance")
-    staff = _faculty_or_403(s, ctx)
-    session = _session_or_404(s, body.class_session_id)
-    if session.section_id != body.section_id:
-        raise HTTPException(422, "Class session does not belong to this section")
-    if session.faculty_id != staff.id or not faculty_owns_section(s, staff.id, body.section_id, session.session_date):
-        raise HTTPException(403, "You are not assigned to this class session")
-    if not session.checked_in_at:
-        raise HTTPException(409, "Check in to this class session before marking attendance")
-    if session.status == "attendance_finalized":
-        raise HTTPException(409, "Attendance is finalized; use the correction workflow when it is available")
-    if session.status in {"cancelled", "completed"}:
-        raise HTTPException(409, "Attendance cannot be recorded for this session")
-    d = date.fromisoformat(body.on_date) if body.on_date else session.session_date
-    if d != session.session_date:
-        raise HTTPException(422, "Attendance date must match the selected class session")
-    if not _checkin_window_open(session, datetime.utcnow()):
-        raise HTTPException(422, "Attendance marking is outside the allowed session window")
     who = actor_name(s, ctx)
-    roster_ids = {row.student_id for row in s.query(D.Enrollment).filter(D.Enrollment.section_id == body.section_id, D.Enrollment.status == "enrolled").all()}
-    raw_statuses = dict(body.statuses)
-    raw_statuses.update({student_id: "present" for student_id in body.present_ids})
-    raw_statuses.update({student_id: "absent" for student_id in body.absent_ids})
-    allowed_statuses = {"present", "absent", "late", "excused"}
-    if not raw_statuses or not set(raw_statuses).issubset(roster_ids):
-        raise HTTPException(422, "Attendance may only be recorded for active students in this section")
-    if any(status.lower() not in allowed_statuses for status in raw_statuses.values()):
-        raise HTTPException(422, "Attendance status must be Present, Absent, Late or Excused")
+    section = _section_or_404(s, ctx, body.section_id)
 
-    def upsert(student_id: str, status: str):
+    def upsert(student_id: str, present: bool):
         row = (
             s.query(D.AttendanceRecord)
-            .filter(D.AttendanceRecord.class_session_id == session.id,
-                    D.AttendanceRecord.student_id == student_id)
+            .filter(
+                D.AttendanceRecord.tenant_id == ctx["tenant_id"],
+                D.AttendanceRecord.section_id == body.section_id,
+                D.AttendanceRecord.student_id == student_id,
+                D.AttendanceRecord.on_date == d,
+            )
             .first()
         )
-        if row and row.finalized_at:
-            raise HTTPException(409, "Attendance is finalized; use the correction workflow when it is available")
         if row is None:
             row = D.AttendanceRecord(
                 id=uid(),
-                tenant_id=TENANT,
+                tenant_id=ctx["tenant_id"],
                 section_id=body.section_id,
-                session_id=body.session_id or None,
                 student_id=student_id,
                 on_date=d,
-                class_session_id=session.id,
             )
             s.add(row)
-        normalized = status.lower()
-        row.present = normalized in {"present", "late", "excused"}
-        row.status = normalized
+        row.present = present
+        row.status = "present" if present else "absent"
         row.note = ""
         row.marked_by = who
-        row.version_no = (row.version_no or 0) + 1 if row.id else 1
         row.updated_at = datetime.utcnow()
 
-    for sid, status in raw_statuses.items():
-        upsert(sid, status)
+    for sid in body.present_ids:
+        upsert(sid, True)
+    for sid in body.absent_ids:
+        upsert(sid, False)
     s.commit()
-    n = len(raw_statuses)
+    n = len(body.present_ids) + len(body.absent_ids)
     write_audit(s, ctx["sub"], who, ctx["office_n"], "attendance.mark",
                 f"section:{body.section_id}", "", "recorded",
                 f"Marked {n} students on {d.isoformat()}")
     return {"marked": n, "decision": dec.as_dict()}
+
+
 # --------------------------------------------------------------------------- #
 #  EXAMINATIONS: marks entry + result publication (SoD-separated)
 # --------------------------------------------------------------------------- #
@@ -4426,7 +2209,7 @@ def _academic_year_for_datetime(dt_value):
 
 
 def _section_semester(s, section):
-    course = s.query(D.Course).get(section.course_id) if section and section.course_id else None
+    course = s.get(D.Course, section.course_id) if section and section.course_id else None
     return course.semester if course else None
 
 
@@ -4449,8 +2232,242 @@ def _can_manage_section_for_exam_timetable(s, ctx, section):
 
 
 def _exam_scoped_sections(s, ctx):
-    rows = s.query(D.Section).all()
+    query = s.query(D.Section).filter(D.Section.tenant_id == ctx["tenant_id"])
+    campus = _authenticated_campus_scope(s, ctx)
+    if campus is not None:
+        # Historic sections without canonical ownership are intentionally not
+        # exposed to a campus actor until the safe migration can identify them.
+        query = query.filter(D.Section.campus_scope_id == campus.id)
+    rows = query.all()
     return [row for row in rows if _can_view_exam_section(s, ctx, row)]
+
+
+def _exam_section_or_404(s, ctx, section_id):
+    """Load one examination section within the authenticated tenant/campus."""
+    section = (s.query(D.Section)
+               .filter(D.Section.id == section_id, D.Section.tenant_id == ctx["tenant_id"])
+               .first())
+    if not section:
+        raise HTTPException(404, "Section not found")
+    campus = _authenticated_campus_scope(s, ctx)
+    if campus is not None and section.campus_scope_id != campus.id:
+        raise HTTPException(404, "Section not found")
+    if not _can_view_exam_section(s, ctx, section):
+        raise HTTPException(403, "You cannot view examinations for this section")
+    return section, campus
+
+
+def _exam_marks_status(total_students, entered, published, assessment):
+    # New records persist the lifecycle; legacy records retain their truthful
+    # derived state until an authorised workflow is started for them.
+    if getattr(assessment, "marks_state", None):
+        return assessment.marks_state
+    if assessment.status == "cancelled":
+        return "cancelled"
+    if assessment.locked:
+        return "locked"
+    if not total_students:
+        return "no_roster"
+    if not entered:
+        return "not_started"
+    if published == total_students:
+        return "published"
+    if entered < total_students:
+        return "in_progress"
+    return "entered"
+
+
+def _exam_register_marks_states(statuses):
+    """Expose each persisted assessment state without mislabelling a section."""
+    unique = list(dict.fromkeys(statuses))
+    if not unique:
+        return "no_assessments", unique
+    return (unique[0] if len(unique) == 1 else "mixed"), unique
+
+
+def _exam_academic_years(assessments, result=None, schedules=None):
+    """Return only academic years stored on exam records, never today's year."""
+    values = [row.academic_year for row in assessments if (row.academic_year or "").strip()]
+    if result and (result.academic_year or "").strip():
+        values.append(result.academic_year)
+    values.extend(row.academic_year for row in (schedules or []) if (row.academic_year or "").strip())
+    return list(dict.fromkeys(value.strip() for value in values if value and value.strip()))
+
+
+def _exam_faculty_by_id(s, tenant_id, campus_scope_id, faculty_ids):
+    """Resolve faculty only from the parent section's tenant and campus."""
+    if not faculty_ids:
+        return {}
+    query = (s.query(D.StaffMember)
+             .filter(D.StaffMember.tenant_id == tenant_id,
+                     D.StaffMember.id.in_(faculty_ids)))
+    if campus_scope_id:
+        query = query.filter(D.StaffMember.campus_scope_id == campus_scope_id)
+    return {row.id: {"id": row.id, "name": row.name, "designation": row.designation}
+            for row in query.all()}
+
+
+def _exam_workflow_owner(s, tenant_id, campus_scope_id, office_n, dept_id=None):
+    """Find one active, tenant/campus-authorised exam workflow owner."""
+    query = (s.query(User)
+             .join(AuthorityMembership, AuthorityMembership.user_id == User.id)
+             .filter(User.tenant_id == tenant_id, User.office_n == office_n,
+                     User.status == "active", AuthorityMembership.tenant_id == tenant_id,
+                     AuthorityMembership.office_n == office_n,
+                     AuthorityMembership.status == "active"))
+    if campus_scope_id:
+        query = query.filter(AuthorityMembership.org_scope_id == campus_scope_id)
+    if office_n == 10 and dept_id:
+        query = query.join(D.StaffMember, D.StaffMember.user_id == User.id).filter(
+            D.StaffMember.tenant_id == tenant_id, D.StaffMember.dept_id == dept_id)
+    return query.order_by(User.id).first()
+
+
+def _exam_workflow_payload(s, workflow):
+    assessment = (s.query(D.Assessment)
+                  .filter(D.Assessment.workflow_id == workflow.id,
+                          D.Assessment.tenant_id == workflow.tenant_id).first())
+    return assessment
+
+
+def _assessment_roster_ids(s, tenant_id, section_id):
+    return {row.student_id for row in s.query(D.Enrollment).filter(
+        D.Enrollment.tenant_id == tenant_id, D.Enrollment.section_id == section_id,
+        D.Enrollment.status == "enrolled").all()}
+
+
+def _notify_exam_owner(s, owner, title, body, tenant_id):
+    if owner:
+        notify(s, owner.id, title, body, severity="action", tenant_id=tenant_id)
+
+
+def _start_or_resubmit_marks_workflow(s, assessment, section, ctx):
+    """Persist the Faculty -> HOD -> Controller ownership chain."""
+    who = actor_name(s, ctx)
+    hod = _exam_workflow_owner(s, ctx["tenant_id"], section.campus_scope_id, 10, section.dept_id)
+    if not hod:
+        raise HTTPException(409, "No active HOD is assigned to this campus for marks verification")
+    if assessment.workflow_id:
+        workflow = (s.query(WorkflowInstance)
+                    .filter(WorkflowInstance.id == assessment.workflow_id,
+                            WorkflowInstance.tenant_id == ctx["tenant_id"]).first())
+        if not workflow or workflow.state != "returned" or workflow.current_owner_user_id != ctx["sub"]:
+            raise HTTPException(409, "This assessment is already in an examination workflow")
+        previous_state = workflow.state
+        workflow.state = "submitted"
+        workflow.current_stage = 1
+        workflow.current_owner_office_n = 10
+        workflow.current_owner_user_id = hod.id
+        workflow.updated_at = datetime.utcnow()
+        action = "marks.resubmit"
+    else:
+        workflow = WorkflowInstance(
+            id=uid(), tenant_id=ctx["tenant_id"], process_key="marks_submission",
+            label="Marks submission", office_n=16,
+            title=f"{assessment.name} — Section {section.section_code}", state="submitted",
+            initiator_id=ctx["sub"], initiator_name=who, current_stage=1,
+            scope_level="campus", campus_scope_id=section.campus_scope_id,
+            current_owner_office_n=10, current_owner_user_id=hod.id,
+            created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
+        )
+        s.add(workflow)
+        # Assessment.workflow_id is protected by a database foreign key.
+        # Flush the new workflow first because there is no ORM relationship
+        # for SQLAlchemy to infer this insertion order from.
+        s.flush()
+        assessment.workflow_id = workflow.id
+        previous_state = assessment.marks_state or "draft"
+        action = "marks.submit"
+    assessment.marks_state = "submitted"
+    assessment.updated_at = datetime.utcnow()
+    s.commit()
+    write_audit(s, ctx["sub"], who, ctx["office_n"], action,
+                f"assessment:{assessment.id}", previous_state, "submitted",
+                f"Marks submitted for verification; workflow {workflow.id}",
+                tenant_id=ctx["tenant_id"], campus_scope_id=section.campus_scope_id)
+    _notify_exam_owner(s, hod, "Marks verification required",
+                       f"{assessment.name} for Section {section.section_code} is ready for HOD verification.",
+                       ctx["tenant_id"])
+    return workflow
+
+
+def decide_marks_submission_workflow(workflow, action: str, reason: str, ctx, s):
+    """Apply a marks-workflow action and synchronise its Assessment state.
+
+    This is invoked by the generic workflow endpoint, so the normal My
+    Approvals inbox remains the actionable HOD/Controller interface.
+    """
+    assessment = _exam_workflow_payload(s, workflow)
+    if not assessment:
+        raise HTTPException(409, "The marks workflow is not linked to an assessment")
+    section, _campus = _exam_section_or_404(s, ctx, assessment.section_id)
+    if workflow.current_owner_user_id != ctx["sub"]:
+        raise HTTPException(403, "This marks workflow is assigned to another authorised user")
+    expected_office = 10 if workflow.current_stage == 1 else 16 if workflow.current_stage == 2 else None
+    if expected_office is None or ctx["office_n"] != expected_office:
+        raise HTTPException(403, "You are not authorised for this marks workflow stage")
+    if expected_office == 10:
+        staff = _staff_profile(s, ctx)
+        if not staff or staff.dept_id != section.dept_id:
+            raise HTTPException(403, "Only the section's HOD may verify these marks")
+    if action not in {"review", "approve", "return", "reject"}:
+        raise HTTPException(400, "Unsupported marks workflow action")
+    if action in {"return", "reject"} and not (reason or "").strip():
+        raise HTTPException(400, "A reason is required when returning or rejecting marks")
+    decision, _ = gate(s, ctx, "examinations", "moderate")
+    require(decision)
+    previous_state, previous_stage = assessment.marks_state, workflow.current_stage
+    who = actor_name(s, ctx)
+    stage_label = "HOD verification" if workflow.current_stage == 1 else "Controller of Exams"
+    approval_decision = {"review": "REVIEW", "approve": "ALLOW", "return": "RETURN", "reject": "DENY"}[action]
+    s.add(Approval(id=uid(), tenant_id=workflow.tenant_id, workflow_id=workflow.id,
+                   actor_id=ctx["sub"], actor_name=who, stage=workflow.current_stage,
+                   stage_label=stage_label, decision=approval_decision,
+                   authority=decision.authority, reason=(reason or "").strip()))
+    recipient = None
+    if action == "review":
+        workflow.state = "under_review"
+        if workflow.current_stage == 1:
+            assessment.marks_state = "under_verification"
+    elif action == "approve" and workflow.current_stage == 1:
+        recipient = _exam_workflow_owner(s, workflow.tenant_id, section.campus_scope_id, 16)
+        if not recipient:
+            raise HTTPException(409, "No active Examination Controller is assigned to this campus")
+        workflow.state, workflow.current_stage = "submitted", 2
+        workflow.current_owner_office_n, workflow.current_owner_user_id = 16, recipient.id
+        assessment.marks_state = "verified"
+    elif action == "approve":
+        workflow.state = "approved"
+        workflow.current_stage = 3
+        workflow.current_owner_office_n = None
+        workflow.current_owner_user_id = None
+        assessment.marks_state = "approved_for_publication"
+    elif action == "return":
+        recipient = s.get(User, workflow.initiator_id)
+        workflow.state, workflow.current_stage = "returned", 0
+        workflow.current_owner_office_n, workflow.current_owner_user_id = None, workflow.initiator_id
+        assessment.marks_state = "returned"
+    else:  # reject
+        recipient = s.get(User, workflow.initiator_id)
+        workflow.state = "rejected"
+        workflow.current_owner_office_n = None
+        workflow.current_owner_user_id = None
+        assessment.marks_state = "rejected"
+    workflow.updated_at = datetime.utcnow()
+    assessment.updated_at = datetime.utcnow()
+    s.commit()
+    write_audit(s, ctx["sub"], who, ctx["office_n"], f"marks.{action}",
+                f"assessment:{assessment.id}", previous_state, assessment.marks_state,
+                f"workflow {workflow.id}; stage {previous_stage} -> {workflow.current_stage}; {(reason or '').strip()}",
+                tenant_id=workflow.tenant_id, campus_scope_id=section.campus_scope_id)
+    if recipient:
+        verb = "returned" if action == "return" else "rejected" if action == "reject" else "verified"
+        _notify_exam_owner(s, recipient, f"Marks {verb}",
+                           f"{assessment.name} for Section {section.section_code}: {(reason or verb).strip()}",
+                           workflow.tenant_id)
+    return {"decision": decision.as_dict(), "workflow_id": workflow.id,
+            "assessment_id": assessment.id, "marks_state": assessment.marks_state,
+            "state": workflow.state}
 
 
 def _assessment_pct(score: float | None, max_marks: float | None):
@@ -4509,7 +2526,7 @@ def _recompute_student_cgpa(s, student_id: str):
     for row in rows:
         latest[row.subject_code] = row
     credit_rows = [row for row in latest.values() if (row.credits or 0) > 0 and row.grade_point is not None]
-    student = s.query(D.Student).get(student_id)
+    student = s.get(D.Student, student_id)
     if not student or not credit_rows:
         return
     total_credits = sum(float(row.credits or 0) for row in credit_rows)
@@ -4537,7 +2554,7 @@ def _sync_assessment_from_schedule(assessment, body, actor, section):
 def _write_schedule_history(s, schedule, actor, change_type, previous_state, note=""):
     history = D.ExamScheduleHistory(
         id=uid(),
-        tenant_id=TENANT,
+        tenant_id=schedule.tenant_id,
         schedule_id=schedule.id,
         assessment_id=schedule.assessment_id,
         change_type=change_type,
@@ -4597,7 +2614,7 @@ def _publish_section_subject_results(s, section, result_sheet, actor):
             continue
         marks_by_student.setdefault(mark.student_id, []).append((assessment, mark))
 
-    course = s.query(D.Course).get(section.course_id) if section.course_id else None
+    course = s.get(D.Course, section.course_id) if section.course_id else None
     published = 0
     now = datetime.utcnow()
     academic_year = (result_sheet.academic_year or _academic_year_for_datetime(now)).strip()
@@ -4622,11 +2639,11 @@ def _publish_section_subject_results(s, section, result_sheet, actor):
             .all()
         ]
         result_id = f"ssr_{result_sheet.id}_{enrollment.student_id}"
-        row = s.query(D.StudentSubjectResult).get(result_id)
+        row = s.get(D.StudentSubjectResult, result_id)
         if row is None:
             row = D.StudentSubjectResult(
                 id=result_id,
-                tenant_id=TENANT,
+                tenant_id=result_sheet.tenant_id,
                 student_id=enrollment.student_id,
                 attempt=(max(previous_attempts) if previous_attempts else 0) + 1,
             )
@@ -4656,50 +2673,251 @@ def _publish_section_subject_results(s, section, result_sheet, actor):
 @router.get("/exams/sections")
 def exam_sections(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "examinations", "view")[0])
-    course_map = {c.id: (c.code, c.title) for c in s.query(D.Course).all()}
+    course_map = {c.id: c for c in s.query(D.Course).filter(D.Course.tenant_id == ctx["tenant_id"]).all()}
+    departments = {d.id: d.name for d in s.query(D.Department).filter(D.Department.tenant_id == ctx["tenant_id"]).all()}
+    programs = {p.id: p.name for p in s.query(D.Program).filter(D.Program.tenant_id == ctx["tenant_id"]).all()}
     rows = _exam_scoped_sections(s, ctx)
+    campus = _authenticated_campus_scope(s, ctx)
+    faculty_by_id = _exam_faculty_by_id(s, ctx["tenant_id"], campus.id if campus else None,
+                                        {row.faculty_person_id for row in rows if row.faculty_person_id})
     out = []
     for r in rows:
-        cc, ct = course_map.get(r.course_id, ("", ""))
-        asmts = s.query(D.Assessment).filter(D.Assessment.section_id == r.id).count()
+        course = course_map.get(r.course_id)
+        assessment_rows = (s.query(D.Assessment)
+                           .filter(D.Assessment.tenant_id == ctx["tenant_id"], D.Assessment.section_id == r.id)
+                           .all())
+        asmts = len(assessment_rows)
         rs = (s.query(D.ResultSheet)
-              .filter(D.ResultSheet.section_id == r.id)
+              .filter(D.ResultSheet.tenant_id == ctx["tenant_id"], D.ResultSheet.section_id == r.id)
               .order_by(desc(D.ResultSheet.published_at), desc(D.ResultSheet.updated_at))
               .first())
-        out.append({"id": r.id, "course_code": cc, "course_title": ct,
+        students = s.query(D.Enrollment).filter(D.Enrollment.tenant_id == ctx["tenant_id"], D.Enrollment.section_id == r.id,
+                                                D.Enrollment.status == "enrolled").count()
+        marks_statuses = []
+        for assessment in assessment_rows:
+            entered = (s.query(D.Mark)
+                       .filter(D.Mark.tenant_id == ctx["tenant_id"], D.Mark.assessment_id == assessment.id).count())
+            published = (s.query(D.Mark)
+                         .filter(D.Mark.tenant_id == ctx["tenant_id"], D.Mark.assessment_id == assessment.id,
+                                 D.Mark.status == "published").count())
+            marks_statuses.append(_exam_marks_status(students, entered, published, assessment))
+        marks_status, marks_lifecycle_statuses = _exam_register_marks_states(marks_statuses)
+        schedules = (s.query(D.ExamScheduleEntry)
+                     .filter(D.ExamScheduleEntry.tenant_id == ctx["tenant_id"],
+                             D.ExamScheduleEntry.section_id == r.id,
+                             D.ExamScheduleEntry.is_active == True).all())
+        academic_years = _exam_academic_years(assessment_rows, rs, schedules)
+        marks_pending = sum(status in {"draft", "not_started", "in_progress", "returned", "under_verification", "submitted", "verified"}
+                            for status in marks_statuses)
+        ready_for_publication = bool(assessment_rows) and all(
+            status in {"approved_for_publication", "published", "cancelled"} for status in marks_statuses)
+        out.append({"id": r.id, "course_id": r.course_id, "course_code": course.code if course else "", "course_title": course.title if course else "",
                     "section": r.section_code, "assessments": asmts,
-                    "result_status": rs.status if rs else "none"})
+                    "department": departments.get(r.dept_id, ""),
+                    "program": programs.get(course.program_id, "") if course else "",
+                    "semester": course.semester if course else None, "students": students,
+                    "term": r.term, "faculty": faculty_by_id.get(r.faculty_person_id),
+                    "assessment_names": [assessment.name for assessment in assessment_rows if assessment.name],
+                    "academic_years": academic_years, "marks_status": marks_status,
+                    "marks_lifecycle_statuses": marks_lifecycle_statuses, "marks_pending": marks_pending,
+                    "marks_submitted": sum(status == "submitted" for status in marks_statuses),
+                    "marks_under_verification": sum(status == "under_verification" for status in marks_statuses),
+                    "marks_approved": sum(status == "approved_for_publication" for status in marks_statuses),
+                    "can_publish_result": ctx["office_n"] == 16 and ready_for_publication and (not rs or rs.status != "published"),
+                    "result_status": rs.status if rs else "not_started"})
+    # These are effective page permissions, not merely broad RBAC verbs. A
+    # Principal has read-only examination oversight even though the generic
+    # RBAC create/publish verbs may be available for other modules.
     return {"sections": out,
-            "can_enter_marks": can(s, ctx, "examinations", "enter_marks"),
-            "can_publish": can(s, ctx, "examinations", "publish_result"),
-            "can_publish_marks": can(s, ctx, "examinations", "publish_marks"),
-            "can_manage_timetable": can(s, ctx, "examinations", "manage_timetable")}
+            "permissions": {
+                "enter_marks": any(_can_manage_section_for_assessments(s, ctx, row) for row in rows)
+                               and can(s, ctx, "examinations", "enter_marks"),
+                "publish_result": ctx["office_n"] == 16 and can(s, ctx, "examinations", "publish_result"),
+                "publish_marks": any(_can_manage_section_for_assessments(s, ctx, row) for row in rows)
+                                 and can(s, ctx, "examinations", "publish_marks"),
+                "manage_timetable": any(_can_manage_section_for_exam_timetable(s, ctx, row) for row in rows)
+                                    and can(s, ctx, "examinations", "manage_timetable"),
+                "oversight": ctx["office_n"] in {4, 5, 6, 16},
+            },
+            "can_enter_marks": any(_can_manage_section_for_assessments(s, ctx, row) for row in rows)
+                               and can(s, ctx, "examinations", "enter_marks"),
+            "can_publish": ctx["office_n"] == 16 and can(s, ctx, "examinations", "publish_result"),
+            "can_publish_marks": any(_can_manage_section_for_assessments(s, ctx, row) for row in rows)
+                                 and can(s, ctx, "examinations", "publish_marks"),
+            "can_manage_timetable": any(_can_manage_section_for_exam_timetable(s, ctx, row) for row in rows)
+                                    and can(s, ctx, "examinations", "manage_timetable")}
 
 
 @router.get("/exams/assessments/{section_id}")
 def exam_assessments(section_id: str, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "examinations", "view")[0])
-    section = require_academic_object(s, ctx, _section_or_404(s, section_id), "read", "Section")
-    if not _can_view_exam_section(s, ctx, section):
-        raise HTTPException(403, "You cannot view examinations for this section")
+    section, _campus = _exam_section_or_404(s, ctx, section_id)
     schedule_by_assessment = {}
     for row in (s.query(D.ExamScheduleEntry)
-                .filter(D.ExamScheduleEntry.section_id == section_id, D.ExamScheduleEntry.is_active == True)
+                .filter(D.ExamScheduleEntry.tenant_id == ctx["tenant_id"],
+                        D.ExamScheduleEntry.section_id == section.id,
+                        D.ExamScheduleEntry.is_active == True)
                 .order_by(desc(D.ExamScheduleEntry.version_no), desc(D.ExamScheduleEntry.updated_at))
                 .all()):
         if row.assessment_id and row.assessment_id not in schedule_by_assessment:
             schedule_by_assessment[row.assessment_id] = row
-    rows = s.query(D.Assessment).filter(D.Assessment.section_id == section_id).order_by(D.Assessment.scheduled_at, D.Assessment.id).all()
+    rows = (s.query(D.Assessment)
+            .filter(D.Assessment.tenant_id == ctx["tenant_id"], D.Assessment.section_id == section.id)
+            .order_by(D.Assessment.scheduled_at, D.Assessment.id).all())
+    roster_query = (s.query(D.Student)
+                    .join(D.Enrollment, D.Enrollment.student_id == D.Student.id)
+                    .filter(D.Student.tenant_id == ctx["tenant_id"],
+                            D.Enrollment.tenant_id == ctx["tenant_id"],
+                            D.Enrollment.section_id == section.id,
+                            D.Enrollment.status == "enrolled"))
+    campus = _authenticated_campus_scope(s, ctx)
+    if campus is not None:
+        roster_query = roster_query.filter(D.Student.campus_scope_id == campus.id)
+    roster = roster_query.order_by(D.Student.roll_no).all()
+    can_manage = _can_manage_section_for_assessments(s, ctx, section) and can(s, ctx, "examinations", "enter_marks")
     return {"assessments": [{"id": a.id, "name": a.name, "max_marks": a.max_marks,
                              "locked": a.locked, "assessment_type": a.assessment_type,
                              "scheduled_at": a.scheduled_at.isoformat() if a.scheduled_at else "",
                              "end_at": a.end_at.isoformat() if a.end_at else "",
                              "published": a.published, "status": a.status,
+                             "marks_state": a.marks_state or "draft", "workflow_id": a.workflow_id or "",
                              "published_at": a.published_at.isoformat() if a.published_at else "",
-                             "entered": s.query(D.Mark).filter(D.Mark.assessment_id == a.id).count(),
-                             "published_marks": s.query(D.Mark).filter(D.Mark.assessment_id == a.id, D.Mark.status == "published").count(),
-                             "timetable_status": schedule_by_assessment.get(a.id).status if schedule_by_assessment.get(a.id) else a.status}
-                            for a in rows]}
+                             "entered": s.query(D.Mark).filter(D.Mark.tenant_id == ctx["tenant_id"], D.Mark.assessment_id == a.id).count(),
+                             "published_marks": s.query(D.Mark).filter(D.Mark.tenant_id == ctx["tenant_id"], D.Mark.assessment_id == a.id, D.Mark.status == "published").count(),
+                             "timetable_status": schedule_by_assessment.get(a.id).status if schedule_by_assessment.get(a.id) else a.status,
+                             "marks": [{"student_id": mark.student_id, "score": mark.score}
+                                       for mark in s.query(D.Mark).filter(D.Mark.tenant_id == ctx["tenant_id"], D.Mark.assessment_id == a.id).all()]}
+                            for a in rows],
+            "roster": [{"student_id": student.id, "roll_no": student.roll_no, "name": student.name}
+                       for student in roster],
+            "permissions": {"enter_marks": can_manage,
+                            "submit_marks": can_manage and any((a.marks_state or "draft") in {"draft", "returned"} for a in rows)}}
+
+
+@router.get("/exams/sections/{section_id}/oversight")
+def exam_section_oversight(section_id: str, ctx=Depends(auth), s=Depends(db)):
+    """Read-only, tenant/campus-safe examination evidence for oversight roles."""
+    require(gate(s, ctx, "examinations", "view")[0])
+    section, campus = _exam_section_or_404(s, ctx, section_id)
+    course = (s.query(D.Course).filter(D.Course.id == section.course_id,
+                                       D.Course.tenant_id == ctx["tenant_id"]).first())
+    department = (s.query(D.Department).filter(D.Department.id == section.dept_id,
+                                                D.Department.tenant_id == ctx["tenant_id"]).first())
+    program = (s.query(D.Program).filter(D.Program.id == course.program_id,
+                                         D.Program.tenant_id == ctx["tenant_id"]).first()
+               if course and course.program_id else None)
+    roster_query = (s.query(D.Student)
+                    .join(D.Enrollment, D.Enrollment.student_id == D.Student.id)
+                    .filter(D.Student.tenant_id == ctx["tenant_id"],
+                            D.Enrollment.tenant_id == ctx["tenant_id"],
+                            D.Enrollment.section_id == section.id,
+                            D.Enrollment.status == "enrolled"))
+    if campus is not None:
+        roster_query = roster_query.filter(D.Student.campus_scope_id == campus.id)
+    students = roster_query.order_by(D.Student.roll_no).all()
+    student_ids = [student.id for student in students]
+    assessments = (s.query(D.Assessment)
+                   .filter(D.Assessment.tenant_id == ctx["tenant_id"],
+                           D.Assessment.section_id == section.id)
+                   .order_by(D.Assessment.scheduled_at, D.Assessment.id).all())
+    assessment_ids = [assessment.id for assessment in assessments]
+    marks_by_assessment = {}
+    if assessment_ids and student_ids:
+        for mark in (s.query(D.Mark)
+                     .filter(D.Mark.tenant_id == ctx["tenant_id"],
+                             D.Mark.assessment_id.in_(assessment_ids),
+                             D.Mark.student_id.in_(student_ids)).all()):
+            marks_by_assessment.setdefault(mark.assessment_id, {})[mark.student_id] = mark
+    schedules = (s.query(D.ExamScheduleEntry)
+                 .filter(D.ExamScheduleEntry.tenant_id == ctx["tenant_id"],
+                         D.ExamScheduleEntry.section_id == section.id,
+                         D.ExamScheduleEntry.is_active == True)
+                 .order_by(D.ExamScheduleEntry.start_at, D.ExamScheduleEntry.id).all())
+    result = (s.query(D.ResultSheet)
+              .filter(D.ResultSheet.tenant_id == ctx["tenant_id"], D.ResultSheet.section_id == section.id)
+              .order_by(desc(D.ResultSheet.published_at), desc(D.ResultSheet.updated_at)).first())
+    faculty = _exam_faculty_by_id(s, ctx["tenant_id"], campus.id if campus else None,
+                                  {section.faculty_person_id} if section.faculty_person_id else set()).get(section.faculty_person_id)
+    workflow_ids = [assessment.workflow_id for assessment in assessments if assessment.workflow_id]
+    workflows = {}
+    if workflow_ids:
+        workflow_query = (s.query(WorkflowInstance)
+                          .filter(WorkflowInstance.tenant_id == ctx["tenant_id"],
+                                  WorkflowInstance.id.in_(workflow_ids)))
+        if campus is not None:
+            workflow_query = workflow_query.filter(WorkflowInstance.campus_scope_id == campus.id)
+        workflows = {workflow.id: workflow for workflow in workflow_query.all()}
+    owner_ids = {workflow.current_owner_user_id for workflow in workflows.values() if workflow.current_owner_user_id}
+    owner_users = {user.id: user for user in s.query(User).filter(User.tenant_id == ctx["tenant_id"], User.id.in_(owner_ids)).all()} if owner_ids else {}
+    owner_people = {person.id: person for person in s.query(Person).filter(Person.tenant_id == ctx["tenant_id"], Person.id.in_({user.person_id for user in owner_users.values()})).all()} if owner_users else {}
+
+    def workflow_owner(assessment):
+        workflow = workflows.get(assessment.workflow_id)
+        user = owner_users.get(workflow.current_owner_user_id) if workflow else None
+        person = owner_people.get(user.person_id) if user else None
+        return person.name if person else (user.username if user else "Unassigned")
+    assessment_payload = []
+    exceptions = []
+    for assessment in assessments:
+        marks = marks_by_assessment.get(assessment.id, {})
+        entered = len(marks)
+        published = sum(1 for mark in marks.values() if mark.status == "published")
+        status = _exam_marks_status(len(students), entered, published, assessment)
+        assessment_payload.append({
+            "id": assessment.id, "name": assessment.name, "type": assessment.assessment_type,
+            "max_marks": assessment.max_marks, "status": assessment.status,
+            "marks_state": assessment.marks_state or status, "workflow_id": assessment.workflow_id or "",
+            "scheduled_at": assessment.scheduled_at.isoformat() if assessment.scheduled_at else "",
+            "entered": entered, "published_marks": published, "marks_status": status,
+            "marks": [{"student_id": student.id, "roll_no": student.roll_no, "name": student.name,
+                       "score": marks[student.id].score if student.id in marks else None,
+                       "mark_status": marks[student.id].status if student.id in marks else "not_entered"}
+                      for student in students],
+        })
+        if status in {"draft", "not_started", "in_progress", "returned", "submitted", "under_verification", "verified"}:
+            exceptions.append({"severity": "warning", "section_id": section.id,
+                               "issue": f"{assessment.name}: marks are {status.replace('_', ' ')}.",
+                               "current_owner": workflow_owner(assessment),
+                               "required_action": "Complete, verify, or return marks through the assigned workflow", "status": status})
+    if not assessments:
+        exceptions.append({"severity": "info", "section_id": section.id,
+                           "issue": "No assessments are configured for this section.",
+                           "current_owner": "Unassigned",
+                           "required_action": "Configure assessments if required", "status": "no_assessments"})
+    if assessments and (not result or result.status != "published"):
+        exceptions.append({"severity": "info", "section_id": section.id,
+                           "issue": "Results are awaiting publication.",
+                           "current_owner": "Unassigned",
+                           "required_action": "Review and publish when authorised", "status": "result_pending"})
+    audit_entities = [f"section:{section.id}"] + [f"assessment:{item.id}" for item in assessments]
+    audit_rows = (s.query(AuditLog)
+                  .filter(AuditLog.tenant_id == ctx["tenant_id"],
+                          AuditLog.entity.in_(audit_entities))
+                  .order_by(desc(AuditLog.created_at)).limit(30).all())
+    if campus is not None:
+        audit_rows = [row for row in audit_rows if row.campus_scope_id == campus.id]
+    return {
+        "section": {"id": section.id, "course_code": course.code if course else "",
+                    "course_title": course.title if course else "", "department": department.name if department else "",
+                    "program": program.name if program else "", "section": section.section_code,
+                    "term": section.term, "semester": course.semester if course else None,
+                    "academic_year": (_exam_academic_years(assessments, result, schedules) or ["Not recorded"])[0],
+                    "academic_years": _exam_academic_years(assessments, result, schedules),
+                    "faculty": faculty, "students": len(students), "campus_scope_id": section.campus_scope_id},
+        "assessments": assessment_payload,
+        "result": {"status": result.status if result else "not_started",
+                   "published_at": result.published_at.isoformat() if result and result.published_at else "",
+                   "published_by": result.published_by if result else ""},
+        "timetable": [{"id": row.id, "exam_type": row.exam_type, "start_at": row.start_at.isoformat() if row.start_at else "",
+                       "end_at": row.end_at.isoformat() if row.end_at else "", "venue": row.venue,
+                       "status": row.status} for row in schedules],
+        "exceptions": exceptions,
+        "audit": [{"action": row.action, "actor": row.actor_name, "previous": row.prev_state,
+                   "current": row.new_state, "at": row.created_at.isoformat() if row.created_at else ""}
+                  for row in audit_rows],
+        "limitations": {"malpractice": "Unavailable: no malpractice case register is modelled.",
+                        "revaluation": "Unavailable: no revaluation case record is modelled."},
+    }
 
 
 class AssessmentUpsertIn(BaseModel):
@@ -4718,12 +2936,12 @@ class AssessmentUpsertIn(BaseModel):
 def create_assessment(body: AssessmentUpsertIn, ctx=Depends(auth), s=Depends(db)):
     dec, _ = gate(s, ctx, "examinations", "create_assessment")
     require(dec)
-    section = require_academic_object(s, ctx, _section_or_404(s, body.section_id), "create", "Section")
+    section, _campus = _exam_section_or_404(s, ctx, body.section_id)
     if not _can_manage_section_for_assessments(s, ctx, section):
         raise HTTPException(403, "You cannot create assessments for this section")
     who = actor_name(s, ctx)
     row = D.Assessment(
-        id=uid(), tenant_id=TENANT, section_id=section.id, name=body.name.strip(),
+        id=uid(), tenant_id=ctx["tenant_id"], section_id=section.id, name=body.name.strip(),
         max_marks=body.max_marks, weight=1.0, locked=False,
         assessment_type=(body.assessment_type or "quiz").strip().lower(),
         scheduled_at=datetime.fromisoformat(body.scheduled_at) if body.scheduled_at else None,
@@ -4737,12 +2955,14 @@ def create_assessment(body: AssessmentUpsertIn, ctx=Depends(auth), s=Depends(db)
         updated_at=datetime.utcnow(),
         published_at=datetime.utcnow() if body.published else None,
         published_by=who if body.published else "",
+        marks_state="draft",
     )
     s.add(row)
     s.commit()
     write_audit(s, ctx["sub"], who, ctx["office_n"], "assessment.create",
                 f"assessment:{row.id}", "", row.status,
-                f"Created assessment '{row.name}' for section {section.section_code}")
+                f"Created assessment '{row.name}' for section {section.section_code}",
+                tenant_id=ctx["tenant_id"], campus_scope_id=section.campus_scope_id)
     return {"id": row.id, "decision": dec.as_dict()}
 
 
@@ -4750,12 +2970,14 @@ def create_assessment(body: AssessmentUpsertIn, ctx=Depends(auth), s=Depends(db)
 def update_assessment(assessment_id: str, body: AssessmentUpsertIn, ctx=Depends(auth), s=Depends(db)):
     dec, _ = gate(s, ctx, "examinations", "edit_assessment")
     require(dec)
-    row = s.query(D.Assessment).get(assessment_id)
+    row = s.query(D.Assessment).filter(D.Assessment.id == assessment_id, D.Assessment.tenant_id == ctx["tenant_id"]).first()
     if not row:
         raise HTTPException(404, "Assessment not found")
-    section = _section_or_404(s, row.section_id)
+    section, _campus = _exam_section_or_404(s, ctx, row.section_id)
     if not _can_manage_section_for_assessments(s, ctx, section):
         raise HTTPException(403, "You cannot update assessments for this section")
+    if (row.marks_state or "draft") not in {"draft", "returned"}:
+        raise HTTPException(409, "Assessment configuration cannot change after marks submission")
     prev_state = row.status
     row.name = body.name.strip()
     row.max_marks = body.max_marks
@@ -4774,29 +2996,32 @@ def update_assessment(assessment_id: str, body: AssessmentUpsertIn, ctx=Depends(
     s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "assessment.create",
                 f"assessment:{row.id}", prev_state, row.status,
-                f"Updated assessment '{row.name}'")
+                f"Updated assessment '{row.name}'", tenant_id=ctx["tenant_id"],
+                campus_scope_id=section.campus_scope_id)
     return {"id": row.id, "decision": dec.as_dict()}
 
 
 class EnterMarksIn(BaseModel):
     assessment_id: str
     marks: dict  # {student_id: score}
-MARKS_EDITABLE_STATES = {"draft", "returned"}
+
 
 @router.post("/exams/marks")
 def enter_marks(body: EnterMarksIn, ctx=Depends(auth), s=Depends(db)):
     dec, verb = gate(s, ctx, "examinations", "enter_marks")
     require(dec)
-    a = s.query(D.Assessment).get(body.assessment_id)
+    a = s.query(D.Assessment).filter(D.Assessment.id == body.assessment_id, D.Assessment.tenant_id == ctx["tenant_id"]).first()
     if not a:
         raise HTTPException(400, "Unknown assessment")
-    section = _section_or_404(s, a.section_id)
+    section, _campus = _exam_section_or_404(s, ctx, a.section_id)
     if not _can_manage_section_for_assessments(s, ctx, section):
         raise HTTPException(403, "You cannot enter marks for this section")
     if a.locked:
         raise HTTPException(409, "Assessment is locked; marks cannot be changed")
-    if (a.marks_state or "draft") not in MARKS_EDITABLE_STATES:
-        raise HTTPException(409, "Marks are submitted for review and cannot be edited")
+    if a.status == "cancelled":
+        raise HTTPException(409, "Cancelled assessments are closed for marks entry")
+    if (a.marks_state or "draft") not in {"draft", "returned"}:
+        raise HTTPException(409, "Marks are no longer open for entry at their current workflow stage")
     who = actor_name(s, ctx)
     valid_student_ids = {
         row.student_id
@@ -4807,163 +3032,78 @@ def enter_marks(body: EnterMarksIn, ctx=Depends(auth), s=Depends(db)):
     for stu_id, score in body.marks.items():
         if stu_id not in valid_student_ids:
             raise HTTPException(400, "Marks can be entered only for students enrolled in this section")
+        if isinstance(score, bool):
+            raise HTTPException(422, "Marks must be a numeric score")
         try:
-            score = float(score)
+            numeric_score = float(score)
         except (TypeError, ValueError):
-            raise HTTPException(422, "Marks must be numeric")
-        if score < 0 or score > a.max_marks:
+            raise HTTPException(422, "Marks must be a numeric score")
+        if numeric_score < 0 or numeric_score > float(a.max_marks):
             raise HTTPException(422, f"Marks must be between 0 and {a.max_marks}")
-        existing = s.query(D.Mark).filter(D.Mark.assessment_id == a.id,
+        existing = s.query(D.Mark).filter(D.Mark.tenant_id == ctx["tenant_id"], D.Mark.assessment_id == a.id,
                                           D.Mark.student_id == stu_id).first()
         if existing:
-            existing.score = score
+            existing.score = numeric_score
             existing.status = "draft"
             existing.updated_at = datetime.utcnow()
         else:
-            s.add(D.Mark(id=uid(), tenant_id=TENANT, assessment_id=a.id,
-                          student_id=stu_id, score=score, entered_by=who,
+            s.add(D.Mark(id=uid(), tenant_id=ctx["tenant_id"], assessment_id=a.id,
+                         student_id=stu_id, score=numeric_score, entered_by=who,
                          status="draft", updated_at=datetime.utcnow()))
     s.commit()
-    write_audit(s, ctx["sub"], who, ctx["office_n"], "marks.enter",
-                f"assessment:{a.id}", "", "entered", f"Entered {len(body.marks)} marks for {a.name}")
-    total_entered = s.query(D.Mark).filter(D.Mark.assessment_id == a.id).count()
-    return {"assessment_id": a.id, "entered": len(body.marks), "total_entered": total_entered,
+    write_audit(s, ctx["sub"], who, ctx["office_n"], "marks.draft_save",
+                f"assessment:{a.id}", a.marks_state or "draft", a.marks_state or "draft", f"Saved {len(body.marks)} draft marks for {a.name}",
+                tenant_id=ctx["tenant_id"], campus_scope_id=section.campus_scope_id)
+    return {"entered": len(body.marks), "decision": dec.as_dict()}
+
+
+class SubmitMarksIn(BaseModel):
+    assessment_id: str
+
+
+@router.post("/exams/marks/submit")
+def submit_marks(body: SubmitMarksIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "examinations", "enter_marks")
+    require(dec)
+    assessment = (s.query(D.Assessment)
+                  .filter(D.Assessment.id == body.assessment_id,
+                          D.Assessment.tenant_id == ctx["tenant_id"]).first())
+    if not assessment:
+        raise HTTPException(404, "Assessment not found")
+    section, _campus = _exam_section_or_404(s, ctx, assessment.section_id)
+    if not _can_manage_section_for_assessments(s, ctx, section):
+        raise HTTPException(403, "You cannot submit marks for this section")
+    if assessment.locked or assessment.status == "cancelled":
+        raise HTTPException(409, "This assessment is closed for marks submission")
+    if (assessment.marks_state or "draft") not in {"draft", "returned"}:
+        raise HTTPException(409, "Marks cannot be submitted at their current workflow stage")
+    students = _assessment_roster_ids(s, ctx["tenant_id"], section.id)
+    if not students:
+        raise HTTPException(409, "No enrolled students are available for marks submission")
+    marks = (s.query(D.Mark)
+             .filter(D.Mark.tenant_id == ctx["tenant_id"], D.Mark.assessment_id == assessment.id).all())
+    mark_ids = {mark.student_id for mark in marks}
+    if mark_ids != students:
+        raise HTTPException(409, "Draft marks must be recorded for every enrolled student before submission")
+    for mark in marks:
+        if mark.score is None or mark.score < 0 or mark.score > assessment.max_marks or not mark.is_valid:
+            raise HTTPException(422, "All submitted marks must be valid and within the assessment range")
+    workflow = _start_or_resubmit_marks_workflow(s, assessment, section, ctx)
+    return {"workflow_id": workflow.id, "marks_state": assessment.marks_state,
             "decision": dec.as_dict()}
+
+
 class PublishMarksIn(BaseModel):
     assessment_id: str
 
 
 @router.post("/exams/marks/publish")
 def publish_marks(body: PublishMarksIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "examinations", "publish_marks")
-    require(dec)
-    assessment = s.query(D.Assessment).get(body.assessment_id)
-    if not assessment:
-        raise HTTPException(404, "Assessment not found")
-    section = _section_or_404(s, assessment.section_id)
-    if not _can_manage_section_for_assessments(s, ctx, section):
-        raise HTTPException(403, "You cannot publish marks for this section")
-    who = actor_name(s, ctx)
-    now = datetime.utcnow()
-    rows = s.query(D.Mark).filter(D.Mark.assessment_id == assessment.id, D.Mark.is_valid == True).all()
-    for row in rows:
-        row.status = "published"
-        row.published_at = now
-        row.published_by = who
-        row.updated_at = now
-    assessment.published = True
-    assessment.status = "published" if assessment.status != "cancelled" else assessment.status
-    assessment.published_at = assessment.published_at or now
-    assessment.published_by = assessment.published_by or who
-    assessment.updated_at = now
-    assessment.updated_by = who
-    s.commit()
-    write_audit(
-        s, ctx["sub"], who, ctx["office_n"], "marks.publish",
-        f"assessment:{assessment.id}", "draft", "published",
-        f"Published {len(rows)} marks for {assessment.name}",
-    )
-    return {"published": len(rows), "decision": dec.as_dict()}
+    raise HTTPException(409, "Marks are published only as part of authorised result publication")
 
 
 class PublishResultIn(BaseModel):
     section_id: str
-
-
-def _auto_rollover_after_results(s, academic_year: str, semester: int | None, actor_id: str, actor_name_value: str):
-    """Automatically progress a student only after every enrolled subject result is published.
-
-    This is deliberately per-student and idempotent: publishing one course cannot
-    move a student until all of that semester's enrolled courses have outcomes.
-    """
-    if not semester:
-        return 0
-    policy = s.query(D.AcademicProgressionPolicy).filter(D.AcademicProgressionPolicy.tenant_id == TENANT).first()
-    if not policy:
-        policy = D.AcademicProgressionPolicy(id=uid(), tenant_id=TENANT)
-        s.add(policy); s.flush()
-    target_semester = semester + 1
-    target_year = s.query(D.AcademicYear).filter(D.AcademicYear.name == academic_year, D.AcademicYear.is_active == True).first()
-    if not target_year or not s.query(D.Semester).filter(D.Semester.academic_year_id == target_year.id, D.Semester.sequence == target_semester, D.Semester.is_active == True).first():
-        return 0
-    row = (s.query(D.AcademicRollover).filter_by(source_academic_year=academic_year, source_semester=semester,
-        target_academic_year=academic_year, target_semester=target_semester, status="completed").first())
-    if not row:
-        row = D.AcademicRollover(id=uid(), tenant_id=TENANT, source_academic_year=academic_year,
-            source_semester=semester, target_academic_year=academic_year, target_semester=target_semester,
-            status="completed", created_by=actor_id, approved_by=actor_id, executed_by=actor_id,
-            approved_at=datetime.utcnow(), executed_at=datetime.utcnow(), remarks="Automatic rollover after final result publication")
-        s.add(row); s.flush()
-    progressed = 0
-    for student in s.query(D.Student).filter(D.Student.status == "active", D.Student.semester == semester).all():
-        enrolled = (s.query(D.Enrollment).join(D.Section, D.Enrollment.section_id == D.Section.id)
-                    .join(D.Course, D.Section.course_id == D.Course.id)
-                    .filter(D.Enrollment.student_id == student.id, D.Enrollment.status == "enrolled", D.Course.semester == semester).all())
-        if not enrolled:
-            continue
-        section_ids = {enrollment.section_id for enrollment in enrolled}
-        results = s.query(D.StudentSubjectResult).filter(D.StudentSubjectResult.student_id == student.id,
-            D.StudentSubjectResult.academic_year == academic_year, D.StudentSubjectResult.semester == semester,
-            D.StudentSubjectResult.section_id.in_(section_ids)).all()
-        if len({result.section_id for result in results}) != len(section_ids):
-            continue
-        history = s.query(D.StudentAcademicHistory).filter_by(rollover_id=row.id, student_id=student.id).first()
-        if history:
-            continue
-        backlog_count = sum(1 for result in results if result.outcome == "failed")
-        attendance_rows = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.student_id == student.id, D.AttendanceRecord.section_id.in_(section_ids)).all()
-        attendance_pct = (100 * sum(1 for record in attendance_rows if record.present) / len(attendance_rows)) if attendance_rows else None
-        outstanding = float(s.query(func.coalesce(func.sum(D.FeeInvoice.amount - D.FeeInvoice.paid), 0)).filter(D.FeeInvoice.student_id == student.id).scalar() or 0)
-        active_discipline = s.query(D.Complaint).filter(D.Complaint.student_id == student.id, D.Complaint.kind == "Discipline", D.Complaint.status != "resolved", D.Complaint.severity == "high").first()
-        eligible = (backlog_count <= policy.max_backlogs and
-                    (attendance_pct is None or attendance_pct >= policy.minimum_attendance_pct) and
-                    not active_discipline and
-                    not (policy.fee_policy == "block" and outstanding > 0))
-        decision = "promoted" if eligible else ("hold" if active_discipline or (attendance_pct is not None and attendance_pct < policy.minimum_attendance_pct) or (policy.fee_policy == "block" and outstanding > 0) else "repeating")
-        s.add(D.StudentAcademicHistory(id=uid(), tenant_id=TENANT, student_id=student.id, rollover_id=row.id,
-            source_academic_year=academic_year, source_semester=semester, target_academic_year=academic_year,
-            target_semester=target_semester, decision=decision))
-        s.add(D.AcademicRolloverDecision(id=uid(), rollover_id=row.id, student_id=student.id,
-            decision=decision, academic_status="ELIGIBLE" if eligible else "NOT_ELIGIBLE", finance_status="DUE_EXISTS" if outstanding > 0 else "CLEAR", outstanding_amount=outstanding, carry_forward_amount=outstanding if eligible and outstanding > 0 else 0))
-        if eligible:
-            student.semester = target_semester
-            notify(s, student.user_id, "Academic progression complete", f"You have been progressed to Semester {target_semester} after published results.", "info")
-            progressed += 1
-    return progressed
-
-
-class ProgressionPolicyIn(BaseModel):
-    # Every policy update must be explicit; defaults here could overwrite a
-    # configured policy when a malformed client sends an empty object.
-    max_backlogs: int = Field(..., ge=0, le=20)
-    minimum_attendance_pct: float = Field(..., ge=0, le=100)
-    fee_policy: str
-
-
-def _progression_policy_payload(s):
-    row = s.query(D.AcademicProgressionPolicy).filter(D.AcademicProgressionPolicy.tenant_id == TENANT).first()
-    if not row:
-        row = D.AcademicProgressionPolicy(id=uid(), tenant_id=TENANT); s.add(row); s.commit()
-    return {"max_backlogs": row.max_backlogs, "minimum_attendance_pct": row.minimum_attendance_pct,
-            "fee_policy": row.fee_policy, "discipline_policy": row.discipline_policy}
-
-
-@router.get("/academic-rollover/policy")
-def get_progression_policy(ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] not in {4, 6, 10, 17}: raise HTTPException(403, "Academic leadership may view progression policy")
-    return _progression_policy_payload(s)
-
-
-@router.put("/academic-rollover/policy")
-def update_progression_policy(body: ProgressionPolicyIn, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] not in {4, 6, 10, 17}: raise HTTPException(403, "Academic leadership may update progression policy")
-    if body.fee_policy not in {"carry_forward", "block"}: raise HTTPException(422, "Fee policy must be carry_forward or block")
-    _progression_policy_payload(s)
-    row = s.query(D.AcademicProgressionPolicy).filter(D.AcademicProgressionPolicy.tenant_id == TENANT).first()
-    row.max_backlogs, row.minimum_attendance_pct, row.fee_policy = body.max_backlogs, body.minimum_attendance_pct, body.fee_policy
-    row.updated_by, row.updated_at = ctx["sub"], datetime.utcnow(); s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.progression_policy", "progression_policy", "", "updated", "Automatic progression policy updated")
-    return _progression_policy_payload(s)
 
 
 @router.post("/exams/publish")
@@ -4972,38 +3112,68 @@ def publish_result(body: PublishResultIn, ctx=Depends(auth), s=Depends(db)):
     dec, verb = gate(s, ctx, "examinations", "publish_result")
     require(dec)
     who = actor_name(s, ctx)
-    section = require_academic_object(s, ctx, _section_or_404(s, body.section_id), "edit", "Section")
+    section, _campus = _exam_section_or_404(s, ctx, body.section_id)
     rs = (s.query(D.ResultSheet)
-          .filter(D.ResultSheet.section_id == body.section_id)
+          .filter(D.ResultSheet.tenant_id == ctx["tenant_id"], D.ResultSheet.section_id == body.section_id)
           .order_by(desc(D.ResultSheet.published_at), desc(D.ResultSheet.updated_at))
           .first())
+    if rs and rs.status == "published":
+        raise HTTPException(409, "This section's result has already been published")
+    assessments = (s.query(D.Assessment)
+                   .filter(D.Assessment.tenant_id == ctx["tenant_id"],
+                           D.Assessment.section_id == section.id,
+                           D.Assessment.status != "cancelled").all())
+    if not assessments:
+        raise HTTPException(409, "At least one active assessment is required before publishing results")
+    not_approved = [row.name for row in assessments
+                    if (row.marks_state or "draft") not in {"approved_for_publication", "published"}]
+    if not_approved:
+        raise HTTPException(409, "All assessment marks must be approved for publication before publishing results")
     if not rs:
-        rs = D.ResultSheet(id=uid(), tenant_id=TENANT, section_id=body.section_id,
+        rs = D.ResultSheet(id=uid(), tenant_id=ctx["tenant_id"], section_id=body.section_id,
                            term="2025-Odd")
         s.add(rs)
-    course = s.query(D.Course).get(section.course_id) if section.course_id else None
+    course = s.get(D.Course, section.course_id) if section.course_id else None
     rs.academic_year = rs.academic_year or _academic_year_for_datetime(datetime.utcnow())
     rs.semester = rs.semester or (course.semester if course else None)
     rs.status = "published"
     rs.published_by = who
     rs.published_at = datetime.utcnow()
     rs.updated_at = datetime.utcnow()
-    section_assessment_ids = [row[0] for row in s.query(D.Assessment.id).filter(D.Assessment.section_id == section.id).all()]
+    section_assessment_ids = [row.id for row in assessments]
     if section_assessment_ids:
-        marks = s.query(D.Mark).filter(D.Mark.assessment_id.in_(section_assessment_ids), D.Mark.is_valid == True).all()
+        marks = s.query(D.Mark).filter(D.Mark.tenant_id == ctx["tenant_id"], D.Mark.assessment_id.in_(section_assessment_ids), D.Mark.is_valid == True).all()
         for mark in marks:
             if mark.status != "published":
                 mark.status = "published"
                 mark.published_at = rs.published_at
                 mark.published_by = who
                 mark.updated_at = rs.published_at
+        for assessment in assessments:
+            assessment.marks_state = "published"
+            assessment.updated_by = who
+            assessment.updated_at = rs.published_at
+    # SessionLocal deliberately has autoflush disabled.  Persist the result,
+    # published mark state, and assessment state before the result generator
+    # queries them, otherwise a newly approved result can have no rows on its
+    # first publication request.
+    s.flush()
     published_rows = _publish_section_subject_results(s, section, rs, who)
-    auto_progressed = _auto_rollover_after_results(s, rs.academic_year, rs.semester, ctx["sub"], who)
     s.commit()
     write_audit(s, ctx["sub"], who, ctx["office_n"], "result.publish",
                 f"section:{body.section_id}", "moderated", "published",
-                "Result published")
-    return {"status": "published", "published_results": published_rows, "automatically_progressed": auto_progressed, "decision": dec.as_dict()}
+                "Result published", tenant_id=ctx["tenant_id"], campus_scope_id=section.campus_scope_id)
+    # Result availability is student-specific. Notify only authenticated
+    # student identities linked to enrolled students in this same section.
+    enrolled_ids = _assessment_roster_ids(s, ctx["tenant_id"], section.id)
+    if enrolled_ids:
+        for student in (s.query(D.Student).filter(D.Student.tenant_id == ctx["tenant_id"],
+                                                  D.Student.id.in_(enrolled_ids)).all()):
+            if student.user_id:
+                notify(s, student.user_id, "Examination result published",
+                       f"Your result for Section {section.section_code} is now available.",
+                       severity="info", tenant_id=ctx["tenant_id"])
+    return {"status": "published", "published_results": published_rows, "decision": dec.as_dict()}
 
 
 class ExamTimetableUpsertIn(BaseModel):
@@ -5023,13 +3193,11 @@ class ExamTimetableUpsertIn(BaseModel):
 @router.get("/exams/timetable/{section_id}")
 def exam_timetable(section_id: str, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "examinations", "view")[0])
-    section = _section_or_404(s, section_id)
-    if not _can_view_exam_section(s, ctx, section):
-        raise HTTPException(403, "You cannot view timetable for this section")
-    course = s.query(D.Course).get(section.course_id) if section.course_id else None
+    section, _campus = _exam_section_or_404(s, ctx, section_id)
+    course = s.get(D.Course, section.course_id) if section.course_id else None
     rows = (
         s.query(D.ExamScheduleEntry)
-        .filter(D.ExamScheduleEntry.section_id == section_id)
+        .filter(D.ExamScheduleEntry.tenant_id == ctx["tenant_id"], D.ExamScheduleEntry.section_id == section_id)
         .order_by(desc(D.ExamScheduleEntry.is_active), desc(D.ExamScheduleEntry.version_no), D.ExamScheduleEntry.start_at)
         .all()
     )
@@ -5063,18 +3231,18 @@ def exam_timetable(section_id: str, ctx=Depends(auth), s=Depends(db)):
 def create_exam_timetable(body: ExamTimetableUpsertIn, ctx=Depends(auth), s=Depends(db)):
     dec, _ = gate(s, ctx, "examinations", "manage_timetable")
     require(dec)
-    section = _section_or_404(s, body.section_id)
+    section, _campus = _exam_section_or_404(s, ctx, body.section_id)
     if not _can_manage_section_for_exam_timetable(s, ctx, section):
         raise HTTPException(403, "You cannot manage exam timetable for this section")
     assessment = None
     if body.assessment_id:
-        assessment = s.query(D.Assessment).get(body.assessment_id)
+        assessment = s.query(D.Assessment).filter(D.Assessment.id == body.assessment_id, D.Assessment.tenant_id == ctx["tenant_id"]).first()
         if not assessment or assessment.section_id != section.id:
             raise HTTPException(400, "Assessment does not belong to this section")
     who = actor_name(s, ctx)
     row = D.ExamScheduleEntry(
         id=uid(),
-        tenant_id=TENANT,
+        tenant_id=ctx["tenant_id"],
         assessment_id=assessment.id if assessment else None,
         section_id=section.id,
         academic_year=(body.academic_year or _academic_year_for_datetime(datetime.fromisoformat(body.start_at)) if body.start_at else _academic_year_for_datetime(datetime.utcnow())).strip(),
@@ -5102,7 +3270,8 @@ def create_exam_timetable(body: ExamTimetableUpsertIn, ctx=Depends(auth), s=Depe
     write_audit(
         s, ctx["sub"], who, ctx["office_n"], "exam.timetable.create",
         f"exam_schedule:{row.id}", "", row.status,
-        f"Created {row.exam_type} timetable entry for section {section.section_code}",
+        f"Created {row.exam_type} timetable entry for section {section.section_code}", tenant_id=ctx["tenant_id"],
+        campus_scope_id=section.campus_scope_id,
     )
     return {"id": row.id, "decision": dec.as_dict()}
 
@@ -5111,13 +3280,14 @@ def create_exam_timetable(body: ExamTimetableUpsertIn, ctx=Depends(auth), s=Depe
 def update_exam_timetable(schedule_id: str, body: ExamTimetableUpsertIn, ctx=Depends(auth), s=Depends(db)):
     dec, _ = gate(s, ctx, "examinations", "manage_timetable")
     require(dec)
-    row = s.query(D.ExamScheduleEntry).get(schedule_id)
+    row = s.query(D.ExamScheduleEntry).filter(D.ExamScheduleEntry.id == schedule_id, D.ExamScheduleEntry.tenant_id == ctx["tenant_id"]).first()
     if not row:
         raise HTTPException(404, "Exam timetable entry not found")
-    section = _section_or_404(s, row.section_id)
+    section, _campus = _exam_section_or_404(s, ctx, row.section_id)
     if not _can_manage_section_for_exam_timetable(s, ctx, section):
         raise HTTPException(403, "You cannot manage exam timetable for this section")
-    assessment = s.query(D.Assessment).get(body.assessment_id or row.assessment_id) if (body.assessment_id or row.assessment_id) else None
+    assessment = (s.query(D.Assessment).filter(D.Assessment.id == (body.assessment_id or row.assessment_id), D.Assessment.tenant_id == ctx["tenant_id"]).first()
+                  if (body.assessment_id or row.assessment_id) else None)
     if body.assessment_id and (not assessment or assessment.section_id != section.id):
         raise HTTPException(400, "Assessment does not belong to this section")
     who = actor_name(s, ctx)
@@ -5149,220 +3319,83 @@ def update_exam_timetable(schedule_id: str, body: ExamTimetableUpsertIn, ctx=Dep
     write_audit(
         s, ctx["sub"], who, ctx["office_n"], "exam.timetable.update",
         f"exam_schedule:{row.id}", previous.get("status", ""), row.status,
-        f"Updated exam timetable entry for section {section.section_code}",
+        f"Updated exam timetable entry for section {section.section_code}", tenant_id=ctx["tenant_id"],
+        campus_scope_id=section.campus_scope_id,
     )
     return {"id": row.id, "decision": dec.as_dict()}
 
 
 # --------------------------------------------------------------------------- #
+#  ADMISSIONS
+# --------------------------------------------------------------------------- #
+@router.get("/admissions")
+def list_applications(ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "admissions", "view")[0])
+    rows = (s.query(D.Application).filter(D.Application.tenant_id == ctx["tenant_id"])
+            .order_by(desc(D.Application.score)).all())
+    return {"applications": [{
+        "id": a.id, "name": a.applicant_name, "email": a.email,
+        "program": a.program_name, "score": a.score, "status": a.status,
+    } for a in rows],
+        "can_verify": can(s, ctx, "admissions", "verify"),
+        "can_offer": can(s, ctx, "admissions", "offer")}
+
+
+class AdmissionDecisionIn(BaseModel):
+    application_id: str
+    action: str  # verify / offer / reject
+
+
+@router.post("/admissions/decide")
+def decide_application(body: AdmissionDecisionIn, ctx=Depends(auth), s=Depends(db)):
+    action_map = {"verify": "verify", "offer": "offer", "reject": "reject"}
+    if body.action not in action_map:
+        raise HTTPException(400, "Invalid action")
+    dec, verb = gate(s, ctx, "admissions", action_map[body.action])
+    require(dec)
+    a = (s.query(D.Application)
+         .filter(D.Application.id == body.application_id, D.Application.tenant_id == ctx["tenant_id"])
+         .first())
+    if not a:
+        raise HTTPException(404, "Application not found")
+    new = {"verify": "verified", "offer": "offered", "reject": "rejected"}[body.action]
+    a.status = new
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], f"admission.{body.action}",
+                f"application:{a.id}", "", new, f"{body.action} {a.applicant_name}")
+    return {"status": new, "decision": dec.as_dict()}
+
+
+# --------------------------------------------------------------------------- #
 #  FINANCE
 # --------------------------------------------------------------------------- #
-class RolloverStartIn(BaseModel):
-    source_academic_year: str
-    source_semester: int
-    target_academic_year: str
-    target_semester: int
-
-
-class RolloverDecisionIn(BaseModel):
-    student_id: str
-    decision: str
-    note: str = ""
-
-
-def _rollover_payload(s, row):
-    students = {student.id: student for student in s.query(D.Student).all()}
-    decisions = s.query(D.AcademicRolloverDecision).filter(D.AcademicRolloverDecision.rollover_id == row.id).all()
-    summary = {"total": len(decisions), "eligible": 0, "detained": 0, "on_hold": 0, "exceptions": 0, "outstanding": 0}
-    items = []
-    for item in decisions:
-        summary["outstanding"] += float(item.outstanding_amount or 0)
-        if item.decision == "promoted": summary["eligible"] += 1
-        elif item.decision in {"detained", "repeating"}: summary["detained"] += 1
-        elif item.decision == "hold": summary["on_hold"] += 1
-        elif item.decision == "exception": summary["exceptions"] += 1
-        student = students.get(item.student_id)
-        items.append({"student_id": item.student_id, "roll_no": student.roll_no if student else "",
-            "name": student.name if student else "", "decision": item.decision, "note": item.note,
-            "academic_status": item.academic_status, "finance_status": item.finance_status,
-            "outstanding_amount": item.outstanding_amount, "carry_forward_amount": item.carry_forward_amount})
-    return {"id": row.id, "source_academic_year": row.source_academic_year, "source_semester": row.source_semester,
-            "target_academic_year": row.target_academic_year, "target_semester": row.target_semester,
-            "status": row.status, "created_at": row.created_at.isoformat() if row.created_at else "",
-            "executed_at": row.executed_at.isoformat() if row.executed_at else "", "summary": summary, "decisions": items}
-
-
-@router.get("/academic-rollover")
-def academic_rollovers(ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] not in {4, 6, 10, 17, 22}:
-        raise HTTPException(403, "Academic rollover is restricted to academic leadership and Finance")
-    rows = s.query(D.AcademicRollover).order_by(desc(D.AcademicRollover.created_at)).all()
-    years = [row.name for row in s.query(D.AcademicYear).filter(D.AcademicYear.is_active == True).order_by(D.AcademicYear.name).all()]
-    return {"rollovers": [_rollover_payload(s, row) for row in rows], "academic_years": years,
-            "can_review": ctx["office_n"] in {6, 10, 17}, "can_approve": ctx["office_n"] == 4,
-            "finance_ready": [row.id for row in rows if row.status == "approved"]}
-
-
-@router.post("/academic-rollover")
-def start_academic_rollover(body: RolloverStartIn, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] not in {6, 10, 17}: raise HTTPException(403, "Only the Academic Coordinator or academic leadership may start rollover")
-    students = s.query(D.Student).filter(D.Student.status == "active", D.Student.semester == body.source_semester).all()
-    if not students: raise HTTPException(409, "No active students found in the selected source semester")
-    row = D.AcademicRollover(id=uid(), tenant_id=TENANT, **body.model_dump(), created_by=ctx["sub"])
-    s.add(row); s.flush()
-    for student in students:
-        outstanding = float(s.query(func.coalesce(func.sum(D.FeeInvoice.amount - D.FeeInvoice.paid), 0)).filter(D.FeeInvoice.student_id == student.id).scalar() or 0)
-        result = s.query(D.StudentSubjectResult).filter(D.StudentSubjectResult.student_id == student.id, D.StudentSubjectResult.status == "published").first()
-        academic_status = "ELIGIBLE" if result else "RESULT_PENDING"
-        finance_status = "DUE_EXISTS" if outstanding > 0 else "CLEAR"
-        s.add(D.AcademicRolloverDecision(id=uid(), rollover_id=row.id, student_id=student.id,
-            academic_status=academic_status, finance_status=finance_status, outstanding_amount=outstanding,
-            decision="pending"))
-    s.commit(); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.rollover.start", f"rollover:{row.id}", "", "draft", f"{len(students)} students selected")
-    return _rollover_payload(s, row)
-
-
-@router.post("/academic-rollover/{rollover_id}/decision")
-def decide_academic_rollover(rollover_id: str, body: RolloverDecisionIn, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] not in {6, 10, 17}: raise HTTPException(403, "Only academic leadership may review progression")
-    row = s.get(D.AcademicRollover, rollover_id); item = s.query(D.AcademicRolloverDecision).filter_by(rollover_id=rollover_id, student_id=body.student_id).first()
-    if not row or not item or row.status != "draft": raise HTTPException(409, "This rollover is not open for review")
-    if body.decision not in {"promoted", "detained", "repeating", "hold", "exception"}: raise HTTPException(422, "Choose a valid progression decision")
-    item.decision, item.note = body.decision, body.note.strip(); s.commit()
-    return _rollover_payload(s, row)
-
-
-@router.post("/academic-rollover/{rollover_id}/submit")
-def submit_academic_rollover(rollover_id: str, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] not in {6, 10, 17}: raise HTTPException(403, "Only academic leadership may submit rollover")
-    row = s.get(D.AcademicRollover, rollover_id)
-    if not row or row.status != "draft": raise HTTPException(409, "Rollover is not in draft")
-    pending = s.query(D.AcademicRolloverDecision).filter_by(rollover_id=row.id, decision="pending").count()
-    if pending: raise HTTPException(409, f"Review all students before submission ({pending} pending)")
-    row.status = "awaiting_principal"; s.commit()
-    for user in s.query(User).filter(User.office_n == 4, User.active == True).all(): notify(s, user.id, "Academic rollover approval", f"Review progression for Semester {row.source_semester} before Finance is notified.", "warning")
-    return _rollover_payload(s, row)
-
-
-@router.post("/academic-rollover/{rollover_id}/approve")
-def approve_academic_rollover(rollover_id: str, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] != 4: raise HTTPException(403, "Principal approval is required")
-    row = s.get(D.AcademicRollover, rollover_id)
-    if not row or row.status != "awaiting_principal": raise HTTPException(409, "Rollover is not awaiting Principal approval")
-    row.status, row.approved_by, row.approved_at = "approved", ctx["sub"], datetime.utcnow(); s.commit()
-    for user in s.query(User).filter(User.office_n == 22, User.active == True).all(): notify(s, user.id, "Next-semester fee setup ready", f"Rollover approved: publish fee structure for {row.target_academic_year}, Semester {row.target_semester}.", "warning")
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.rollover.approve", f"rollover:{row.id}", "awaiting_principal", "approved", "Finance notified")
-    return _rollover_payload(s, row)
-
-
-@router.post("/academic-rollover/{rollover_id}/execute")
-def execute_academic_rollover(rollover_id: str, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] not in {4, 6, 10, 17}: raise HTTPException(403, "Academic leadership may execute an approved rollover")
-    row = s.get(D.AcademicRollover, rollover_id)
-    if not row or row.status != "approved": raise HTTPException(409, "Rollover must be approved before execution")
-    target_year = s.query(D.AcademicYear).filter(D.AcademicYear.name == row.target_academic_year, D.AcademicYear.is_active == True).first()
-    if not target_year: raise HTTPException(409, "NEXT_ACADEMIC_YEAR_NOT_ACTIVE")
-    target_semester = s.query(D.Semester).filter(D.Semester.academic_year_id == target_year.id, D.Semester.sequence == row.target_semester, D.Semester.is_active == True).first()
-    if not target_semester: raise HTTPException(409, "NEXT_SEMESTER_NOT_CONFIGURED")
-    promoted = s.query(D.AcademicRolloverDecision).filter_by(rollover_id=row.id, decision="promoted").all()
-    for item in promoted:
-        student = s.get(D.Student, item.student_id)
-        if not student or student.status != "active": continue
-        history = s.query(D.StudentAcademicHistory).filter_by(rollover_id=row.id, student_id=student.id).first()
-        if history: continue
-        s.add(D.StudentAcademicHistory(id=uid(), tenant_id=TENANT, student_id=student.id, rollover_id=row.id,
-            source_academic_year=row.source_academic_year, source_semester=row.source_semester,
-            target_academic_year=row.target_academic_year, target_semester=row.target_semester, decision=item.decision))
-        student.semester = row.target_semester
-        item.carry_forward_amount = item.outstanding_amount
-        item.processed_at = datetime.utcnow()
-    row.status, row.executed_by, row.executed_at = "completed", ctx["sub"], datetime.utcnow()
-    s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.rollover.execute", f"rollover:{row.id}", "approved", "completed", f"Processed {len(promoted)} promoted students")
-    return _rollover_payload(s, row)
-
-def _format_fee_category(value: str | None):
-    if not value:
-        return "Uncategorised"
-    return value.replace("_", " ").strip().title()
-
-
-def _invoice_fee_category_details(s, invoice):
-    lines = []
-    if invoice and invoice.fee_structure_id:
-        lines = s.query(D.FeeStructureLine).filter(D.FeeStructureLine.fee_structure_id == invoice.fee_structure_id).all()
-
-    categories = {}
-    for line in lines:
-        head = s.get(D.FeeHead, line.fee_head_id)
-        if not head:
-            continue
-        category = _format_fee_category(head.category)
-        if category not in categories:
-            categories[category] = {"fee_category_id": None, "fee_category": category,
-                                    "assigned": 0.0, "paid": 0.0, "balance": 0.0}
-        categories[category]["assigned"] += float(line.amount or 0)
-
-    if not categories:
-        summary = [{"fee_category_id": None, "fee_category": "Uncategorised",
-                    "assigned": float(invoice.amount or 0), "paid": float(invoice.paid or 0),
-                    "balance": float((invoice.amount or 0) - (invoice.paid or 0))}]
-        return {"fee_category_id": None, "fee_category": "Uncategorised", "categories": summary}
-
-    summaries = []
-    for category in categories:
-        assigned = round(categories[category]["assigned"], 2)
-        paid = round(min(float(invoice.paid or 0), assigned), 2)
-        balance = round(max(assigned - paid, 0), 2)
-        summaries.append({"fee_category_id": None, "fee_category": category,
-                          "assigned": assigned, "paid": paid, "balance": balance})
-
-    summaries.sort(key=lambda x: x["fee_category"])
-    primary = summaries[0]["fee_category"] if len(summaries) == 1 else "Mixed"
-    return {"fee_category_id": None, "fee_category": primary, "categories": summaries}
-
-
 @router.get("/finance/invoices")
-def list_invoices(ctx=Depends(auth), s=Depends(db)):
+def list_invoices(student_id: str = "", ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "finance", "view")[0])
-    stu_map = {st.id: (st.roll_no, st.name) for st in s.query(D.Student).all()}
-    rows = s.query(D.FeeInvoice).limit(300).all()
+    tenant_id = ctx["tenant_id"]
+    invoice_query = s.query(D.FeeInvoice).filter(D.FeeInvoice.tenant_id == tenant_id)
+    student_query = s.query(D.Student).filter(D.Student.tenant_id == tenant_id)
+    if ctx.get("office_n") == 3:
+        campus = _campus_scope_for_campus_head(s, ctx)
+        student_query = student_query.filter(D.Student.campus_scope_id == campus.id)
+        invoice_query = invoice_query.join(D.Student, D.FeeInvoice.student_id == D.Student.id).filter(
+            D.Student.tenant_id == tenant_id, D.Student.campus_scope_id == campus.id)
+    if student_id:
+        invoice_query = invoice_query.filter(D.FeeInvoice.student_id == student_id)
+    stu_map = {st.id: (st.roll_no, st.name) for st in student_query.all()}
+    rows = invoice_query.limit(300).all()
     out = []
-    category_buckets = {}
     for r in rows:
         roll, name = stu_map.get(r.student_id, ("", ""))
-        invoice_details = _invoice_fee_category_details(s, r)
-        row = {"id": r.id, "roll_no": roll, "name": name, "term": r.term,
-               "amount": r.amount, "paid": r.paid, "balance": r.amount - r.paid,
-               "status": r.status, "fee_category_id": invoice_details["fee_category_id"],
-               "fee_category": invoice_details["fee_category"], "categories": invoice_details["categories"]}
-        out.append(row)
-        for category in invoice_details["categories"]:
-            key = category["fee_category"]
-            bucket = category_buckets.setdefault(key, {"fee_category_id": None, "fee_category": key,
-                                                      "assigned": 0.0, "paid": 0.0, "balance": 0.0})
-            bucket["assigned"] += category["assigned"]
-            bucket["paid"] += category["paid"]
-            bucket["balance"] += category["balance"]
-
+        out.append({"id": r.id, "roll_no": roll, "name": name, "term": r.term,
+                    "amount": r.amount, "paid": r.paid, "balance": r.amount - r.paid,
+                    "status": r.status})
     summary = {
-        "total_billed": s.query(func.coalesce(func.sum(D.FeeInvoice.amount), 0)).scalar() or 0,
-        "total_collected": s.query(func.coalesce(func.sum(D.FeeInvoice.paid), 0)).scalar() or 0,
-        "outstanding": s.query(func.coalesce(func.sum(D.FeeInvoice.amount - D.FeeInvoice.paid), 0)).scalar() or 0,
+        "total_billed": invoice_query.with_entities(func.coalesce(func.sum(D.FeeInvoice.amount), 0)).scalar() or 0,
+        "total_collected": invoice_query.with_entities(func.coalesce(func.sum(D.FeeInvoice.paid), 0)).scalar() or 0,
+        "outstanding": invoice_query.with_entities(func.coalesce(func.sum(D.FeeInvoice.amount - D.FeeInvoice.paid), 0)).scalar() or 0,
     }
-    payments = s.query(D.Payment).order_by(desc(D.Payment.at)).limit(300).all()
-    payment_rows = []
-    for payment in payments:
-        roll, name = stu_map.get(payment.student_id, ("", ""))
-        invoice_details = _invoice_fee_category_details(s, s.get(D.FeeInvoice, payment.invoice_id)) if payment.invoice_id else {"fee_category_id": None, "fee_category": "Uncategorised", "categories": []}
-        payment_rows.append({"id": payment.id, "invoice_id": payment.invoice_id, "roll_no": roll,
-                             "name": name, "amount": payment.amount, "method": payment.method,
-                             "reference": payment.reference, "status": payment.status or "success",
-                             "fee_category_id": invoice_details["fee_category_id"],
-                             "fee_category": invoice_details["fee_category"],
-                             "at": payment.at.isoformat() if payment.at else ""})
-    return {"invoices": out, "payments": payment_rows, "summary": summary,
-            "categories": sorted(category_buckets.values(), key=lambda x: x["fee_category"]),
+    return {"invoices": out, "summary": summary,
             "can_record": can(s, ctx, "finance", "record_payment"),
             "can_waive": can(s, ctx, "finance", "waive")}
 
@@ -5370,7 +3403,11 @@ def list_invoices(ctx=Depends(auth), s=Depends(db)):
 @router.get("/finance/budget")
 def list_budget(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "finance", "view")[0])
-    rows = s.query(D.BudgetLine).filter(D.BudgetLine.tenant_id == ctx.get("tenant_id", TENANT)).all()
+    query = s.query(D.BudgetLine).filter(D.BudgetLine.tenant_id == ctx["tenant_id"])
+    if ctx.get("office_n") == 3 and ctx.get("scope_level") == "campus":
+        campus = _campus_scope_for_campus_head(s, ctx)
+        query = query.filter(D.BudgetLine.campus_scope_id == campus.id)
+    rows = query.all()
     return {"budget": [{"category": b.category, "allocated": b.allocated,
                         "spent": b.spent, "remaining": b.allocated - b.spent,
                         "fiscal_year": b.fiscal_year} for b in rows],
@@ -5380,102 +3417,23 @@ def list_budget(ctx=Depends(auth), s=Depends(db)):
 class RecordPaymentIn(BaseModel):
     invoice_id: str
     amount: float
-    method: str = "cash"
-    reference: str = ""
 
 
 @router.post("/finance/payment")
 def record_payment(body: RecordPaymentIn, ctx=Depends(auth), s=Depends(db)):
     dec, verb = gate(s, ctx, "finance", "record_payment", amount=body.amount)
     require(dec)
-    inv = s.query(D.FeeInvoice).get(body.invoice_id)
+    inv = s.query(D.FeeInvoice).filter(D.FeeInvoice.id == body.invoice_id, D.FeeInvoice.tenant_id == ctx["tenant_id"]).first()
     if not inv:
         raise HTTPException(404, "Invoice not found")
-    if body.amount <= 0:
-        raise HTTPException(400, "Amount must be greater than zero")
-    if body.amount > (inv.amount - inv.paid):
-        body.amount = max(0, inv.amount - inv.paid)
-    method = (body.method or "cash").strip().lower()
-    if method not in {"cash", "cheque", "dd", "bank_transfer", "online", "counter"}:
-        method = "cash"
-    reference = (body.reference or "").strip() or f"{method.upper()}-{uid()[:8].upper()}"
-    pending = method in {"cheque", "dd", "bank_transfer"}
-    payment = D.Payment(id=uid(), tenant_id=TENANT, invoice_id=inv.id, student_id=inv.student_id,
-                    amount=body.amount, method=method, reference=reference,
-                    status="pending_clearance" if pending else "success")
-    s.add(payment)
-    s.flush()
-    if not pending:
-        from portal_api import _settle_payment
-        _settle_payment(s, payment, ctx["sub"])
+    inv.paid = min(inv.amount, inv.paid + body.amount)
+    inv.status = "paid" if inv.paid >= inv.amount else "partial"
+    s.add(D.Payment(id=uid(), tenant_id=ctx["tenant_id"], invoice_id=inv.id, student_id=inv.student_id,
+                    amount=body.amount, method="counter", reference=f"RC{uid().upper()}"))
     s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.payment",
-                f"invoice:{inv.id}", "", inv.status,
-                f"Recorded ₹{body.amount:,.0f} via {method} ({reference})")
-    return {"status": "pending_clearance" if pending else inv.status, "paid": inv.paid, "payment_id": payment.id, "decision": dec.as_dict(), "method": method, "reference": reference}
-
-
-@router.get("/finance/invoices/{invoice_id}/receipt.pdf")
-def finance_payment_receipt(invoice_id: str, payment_id: str = "", ctx=Depends(auth), s=Depends(db)):
-    """Finance may issue the same official receipt after a recorded cash payment."""
-    require(gate(s, ctx, "finance", "view")[0])
-    invoice = s.get(D.FeeInvoice, invoice_id)
-    if not invoice or not invoice.paid:
-        raise HTTPException(404, "A confirmed payment receipt is not available for this invoice")
-    student = s.get(D.Student, invoice.student_id)
-    if not student:
-        raise HTTPException(404, "Student not found")
-    from portal_api import _receipt_pdf
-    payment = s.get(D.Payment, payment_id) if payment_id else None
-    if payment and (payment.invoice_id != invoice.id or payment.status != "success"):
-        raise HTTPException(404, "A confirmed receipt is not available for this payment")
-    return Response(_receipt_pdf(student, invoice, s, payment.id if payment else None), media_type="application/pdf",
-                    headers={"Content-Disposition": f'attachment; filename="ICMS-receipt-{student.roll_no}-{invoice.id}.pdf"'})
-
-class ClearPaymentIn(BaseModel):
-    action: str
-    remarks: str = ""
-
-@router.get("/finance/payments/pending")
-def pending_payment_verification(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "finance", "record_payment")[0])
-    rows = s.query(D.Payment).filter(D.Payment.status.in_(("pending_verification", "pending_clearance"))).order_by(desc(D.Payment.at)).all()
-    out = []
-    for p in rows:
-        proof = s.query(D.PaymentProof).filter(D.PaymentProof.payment_id == p.id).first()
-        student = s.get(D.Student, p.student_id)
-        challan = s.get(D.FeeChallan, p.challan_id) if p.challan_id else None
-        out.append({"id": p.id, "student": student.name if student else "", "roll_no": student.roll_no if student else "",
-            "invoice_id": p.invoice_id, "challan_number": challan.challan_number if challan else "", "amount": p.amount,
-            "method": p.method, "reference": p.reference, "status": p.status, "submitted_at": p.at.isoformat() if p.at else "",
-            "proof": {"file_name": proof.file_name, "file_type": proof.file_type, "file_data": proof.file_data} if proof else None})
-    return {"payments": out}
-
-@router.post("/finance/payments/{payment_id}/clear")
-def clear_payment(payment_id: str, body: ClearPaymentIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "finance", "record_payment")
-    require(dec)
-    payment = s.get(D.Payment, payment_id)
-    if not payment or payment.status not in {"pending_verification", "pending_clearance"}:
-        raise HTTPException(409, "Payment is not awaiting verification or clearance")
-    actions = {"cleared", "bounced", "verified", "rejected"}
-    if body.action not in actions: raise HTTPException(422, "Invalid payment action")
-    if payment.status == "pending_verification" and body.action not in {"verified", "rejected"}:
-        raise HTTPException(422, "Bank-transfer payments must be verified or rejected")
-    if payment.status == "pending_clearance" and body.action not in {"cleared", "bounced"}:
-        raise HTTPException(422, "Cheque/DD payments must be cleared or bounced")
-    if body.action in {"bounced", "rejected"} and not body.remarks.strip(): raise HTTPException(422, "Remarks are required")
-    if body.action in {"cleared", "verified"}:
-        payment.status = "success"
-        from portal_api import _settle_payment
-        _settle_payment(s, payment, ctx["sub"])
-    else:
-        payment.status = "bounced" if body.action == "bounced" else "rejected"
-    payment.remarks = body.remarks.strip()
-    payment.cleared_at, payment.cleared_by = datetime.utcnow(), ctx["sub"]
-    s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.payment.clearance", f"payment:{payment.id}", "pending_clearance", payment.status, payment.reference)
-    return {"payment_id": payment.id, "status": payment.status, "decision": dec.as_dict()}
+                f"invoice:{inv.id}", "", inv.status, f"Recorded ₹{body.amount:,.0f}")
+    return {"status": inv.status, "paid": inv.paid, "decision": dec.as_dict()}
 
 
 class WaiveIn(BaseModel):
@@ -5484,375 +3442,13 @@ class WaiveIn(BaseModel):
     reason: str = ""
 
 
-class InvoiceReviewIn(BaseModel):
-    decision: str = "approved"
-    remarks: str = ""
-
-
-class FinanceAdjustmentIn(BaseModel):
-    invoice_id: str
-    adjustment_type: str = "credit"
-    amount: float = Field(gt=0)
-    reason: str = ""
-
-
-class FinanceReconciliationIn(BaseModel):
-    period_start: date | None = None
-    period_end: date | None = None
-    notes: str = ""
-
-
-class FinanceRefundIn(BaseModel):
-    invoice_id: str
-    amount: float = Field(gt=0)
-    reason: str = ""
-
-
-class FinanceRefundDecisionIn(BaseModel):
-    decision: str = "approved"
-    remarks: str = ""
-
-
-class VendorPaymentIn(BaseModel):
-    vendor_name: str
-    invoice_ref: str = ""
-    amount: float = Field(gt=0)
-    notes: str = ""
-
-
-class VendorPaymentApprovalIn(BaseModel):
-    approval_reference: str = ""
-
-
-class FinanceDayCloseIn(BaseModel):
-    notes: str = ""
-
-
-@router.post("/finance/invoices/{invoice_id}/review")
-def review_invoice(invoice_id: str, body: InvoiceReviewIn, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "finance", "view")[0])
-    invoice = s.get(D.FeeInvoice, invoice_id)
-    if not invoice:
-        raise HTTPException(404, "Invoice not found")
-    decision = (body.decision or "approved").strip().lower()
-    if decision not in {"approved", "pending_review", "rejected"}:
-        raise HTTPException(422, "Invalid invoice review decision")
-    review = D.FinanceInvoiceReview(id=uid(), tenant_id=TENANT, invoice_id=invoice.id,
-        student_id=invoice.student_id, decision=decision, remarks=body.remarks or "",
-        reviewed_by=ctx["sub"], reviewed_at=datetime.utcnow())
-    s.add(review)
-    invoice.status = "paid" if invoice.paid >= invoice.amount and invoice.amount else (
-        "partial" if invoice.paid > 0 else invoice.status)
-    s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.invoice.review",
-                f"invoice:{invoice.id}", invoice.status, decision, body.remarks or "Reviewed")
-    return {"status": decision, "review": {"id": review.id, "decision": decision, "remarks": review.remarks}}
-
-
-@router.get("/finance/adjustments")
-def list_adjustments(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "finance", "view")[0])
-    rows = s.query(D.FinanceAdjustment).order_by(desc(D.FinanceAdjustment.created_at)).all()
-    return {"adjustments": [{
-        "id": row.id,
-        "invoice_id": row.invoice_id,
-        "student_id": row.student_id,
-        "adjustment_type": row.adjustment_type,
-        "amount": row.amount,
-        "reason": row.reason,
-        "status": row.status,
-        "created_by": row.created_by,
-        "reviewed_by": row.reviewed_by,
-        "remarks": row.remarks,
-        "created_at": row.created_at.isoformat() if row.created_at else "",
-    } for row in rows]}
-
-
-@router.post("/finance/adjustments")
-def create_adjustment(body: FinanceAdjustmentIn, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "finance", "view")[0])
-    invoice = s.get(D.FeeInvoice, body.invoice_id)
-    if not invoice:
-        raise HTTPException(404, "Invoice not found")
-    if body.adjustment_type not in {"credit", "debit", "refund"}:
-        raise HTTPException(422, "Invalid adjustment type")
-    row = D.FinanceAdjustment(id=uid(), tenant_id=TENANT, invoice_id=invoice.id,
-        student_id=invoice.student_id, adjustment_type=body.adjustment_type,
-        amount=float(body.amount), reason=body.reason or "", status="pending_review",
-        created_by=ctx["sub"])
-    s.add(row)
-    s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.adjustment.create",
-                f"invoice:{invoice.id}", "pending_review", row.adjustment_type,
-                f"Adjustment requested: ₹{body.amount:,.0f}")
-    return {"status": "pending_review", "adjustment": {"id": row.id, "invoice_id": row.invoice_id,
-        "student_id": row.student_id, "adjustment_type": row.adjustment_type, "amount": row.amount,
-        "status": row.status, "reason": row.reason}}
-
-
-@router.get("/finance/reconciliations")
-def list_reconciliations(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "finance", "view")[0])
-    rows = s.query(D.FinanceReconciliation).order_by(desc(D.FinanceReconciliation.created_at)).all()
-    return {"reconciliations": [{
-        "id": row.id,
-        "period_start": row.period_start.isoformat() if row.period_start else "",
-        "period_end": row.period_end.isoformat() if row.period_end else "",
-        "opening_balance": row.opening_balance,
-        "total_collected": row.total_collected,
-        "total_adjustments": row.total_adjustments,
-        "closing_balance": row.closing_balance,
-        "status": row.status,
-        "notes": row.notes,
-        "created_by": row.created_by,
-        "closed_at": row.closed_at.isoformat() if row.closed_at else "",
-    } for row in rows]}
-
-
-@router.post("/finance/reconciliations")
-def create_reconciliation(body: FinanceReconciliationIn, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "finance", "view")[0])
-    start = body.period_start or date.today().replace(day=1)
-    end = body.period_end or date.today()
-    summary = {"total_billed": s.query(func.coalesce(func.sum(D.FeeInvoice.amount), 0)).scalar() or 0,
-               "total_collected": s.query(func.coalesce(func.sum(D.FeeInvoice.paid), 0)).scalar() or 0,
-               "outstanding": s.query(func.coalesce(func.sum(D.FeeInvoice.amount - D.FeeInvoice.paid), 0)).scalar() or 0}
-    row = D.FinanceReconciliation(id=uid(), tenant_id=TENANT, period_start=datetime.combine(start, datetime.min.time()),
-        period_end=datetime.combine(end, datetime.max.time()), opening_balance=0,
-        total_collected=float(summary["total_collected"]), total_adjustments=0,
-        closing_balance=float(summary["total_collected"]), status="closed",
-        notes=body.notes or "", created_by=ctx["sub"])
-    s.add(row)
-    s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.reconciliation.create",
-                f"reconciliation:{row.id}", "draft", "closed", row.notes or "Generated reconciliation")
-    return {"status": "closed", "reconciliation": {"id": row.id, "status": row.status, "notes": row.notes}}
-
-
-@router.get("/finance/refunds")
-def list_refunds(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "finance", "view")[0])
-    rows = s.query(D.FinanceRefund).order_by(desc(D.FinanceRefund.created_at)).all()
-    return {"refunds": [{
-        "id": row.id,
-        "invoice_id": row.invoice_id,
-        "student_id": row.student_id,
-        "amount": row.amount,
-        "reason": row.reason,
-        "status": row.status,
-        "remarks": row.remarks,
-        "created_by": row.created_by,
-        "approved_by": row.approved_by,
-        "executed_by": row.executed_by,
-        "created_at": row.created_at.isoformat() if row.created_at else "",
-        "approved_at": row.approved_at.isoformat() if row.approved_at else "",
-        "executed_at": row.executed_at.isoformat() if row.executed_at else "",
-    } for row in rows]}
-
-
-@router.post("/finance/refunds")
-def create_refund(body: FinanceRefundIn, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "finance", "view")[0])
-    invoice = s.get(D.FeeInvoice, body.invoice_id)
-    if not invoice:
-        raise HTTPException(404, "Invoice not found")
-    if float(body.amount or 0) <= 0:
-        raise HTTPException(422, "Refund amount must be greater than zero")
-    if float(body.amount or 0) > float(invoice.paid or 0):
-        raise HTTPException(422, "Refund amount cannot exceed the invoice's paid amount")
-    row = D.FinanceRefund(id=uid(), tenant_id=TENANT, invoice_id=invoice.id,
-        student_id=invoice.student_id, amount=float(body.amount), reason=body.reason or "",
-        status="pending_approval", created_by=ctx["sub"])
-    s.add(row)
-    s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.refund.create",
-                f"invoice:{invoice.id}", "pending_approval", "created", f"Refund requested: ₹{body.amount:,.0f}")
-    return {"status": "pending_approval", "refund": {"id": row.id, "invoice_id": row.invoice_id, "student_id": row.student_id, "amount": row.amount, "status": row.status, "reason": row.reason}}
-
-
-@router.post("/finance/refunds/{refund_id}/decision")
-def decide_refund(refund_id: str, body: FinanceRefundDecisionIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "finance", "waive", amount=0)
-    require(dec)
-    refund = s.get(D.FinanceRefund, refund_id)
-    if not refund:
-        raise HTTPException(404, "Refund request not found")
-    if refund.status not in {"pending_approval"}:
-        raise HTTPException(409, "Refund request is not pending approval")
-    decision = (body.decision or "approved").strip().lower()
-    if decision not in {"approved", "rejected"}:
-        raise HTTPException(422, "Invalid refund decision")
-    refund.status = decision == "approved" and "approved" or "rejected"
-    refund.approved_by = ctx["sub"]
-    refund.approved_at = datetime.utcnow()
-    refund.remarks = body.remarks or ""
-    s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.refund.approve",
-                f"refund:{refund.id}", "pending_approval", refund.status, refund.remarks or "Refund decision recorded")
-    return {"status": refund.status, "refund": {"id": refund.id, "status": refund.status, "remarks": refund.remarks}}
-
-
-@router.post("/finance/refunds/{refund_id}/execute")
-def execute_refund(refund_id: str, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "finance", "waive", amount=0)
-    require(dec)
-    refund = s.get(D.FinanceRefund, refund_id)
-    if not refund:
-        raise HTTPException(404, "Refund request not found")
-    if refund.status != "approved":
-        raise HTTPException(409, "Only approved refund requests can be executed")
-    invoice = s.get(D.FeeInvoice, refund.invoice_id)
-    if not invoice:
-        raise HTTPException(404, "Invoice not found")
-    amount = float(refund.amount or 0)
-    if amount <= 0:
-        raise HTTPException(422, "Refund amount must be greater than zero")
-    if amount > float(invoice.paid or 0):
-        raise HTTPException(409, "Refund amount exceeds the invoice's paid balance")
-    invoice.paid = max(float(invoice.paid or 0) - amount, 0)
-    invoice.status = "paid" if invoice.paid >= invoice.amount else ("partial" if invoice.paid > 0 else "due")
-    refund.status = "executed"
-    refund.executed_by = ctx["sub"]
-    refund.executed_at = datetime.utcnow()
-    s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.refund.execute",
-                f"refund:{refund.id}", "approved", "executed", f"Executed refund: ₹{amount:,.0f}")
-    return {"status": "executed", "refund": {"id": refund.id, "invoice_id": refund.invoice_id, "status": refund.status, "amount": refund.amount}}
-
-
-@router.get("/finance/vendor-payments")
-def list_vendor_payments(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "finance", "view")[0])
-    rows = s.query(D.VendorPayment).order_by(desc(D.VendorPayment.created_at)).all()
-    return {"vendor_payments": [{
-        "id": row.id,
-        "vendor_name": row.vendor_name,
-        "invoice_ref": row.invoice_ref,
-        "amount": row.amount,
-        "status": row.status,
-        "approval_reference": row.approval_reference,
-        "notes": row.notes,
-        "created_by": row.created_by,
-        "approved_by": row.approved_by,
-        "paid_by": row.paid_by,
-        "created_at": row.created_at.isoformat() if row.created_at else "",
-        "approved_at": row.approved_at.isoformat() if row.approved_at else "",
-        "paid_at": row.paid_at.isoformat() if row.paid_at else "",
-    } for row in rows]}
-
-
-@router.post("/finance/vendor-payments")
-def create_vendor_payment(body: VendorPaymentIn, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "finance", "view")[0])
-    row = D.VendorPayment(id=uid(), tenant_id=TENANT, vendor_name=body.vendor_name.strip() or "",
-        invoice_ref=body.invoice_ref.strip() or "", amount=float(body.amount), notes=body.notes or "",
-        status="pending_approval", created_by=ctx["sub"])
-    s.add(row)
-    s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.vendor_payment.create",
-                f"vendor:{row.id}", "pending_approval", "created", f"Vendor payment requested: ₹{body.amount:,.0f}")
-    return {"status": "pending_approval", "vendor_payment": {"id": row.id, "vendor_name": row.vendor_name, "invoice_ref": row.invoice_ref, "amount": row.amount, "status": row.status, "notes": row.notes}}
-
-
-@router.post("/finance/vendor-payments/{vendor_payment_id}/approve")
-def approve_vendor_payment(vendor_payment_id: str, body: VendorPaymentApprovalIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "finance", "waive", amount=0)
-    require(dec)
-    row = s.get(D.VendorPayment, vendor_payment_id)
-    if not row:
-        raise HTTPException(404, "Vendor payment not found")
-    if row.status not in {"pending_approval"}:
-        raise HTTPException(409, "Vendor payment is not pending approval")
-    row.status = "approved"
-    row.approval_reference = body.approval_reference.strip() or row.approval_reference or f"VP-{uid()[:8].upper()}"
-    row.approved_by = ctx["sub"]
-    row.approved_at = datetime.utcnow()
-    s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.vendor_payment.approve",
-                f"vendor:{row.id}", "pending_approval", "approved", row.approval_reference)
-    return {"status": "approved", "vendor_payment": {"id": row.id, "status": row.status, "approval_reference": row.approval_reference}}
-
-
-@router.post("/finance/vendor-payments/{vendor_payment_id}/pay")
-def pay_vendor_payment(vendor_payment_id: str, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "finance", "waive", amount=0)
-    require(dec)
-    row = s.get(D.VendorPayment, vendor_payment_id)
-    if not row:
-        raise HTTPException(404, "Vendor payment not found")
-    if row.status != "approved":
-        raise HTTPException(409, "Only approved vendor payments can be paid")
-    row.status = "paid"
-    row.paid_by = ctx["sub"]
-    row.paid_at = datetime.utcnow()
-    s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.vendor_payment.pay",
-                f"vendor:{row.id}", "approved", "paid", f"Vendor payment settled: ₹{row.amount:,.0f}")
-    return {"status": "paid", "vendor_payment": {"id": row.id, "status": row.status, "amount": row.amount}}
-
-
-@router.get("/finance/day-closes")
-def list_day_closes(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "finance", "view")[0])
-    rows = s.query(D.FinanceDayClose).order_by(desc(D.FinanceDayClose.close_date)).all()
-    return {"day_closes": [{
-        "id": row.id,
-        "close_date": row.close_date.isoformat() if row.close_date else "",
-        "total_collected": row.total_collected,
-        "total_pending_verification": row.total_pending_verification,
-        "total_pending_clearance": row.total_pending_clearance,
-        "total_adjustments": row.total_adjustments,
-        "total_refunds": row.total_refunds,
-        "total_vendor_payments": row.total_vendor_payments,
-        "opening_balance": row.opening_balance,
-        "closing_balance": row.closing_balance,
-        "status": row.status,
-        "notes": row.notes,
-        "created_by": row.created_by,
-        "closed_at": row.closed_at.isoformat() if row.closed_at else "",
-    } for row in rows]}
-
-
-@router.post("/finance/day-close")
-def create_day_close(body: FinanceDayCloseIn, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "finance", "view")[0])
-    close_date = date.today()
-    existing = s.query(D.FinanceDayClose).filter(D.FinanceDayClose.close_date == close_date).first()
-    if existing:
-        existing.notes = body.notes or existing.notes
-        existing.status = "closed"
-        existing.closed_at = datetime.utcnow()
-        s.commit()
-        return {"status": "closed", "day_close": {"id": existing.id, "close_date": existing.close_date.isoformat(), "status": existing.status}}
-
-    total_collected = float(s.query(func.coalesce(func.sum(D.Payment.amount), 0)).filter(D.Payment.status == "success").scalar() or 0)
-    total_pending_verification = float(s.query(func.coalesce(func.sum(D.Payment.amount), 0)).filter(D.Payment.status == "pending_verification").scalar() or 0)
-    total_pending_clearance = float(s.query(func.coalesce(func.sum(D.Payment.amount), 0)).filter(D.Payment.status == "pending_clearance").scalar() or 0)
-    total_adjustments = float(s.query(func.coalesce(func.sum(D.FinanceAdjustment.amount), 0)).filter(D.FinanceAdjustment.status == "approved").scalar() or 0)
-    total_refunds = float(s.query(func.coalesce(func.sum(D.FinanceRefund.amount), 0)).filter(D.FinanceRefund.status == "executed").scalar() or 0)
-    total_vendor_payments = float(s.query(func.coalesce(func.sum(D.VendorPayment.amount), 0)).filter(D.VendorPayment.status == "paid").scalar() or 0)
-    opening_balance = total_collected - total_adjustments - total_refunds - total_vendor_payments
-    closing_balance = opening_balance
-    row = D.FinanceDayClose(id=uid(), tenant_id=TENANT, close_date=close_date,
-        total_collected=total_collected, total_pending_verification=total_pending_verification,
-        total_pending_clearance=total_pending_clearance, total_adjustments=total_adjustments,
-        total_refunds=total_refunds, total_vendor_payments=total_vendor_payments,
-        opening_balance=opening_balance, closing_balance=closing_balance,
-        status="closed", notes=body.notes or "", created_by=ctx["sub"])
-    s.add(row)
-    s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.day_close",
-                f"day_close:{row.id}", "draft", "closed", row.notes or "Closed the day")
-    return {"status": "closed", "day_close": {"id": row.id, "close_date": row.close_date.isoformat(), "status": row.status, "closing_balance": row.closing_balance}}
-
-
 @router.post("/finance/waive")
 def waive_fee(body: WaiveIn, ctx=Depends(auth), s=Depends(db)):
     # Waivers are monetary approvals — engine checks the approval limit for scope.
     dec, verb = gate(s, ctx, "finance", "waive", amount=body.amount)
     if dec.outcome == "DENY":
         raise HTTPException(403, dec.reason)
-    inv = s.query(D.FeeInvoice).get(body.invoice_id)
+    inv = s.query(D.FeeInvoice).filter(D.FeeInvoice.id == body.invoice_id, D.FeeInvoice.tenant_id == ctx["tenant_id"]).first()
     if not inv:
         raise HTTPException(404, "Invoice not found")
     if dec.outcome == "ESCALATE":
@@ -5871,404 +3467,12 @@ def waive_fee(body: WaiveIn, ctx=Depends(auth), s=Depends(db)):
 
 
 # --------------------------------------------------------------------------- #
-#  FINANCE · Phase 1 fee setup (draft structures only)
-# --------------------------------------------------------------------------- #
-def _fee_setup_gate(s, ctx, action):
-    if action == "view" and ctx["office_n"] in (3, 4, 22, 40):
-        require(gate(s, ctx, "finance", "view")[0])
-        return
-    if ctx["office_n"] != 22:
-        raise HTTPException(403, "Only the Finance Manager can manage fee setup")
-    require(gate(s, ctx, "finance", action)[0])
-
-
-def _fee_head_payload(row):
-    return {"id": row.id, "code": row.code, "name": row.name, "description": row.description or "",
-            "category": row.category, "is_mandatory": row.is_mandatory, "is_active": row.is_active,
-            "display_order": row.display_order, "created_at": row.created_at, "updated_at": row.updated_at}
-
-
-def _fee_structure_payload(s, row):
-    years = {x.id: x.name for x in s.query(D.AcademicYear).all()}
-    semesters = {x.id: x.name for x in s.query(D.Semester).all()}
-    campuses = {x.id: x.name for x in s.query(D.Campus).all()}
-    programs = {x.id: x.name for x in s.query(D.Program).all()}
-    batches = {x.id: x.name for x in s.query(D.Batch).all()}
-    student_types = {x.id: x.name for x in s.query(D.StudentType).all()}
-    heads = {x.id: x for x in s.query(D.FeeHead).all()}
-    lines = s.query(D.FeeStructureLine).filter(D.FeeStructureLine.fee_structure_id == row.id).order_by(D.FeeStructureLine.fee_head_id, D.FeeStructureLine.installment_no).all()
-    line_payloads = [{"id": line.id, "fee_head_id": line.fee_head_id,
-                      "fee_head_code": heads.get(line.fee_head_id).code if heads.get(line.fee_head_id) else "",
-                      "fee_head_name": heads.get(line.fee_head_id).name if heads.get(line.fee_head_id) else "",
-                      "amount": line.amount, "installment_no": line.installment_no,
-                      "installment_name": line.installment_name or "", "due_date": line.due_date,
-                      "is_mandatory": line.is_mandatory, "description": line.description or ""} for line in lines]
-    return {"id": row.id, "name": row.name, "code": row.code, "academic_year_id": row.academic_year_id,
-            "academic_year": years.get(row.academic_year_id, ""), "semester_id": row.semester_id,
-            "semester": semesters.get(row.semester_id, ""), "campus_id": row.campus_id,
-            "campus": campuses.get(row.campus_id, ""), "program_id": row.program_id,
-            "program": programs.get(row.program_id, ""), "batch_id": row.batch_id,
-            "batch": batches.get(row.batch_id, ""), "student_type_id": row.student_type_id,
-            "student_type": student_types.get(row.student_type_id, ""), "version": row.version,
-            "status": row.status, "effective_from": row.effective_from, "effective_to": row.effective_to,
-            "description": row.description or "", "notes": row.notes or "", "created_at": row.created_at,
-            "updated_at": row.updated_at,
-            "gross_total": sum((Decimal(str(line.amount or 0)) for line in lines), Decimal("0")),
-            "lines": line_payloads}
-
-
-def _sync_fee_structure_workflow_status(s, rows):
-    """Keep fee setup status aligned with its completed approval workflow.
-
-    This also repairs structures approved before workflow/status synchronization
-    was added. Published structures are never moved backwards.
-    """
-    workflow_ids = {row.workflow_id for row in rows if row.workflow_id}
-    if not workflow_ids:
-        return
-    workflows = {row.id: row for row in s.query(WorkflowInstance).filter(WorkflowInstance.id.in_(workflow_ids)).all()}
-    changed = False
-    for row in rows:
-        workflow = workflows.get(row.workflow_id)
-        if not workflow or row.status == "PUBLISHED":
-            continue
-        target = "APPROVED" if workflow.state == "approved" else ("REJECTED" if workflow.state == "rejected" else None)
-        if target and row.status != target:
-            row.status = target
-            row.updated_at = datetime.utcnow()
-            changed = True
-    if changed:
-        s.commit()
-
-
-class FeeHeadIn(BaseModel):
-    code: str = Field(min_length=1, max_length=60)
-    name: str = Field(min_length=1, max_length=160)
-    description: str = ""
-    category: str = "OTHER"
-    is_mandatory: bool = True
-    display_order: int = 0
-
-
-class FeeHeadStatusIn(BaseModel):
-    is_active: bool
-
-
-class FeeStructureLineIn(BaseModel):
-    fee_head_id: str
-    amount: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
-    installment_no: int = Field(default=1, ge=1)
-    installment_name: str = ""
-    due_date: date | None = None
-    is_mandatory: bool = True
-    description: str = ""
-
-    @field_validator("due_date", mode="before")
-    @classmethod
-    def blank_due_date_is_null(cls, value):
-        return None if value == "" else value
-
-
-class FeeStructureIn(BaseModel):
-    name: str = Field(default="", max_length=160)
-    code: str = Field(default="", max_length=80)
-    academic_year_id: str
-    semester_id: str
-    campus_id: str
-    program_id: str
-    batch_id: str
-    student_type_id: str
-    version: int = Field(default=1, ge=1)
-    effective_from: date | None = None
-    effective_to: date | None = None
-    description: str = ""
-    notes: str = ""
-    lines: list[FeeStructureLineIn] = Field(min_length=1)
-
-    @field_validator("effective_from", "effective_to", mode="before")
-    @classmethod
-    def blank_effective_date_is_null(cls, value):
-        return None if value == "" else value
-
-
-def _validate_fee_structure(s, body, structure_id: str | None = None):
-    references = ((D.AcademicYear, body.academic_year_id, "Academic year"), (D.Semester, body.semester_id, "Semester"),
-                  (D.Campus, body.campus_id, "Campus"), (D.Program, body.program_id, "Program"),
-                  (D.Batch, body.batch_id, "Batch"), (D.StudentType, body.student_type_id, "Student type"))
-    for model, ref_id, label in references:
-        item = s.get(model, ref_id)
-        if not item or getattr(item, "is_active", True) is False:
-            raise HTTPException(422, f"{label} does not exist or is inactive")
-    semester = s.get(D.Semester, body.semester_id)
-    if semester.academic_year_id != body.academic_year_id:
-        raise HTTPException(422, "Semester does not belong to the selected academic year")
-    if body.effective_from and body.effective_to and body.effective_to < body.effective_from:
-        raise HTTPException(422, "Effective-to date cannot be before effective-from date")
-    seen = set()
-    for line in body.lines:
-        key = (line.fee_head_id, line.installment_no)
-        if key in seen:
-            raise HTTPException(422, "Duplicate fee head installment in this structure")
-        seen.add(key)
-        head = s.get(D.FeeHead, line.fee_head_id)
-        if not head:
-            raise HTTPException(422, "Fee head does not exist")
-        if not head.is_active:
-            raise HTTPException(422, f"Inactive fee head '{head.code}' cannot be used")
-    duplicate = s.query(D.FeeStructure).filter(
-        D.FeeStructure.academic_year_id == body.academic_year_id, D.FeeStructure.semester_id == body.semester_id,
-        D.FeeStructure.campus_id == body.campus_id, D.FeeStructure.program_id == body.program_id,
-        D.FeeStructure.batch_id == body.batch_id, D.FeeStructure.student_type_id == body.student_type_id,
-        D.FeeStructure.version == body.version).first()
-    if duplicate and duplicate.id != structure_id:
-        raise HTTPException(409, "A fee structure already exists for this context and version")
-
-
-@router.get("/fees/reference-data")
-def fee_reference_data(ctx=Depends(auth), s=Depends(db)):
-    _fee_setup_gate(s, ctx, "view")
-    return {"academic_years": [{"id": x.id, "name": x.name} for x in s.query(D.AcademicYear).filter(D.AcademicYear.is_active == True).all()],
-            "semesters": [{"id": x.id, "academic_year_id": x.academic_year_id, "name": x.name, "sequence": x.sequence} for x in s.query(D.Semester).filter(D.Semester.is_active == True).all()],
-            "campuses": [{"id": x.id, "name": x.name} for x in s.query(D.Campus).filter(D.Campus.is_active == True).all()],
-            "programs": [{"id": x.id, "name": x.name, "code": x.code} for x in s.query(D.Program).all()],
-            "batches": [{"id": x.id, "name": x.name} for x in s.query(D.Batch).filter(D.Batch.is_active == True).all()],
-            "student_types": [{"id": x.id, "name": x.name} for x in s.query(D.StudentType).filter(D.StudentType.is_active == True).all()]}
-
-
-@router.get("/fees/heads")
-def list_fee_heads(include_inactive: bool = False, ctx=Depends(auth), s=Depends(db)):
-    _fee_setup_gate(s, ctx, "view")
-    query = s.query(D.FeeHead)
-    if not include_inactive: query = query.filter(D.FeeHead.is_active == True)
-    return {"heads": [_fee_head_payload(x) for x in query.order_by(D.FeeHead.display_order, D.FeeHead.name).all()]}
-
-
-@router.post("/fees/heads")
-def create_fee_head(body: FeeHeadIn, ctx=Depends(auth), s=Depends(db)):
-    _fee_setup_gate(s, ctx, "create")
-    code = body.code.strip().upper(); name = body.name.strip()
-    if s.query(D.FeeHead).filter(D.FeeHead.code == code).first(): raise HTTPException(409, "Fee head code already exists")
-    now = datetime.utcnow(); row = D.FeeHead(id=uid(), tenant_id=TENANT, code=code, name=name, description=body.description,
-        category=body.category, is_mandatory=body.is_mandatory, display_order=body.display_order, created_at=now, updated_at=now, created_by=ctx["sub"], updated_by=ctx["sub"])
-    s.add(row); s.commit(); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee_head.create", f"fee_head:{row.id}", "", "active", f"Created fee head {code}")
-    return {"head": _fee_head_payload(row)}
-
-
-@router.put("/fees/heads/{head_id}")
-def update_fee_head(head_id: str, body: FeeHeadIn, ctx=Depends(auth), s=Depends(db)):
-    _fee_setup_gate(s, ctx, "edit"); row = s.get(D.FeeHead, head_id)
-    if not row: raise HTTPException(404, "Fee head not found")
-    code = body.code.strip().upper(); existing = s.query(D.FeeHead).filter(D.FeeHead.code == code, D.FeeHead.id != head_id).first()
-    if existing: raise HTTPException(409, "Fee head code already exists")
-    row.code, row.name, row.description, row.category = code, body.name.strip(), body.description, body.category
-    row.is_mandatory, row.display_order, row.updated_by, row.updated_at = body.is_mandatory, body.display_order, ctx["sub"], datetime.utcnow()
-    s.commit(); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee_head.update", f"fee_head:{row.id}", "", "updated", f"Updated fee head {code}")
-    return {"head": _fee_head_payload(row)}
-
-
-@router.patch("/fees/heads/{head_id}/status")
-def set_fee_head_status(head_id: str, body: FeeHeadStatusIn, ctx=Depends(auth), s=Depends(db)):
-    _fee_setup_gate(s, ctx, "edit"); row = s.get(D.FeeHead, head_id)
-    if not row: raise HTTPException(404, "Fee head not found")
-    row.is_active, row.updated_by, row.updated_at = body.is_active, ctx["sub"], datetime.utcnow(); s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee_head.status", f"fee_head:{row.id}", "", "active" if body.is_active else "inactive", f"Changed fee head status")
-    return {"head": _fee_head_payload(row)}
-
-
-@router.get("/fee-structures")
-def list_fee_structures(academic_year_id: str = "", semester_id: str = "", campus_id: str = "", program_id: str = "", batch_id: str = "", student_type_id: str = "", status: str = "", ctx=Depends(auth), s=Depends(db)):
-    _fee_setup_gate(s, ctx, "view"); query = s.query(D.FeeStructure)
-    for field, value in ((D.FeeStructure.academic_year_id, academic_year_id), (D.FeeStructure.semester_id, semester_id), (D.FeeStructure.campus_id, campus_id), (D.FeeStructure.program_id, program_id), (D.FeeStructure.batch_id, batch_id), (D.FeeStructure.student_type_id, student_type_id), (D.FeeStructure.status, status)):
-        if value: query = query.filter(field == value)
-    rows = query.order_by(desc(D.FeeStructure.updated_at)).all()
-    _sync_fee_structure_workflow_status(s, rows)
-    return {"structures": [_fee_structure_payload(s, x) for x in rows]}
-
-
-@router.get("/fee-structures/{structure_id}")
-def get_fee_structure(structure_id: str, ctx=Depends(auth), s=Depends(db)):
-    _fee_setup_gate(s, ctx, "view"); row = s.get(D.FeeStructure, structure_id)
-    if not row: raise HTTPException(404, "Fee structure not found")
-    _sync_fee_structure_workflow_status(s, [row])
-    return {"structure": _fee_structure_payload(s, row)}
-
-
-@router.get("/fee-structures/{structure_id}/affected-students")
-def fee_structure_affected_students(structure_id: str, ctx=Depends(auth), s=Depends(db)):
-    """Students and invoices created by a published fee structure."""
-    _fee_setup_gate(s, ctx, "view")
-    row = s.get(D.FeeStructure, structure_id)
-    if not row:
-        raise HTTPException(404, "Fee structure not found")
-    students = {student.id: student for student in s.query(D.Student).all()}
-    invoices = (s.query(D.FeeInvoice)
-                .filter(D.FeeInvoice.fee_structure_id == row.id)
-                .order_by(D.FeeInvoice.student_id, D.FeeInvoice.due_date, D.FeeInvoice.id)
-                .all())
-    grouped = {}
-    for invoice in invoices:
-        student = students.get(invoice.student_id)
-        if not student:
-            continue
-        item = grouped.setdefault(student.id, {
-            "student_id": student.id, "roll_no": student.roll_no, "name": student.name,
-            "email": student.email, "section": student.section, "semester": student.semester,
-            "student_type": student.student_type, "invoiced": 0, "paid": 0,
-            "balance": 0, "invoice_count": 0, "status": "due",
-        })
-        item["invoiced"] += float(invoice.amount or 0)
-        item["paid"] += float(invoice.paid or 0)
-        item["balance"] += float((invoice.amount or 0) - (invoice.paid or 0))
-        item["invoice_count"] += 1
-    for item in grouped.values():
-        item["status"] = "paid" if item["balance"] <= 0 else ("partial" if item["paid"] else "due")
-    return {"structure": _fee_structure_payload(s, row), "students": list(grouped.values()),
-            "student_count": len(grouped), "invoice_count": len(invoices)}
-
-
-def _save_fee_structure(s, row, body, ctx):
-    _validate_fee_structure(s, body, row.id if row else None)
-    now = datetime.utcnow()
-    program = s.get(D.Program, body.program_id)
-    year = s.get(D.AcademicYear, body.academic_year_id)
-    semester = s.get(D.Semester, body.semester_id)
-    batch = s.get(D.Batch, body.batch_id)
-    student_type = s.get(D.StudentType, body.student_type_id)
-    generated_name = f"{program.code if program else body.program_id} · {year.name if year else body.academic_year_id} · {semester.name if semester else body.semester_id} · {student_type.name if student_type else body.student_type_id}"
-    generated_code = slug(f"{program.code if program else body.program_id}-{batch.name if batch else body.batch_id}-{semester.sequence if semester else body.semester_id}-{student_type.name if student_type else body.student_type_id}-v{body.version}").upper()
-    name = (body.name or "").strip() or generated_name
-    code = (body.code or "").strip().upper() or generated_code
-    if not row and s.query(D.FeeStructure).filter(D.FeeStructure.code == code).first():
-        code = f"{code}-{uid()[:4].upper()}"
-    if not row:
-        row = D.FeeStructure(id=uid(), tenant_id=TENANT, status="DRAFT", created_by=ctx["sub"], created_at=now)
-        s.add(row)
-    for field in ("name", "code", "academic_year_id", "semester_id", "campus_id", "program_id", "batch_id", "student_type_id", "version", "effective_from", "effective_to", "description", "notes"):
-        setattr(row, field, getattr(body, field))
-    row.name, row.code = name, code
-    row.updated_by, row.updated_at = ctx["sub"], now
-    s.flush()
-    s.query(D.FeeStructureLine).filter(D.FeeStructureLine.fee_structure_id == row.id).delete(synchronize_session=False)
-    for line in body.lines:
-        s.add(D.FeeStructureLine(id=uid(), fee_structure_id=row.id, fee_head_id=line.fee_head_id, amount=line.amount,
-              installment_no=line.installment_no, installment_name=line.installment_name, due_date=line.due_date,
-              is_mandatory=line.is_mandatory, description=line.description, created_at=now, updated_at=now))
-    return row
-
-
-@router.post("/fee-structures")
-def create_fee_structure(body: FeeStructureIn, ctx=Depends(auth), s=Depends(db)):
-    _fee_setup_gate(s, ctx, "create")
-    try:
-        row = _save_fee_structure(s, None, body, ctx); s.commit()
-    except HTTPException: s.rollback(); raise
-    except Exception: s.rollback(); raise HTTPException(409, "Could not save fee structure; check uniqueness and references")
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee_structure.create", f"fee_structure:{row.id}", "", "DRAFT", f"Created draft {row.code}")
-    return {"structure": _fee_structure_payload(s, row)}
-
-
-@router.put("/fee-structures/{structure_id}")
-def update_fee_structure(structure_id: str, body: FeeStructureIn, ctx=Depends(auth), s=Depends(db)):
-    _fee_setup_gate(s, ctx, "edit"); row = s.get(D.FeeStructure, structure_id)
-    if not row: raise HTTPException(404, "Fee structure not found")
-    if row.status != "DRAFT": raise HTTPException(409, "Only DRAFT fee structures can be edited")
-    try:
-        row = _save_fee_structure(s, row, body, ctx); s.commit()
-    except HTTPException: s.rollback(); raise
-    except Exception: s.rollback(); raise HTTPException(409, "Could not update fee structure; check uniqueness and references")
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee_structure.update", f"fee_structure:{row.id}", "DRAFT", "DRAFT", f"Updated draft {row.code}")
-    return {"structure": _fee_structure_payload(s, row)}
-
-
-@router.post("/fee-structures/{structure_id}/submit")
-def submit_fee_structure(structure_id: str, ctx=Depends(auth), s=Depends(db)):
-    _fee_setup_gate(s, ctx, "edit")
-    row = s.get(D.FeeStructure, structure_id)
-    if not row:
-        raise HTTPException(404, "Fee structure not found")
-    if row.status != "DRAFT":
-        raise HTTPException(409, "Only DRAFT fee structures can be submitted")
-    if not s.query(D.FeeStructureLine).filter(D.FeeStructureLine.fee_structure_id == row.id).first():
-        raise HTTPException(422, "A fee structure must contain at least one fee line")
-    wf = WorkflowInstance(id=uid(), tenant_id=TENANT, process_key="fee_structure",
-                          label="Fee structure approval", office_n=22,
-                          title=f"Approve fee structure: {row.name}", state="submitted",
-                          initiator_id=ctx["sub"], initiator_name=actor_name(s, ctx),
-                          # A fee structure applies to its selected campus.  The Finance
-                          # Manager may have university scope, but the Principal must be
-                          # able to approve the campus-level request.
-                          current_stage=1, scope_level="campus")
-    s.add(wf); s.flush(); row.workflow_id = wf.id; row.status = "SUBMITTED"; row.updated_by = ctx["sub"]; row.updated_at = datetime.utcnow(); s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee_structure.submit", f"fee_structure:{row.id}", "DRAFT", "SUBMITTED", "Submitted for approval")
-    return {"structure": _fee_structure_payload(s, row), "workflow_id": wf.id}
-
-
-@router.post("/fee-structures/{structure_id}/publish")
-def publish_fee_structure(structure_id: str, ctx=Depends(auth), s=Depends(db)):
-    """Publish a reviewed structure and apply its installments to matching students.
-
-    Existing invoices linked to this structure are reused, so retries cannot create duplicates.
-    """
-    _fee_setup_gate(s, ctx, "edit")
-    row = s.get(D.FeeStructure, structure_id)
-    if not row:
-        raise HTTPException(404, "Fee structure not found")
-    if row.status == "DRAFT":
-        raise HTTPException(409, "Fee structure must be approved before publishing")
-    if row.status == "PUBLISHED":
-        published_students = (s.query(D.Student).join(D.FeeInvoice, D.FeeInvoice.student_id == D.Student.id)
-                              .filter(D.FeeInvoice.fee_structure_id == row.id).distinct().all())
-        accounts_created = sum(1 for student in published_students if _ensure_student_portal_account(s, student))
-        if accounts_created:
-            s.commit()
-        return {"structure": _fee_structure_payload(s, row), "matched_students": len(published_students),
-                "invoices_created": 0, "student_accounts_created": accounts_created}
-    if row.status != "APPROVED":
-        raise HTTPException(409, "Only APPROVED fee structures can be published")
-    lines = s.query(D.FeeStructureLine).filter(D.FeeStructureLine.fee_structure_id == row.id).all()
-    if not lines:
-        raise HTTPException(422, "A fee structure must contain at least one fee line")
-    students = s.query(D.Student).filter(
-        D.Student.program_id == row.program_id,
-        D.Student.batch == s.get(D.Batch, row.batch_id).name,
-        D.Student.campus == s.get(D.Campus, row.campus_id).name,
-        D.Student.student_type == s.get(D.StudentType, row.student_type_id).name,
-        D.Student.status == "active",
-    ).all()
-    created = 0
-    accounts_created = 0
-    for student in students:
-        accounts_created += int(_ensure_student_portal_account(s, student))
-        for line in lines:
-            existing = s.query(D.FeeInvoice).filter(
-                D.FeeInvoice.student_id == student.id,
-                D.FeeInvoice.fee_structure_id == row.id,
-                D.FeeInvoice.term == f"{row.academic_year_id}:{row.semester_id}:line:{line.id}",
-            ).first()
-            if existing:
-                continue
-            s.add(D.FeeInvoice(id=uid(), tenant_id=TENANT, student_id=student.id,
-                               term=f"{row.academic_year_id}:{row.semester_id}:line:{line.id}",
-                               amount=float(line.amount), paid=0, status="due",
-                               due_date=line.due_date, fee_structure_id=row.id))
-            created += 1
-    row.status = "PUBLISHED"
-    row.updated_by, row.updated_at = ctx["sub"], datetime.utcnow()
-    s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee_structure.publish",
-                f"fee_structure:{row.id}", "DRAFT", "PUBLISHED",
-                f"Applied fee structure to {len(students)} matching students")
-    return {"structure": _fee_structure_payload(s, row), "matched_students": len(students),
-            "invoices_created": created, "student_accounts_created": accounts_created}
-
-
-# --------------------------------------------------------------------------- #
 #  LIBRARY
 # --------------------------------------------------------------------------- #
 @router.get("/library/books")
 def list_books(q: str = "", ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "library", "view")[0])
-    query = s.query(D.Book)
+    query = s.query(D.Book).filter(D.Book.tenant_id == ctx["tenant_id"])
     if q:
         like = f"%{q}%"
         query = query.filter((D.Book.title.ilike(like)) | (D.Book.author.ilike(like)))
@@ -6283,8 +3487,8 @@ def list_books(q: str = "", ctx=Depends(auth), s=Depends(db)):
 @router.get("/library/loans")
 def list_loans(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "library", "view")[0])
-    book_map = {b.id: b.title for b in s.query(D.Book).all()}
-    rows = s.query(D.BookLoan).filter(D.BookLoan.returned == False).all()
+    book_map = {b.id: b.title for b in s.query(D.Book).filter(D.Book.tenant_id == ctx["tenant_id"]).all()}
+    rows = s.query(D.BookLoan).filter(D.BookLoan.tenant_id == ctx["tenant_id"], D.BookLoan.returned == False).all()
     out = []
     for l in rows:
         overdue = l.due_on and l.due_on < date.today()
@@ -6306,16 +3510,16 @@ class IssueBookIn(BaseModel):
 def issue_book(body: IssueBookIn, ctx=Depends(auth), s=Depends(db)):
     dec, verb = gate(s, ctx, "library", "issue")
     require(dec)
-    b = s.query(D.Book).get(body.book_id)
+    b = s.query(D.Book).filter(D.Book.id == body.book_id, D.Book.tenant_id == ctx["tenant_id"]).first()
     if not b:
         raise HTTPException(404, "Book not found")
     if b.copies_available < 1:
         raise HTTPException(409, "No copies available")
     b.copies_available -= 1
     student = (s.query(D.Student)
-               .filter(or_(D.Student.id == body.borrower, D.Student.roll_no == body.borrower))
+               .filter(D.Student.tenant_id == ctx["tenant_id"], or_(D.Student.id == body.borrower, D.Student.roll_no == body.borrower))
                .first())
-    s.add(D.BookLoan(id=uid(), tenant_id=TENANT, book_id=b.id, borrower=body.borrower,
+    s.add(D.BookLoan(id=uid(), tenant_id=ctx["tenant_id"], book_id=b.id, borrower=body.borrower,
                      student_id=student.id if student else None,
                      borrower_name=body.borrower_name, issued_on=date.today(),
                      due_on=date.today() + timedelta(days=14), returned=False))
@@ -6329,11 +3533,11 @@ def issue_book(body: IssueBookIn, ctx=Depends(auth), s=Depends(db)):
 def return_book(loan_id: str, ctx=Depends(auth), s=Depends(db)):
     dec, verb = gate(s, ctx, "library", "return")
     require(dec)
-    l = s.query(D.BookLoan).get(loan_id)
+    l = s.query(D.BookLoan).filter(D.BookLoan.id == loan_id, D.BookLoan.tenant_id == ctx["tenant_id"]).first()
     if not l or l.returned:
         raise HTTPException(404, "Loan not found or already returned")
     l.returned = True
-    b = s.query(D.Book).get(l.book_id)
+    b = s.query(D.Book).filter(D.Book.id == l.book_id, D.Book.tenant_id == ctx["tenant_id"]).first()
     if b:
         b.copies_available += 1
     s.commit()
@@ -6348,7 +3552,13 @@ def return_book(loan_id: str, ctx=Depends(auth), s=Depends(db)):
 @router.get("/hr/leave")
 def list_leave(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "hr", "view")[0])
-    rows = s.query(D.LeaveRequest).filter(D.LeaveRequest.tenant_id == ctx.get("tenant_id", TENANT)).order_by(desc(D.LeaveRequest.id)).all()
+    tenant_id = ctx["tenant_id"]
+    rows = (s.query(D.LeaveRequest)
+            .filter(D.LeaveRequest.tenant_id == tenant_id)
+            .order_by(desc(D.LeaveRequest.id)).all())
+    campus = _authenticated_campus_scope(s, ctx)
+    if campus:
+        rows = [row for row in rows if row.campus_scope_id == campus.id]
     return {"leave": [{"id": l.id, "staff": l.staff_name, "kind": l.kind,
                        "from": l.from_date.isoformat(), "to": l.to_date.isoformat(),
                        "days": l.days, "reason": l.reason, "status": l.status}
@@ -6359,44 +3569,145 @@ def list_leave(ctx=Depends(auth), s=Depends(db)):
 @router.get("/hr/jobs")
 def list_jobs(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "hr", "view")[0])
-    rows = s.query(D.JobPosting).filter(D.JobPosting.tenant_id == ctx.get("tenant_id", TENANT)).all()
-    return {"jobs": [{"id": j.id, "title": j.title, "dept": j.dept, "kind": j.kind,
-                      "openings": j.openings, "status": j.status} for j in rows],
-              "can_post": can(s, ctx, "hr", "post_job")}
+    # Job postings are tenant-owned operational records.  Never use a default
+    # tenant here: the authenticated context is the sole ownership boundary.
+    rows = (s.query(D.JobPosting)
+            .filter(D.JobPosting.tenant_id == ctx["tenant_id"])
+            .order_by(desc(D.JobPosting.id)).all())
+    return {"jobs": [_job_payload(row) for row in rows],
+            "can_post": ctx.get("office_n") == 4 and can(s, ctx, "hr", "post_job")}
+
+
+class JobPostingIn(BaseModel):
+    title: str
+    dept_id: str
+    kind: str
+    openings: int
+    status: str = "open"
+    description: str = ""
+    qualification: str = ""
+    experience: str = ""
+    skills: str = ""
+    closing_date: date | None = None
+    priority: str = "normal"
+    notes: str = ""
+
+
+def _job_payload(row):
+    closing_date = getattr(row, "closing_date", None)
+    return {
+        "id": row.id, "title": row.title, "dept_id": getattr(row, "dept_id", None),
+        "dept": row.dept, "kind": row.kind, "openings": row.openings,
+        "status": row.status, "description": getattr(row, "description", "") or "",
+        "qualification": getattr(row, "qualification", "") or "",
+        "experience": getattr(row, "experience", "") or "",
+        "skills": getattr(row, "skills", "") or "",
+        "closing_date": closing_date.isoformat() if closing_date else None,
+        "priority": getattr(row, "priority", "normal") or "normal",
+        "notes": getattr(row, "notes", "") or "",
+        "created_at": row.created_at.isoformat() if getattr(row, "created_at", None) else None,
+    }
+
+
+@router.post("/hr/jobs")
+def create_job(body: JobPostingIn, ctx=Depends(auth), s=Depends(db)):
+    """Create one tenant-local recruitment requirement from the Principal portal."""
+    if ctx.get("office_n") != 4:
+        raise HTTPException(403, "Only the Principal may create recruitment requirements")
+    dec, _ = gate(s, ctx, "hr", "post_job")
+    require(dec)
+
+    title = body.title.strip()
+    if not title or len(title) > 180:
+        raise HTTPException(400, "A vacancy title of up to 180 characters is required")
+    if body.openings < 1 or body.openings > 999:
+        raise HTTPException(400, "Number of openings must be between 1 and 999")
+
+    kind = body.kind.strip()
+    if kind not in {"Faculty", "Staff", "Administrative", "Contract"}:
+        raise HTTPException(400, "Invalid employment type")
+    status = body.status.strip().lower()
+    if status not in {"open", "closed", "filled", "cancelled"}:
+        raise HTTPException(400, "Invalid vacancy status")
+    priority = body.priority.strip().lower() or "normal"
+    if priority not in {"low", "normal", "high", "urgent"}:
+        raise HTTPException(400, "Invalid vacancy priority")
+
+    # The selected reference record must belong to the Principal's tenant.
+    # A department ID from Main Campus or any other branch returns 404.
+    department = (s.query(D.Department)
+                  .filter(D.Department.id == body.dept_id,
+                          D.Department.tenant_id == ctx["tenant_id"])
+                  .first())
+    if not department:
+        raise HTTPException(404, "Department not found")
+
+    row = D.JobPosting(
+        id=uid(), tenant_id=ctx["tenant_id"], title=title,
+        dept_id=department.id, dept=department.name or department.code,
+        kind=kind, openings=body.openings, status=status,
+        description=body.description.strip(), qualification=body.qualification.strip(),
+        experience=body.experience.strip(), skills=body.skills.strip(),
+        closing_date=body.closing_date, priority=priority, notes=body.notes.strip(),
+        created_by=ctx["sub"],
+    )
+    s.add(row)
+    s.commit()
+    write_audit(
+        s, ctx["sub"], actor_name(s, ctx), ctx["office_n"],
+        "recruitment_requirement.created", f"job_posting:{row.id}", "", status,
+        "Recruitment requirement created", tenant_id=ctx["tenant_id"],
+        campus_scope_id=ctx["scope_ref"] or None,
+    )
+    return {"job": _job_payload(row), "decision": dec.as_dict()}
 
 
 @router.get("/faculty-staff")
 def faculty_staff(q: str = "", dept: str = "", kind: str = "", designation: str = "", status: str = "", page: int = Query(1, ge=1), page_size: int = Query(20, ge=10, le=100), ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "hr", "view")[0])
-    query = s.query(D.StaffMember)
+    tenant_id = ctx["tenant_id"]
+    query = s.query(D.StaffMember).filter(D.StaffMember.tenant_id == tenant_id)
+    campus = _authenticated_campus_scope(s, ctx)
+    if campus:
+        query = query.filter(D.StaffMember.campus_scope_id == campus.id)
     if q:
         like = f"%{q}%"; query = query.filter((D.StaffMember.name.ilike(like)) | (D.StaffMember.emp_id.ilike(like)) | (D.StaffMember.email.ilike(like)))
     if dept:
-        department = s.query(D.Department).filter(D.Department.code == dept).first()
+        department = s.query(D.Department).filter(D.Department.tenant_id == tenant_id, D.Department.code == dept).first()
         if department: query = query.filter(D.StaffMember.dept_id == department.id)
     today = date.today()
-    on_leave_ids = [row[0] for row in s.query(D.LeaveRequest.staff_id).filter(D.LeaveRequest.status == "approved", D.LeaveRequest.from_date <= today, D.LeaveRequest.to_date >= today).all()]
+    on_leave_ids = [row[0] for row in s.query(D.LeaveRequest.staff_id).filter(D.LeaveRequest.tenant_id == tenant_id, D.LeaveRequest.status == "approved", D.LeaveRequest.from_date <= today, D.LeaveRequest.to_date >= today).all()]
     if kind == "teaching": query = query.filter(D.StaffMember.designation.ilike("%professor%"))
     if kind == "non_teaching": query = query.filter(~D.StaffMember.designation.ilike("%professor%"))
     if kind == "on_leave": query = query.filter(D.StaffMember.id.in_(on_leave_ids))
     if designation: query = query.filter(D.StaffMember.designation == designation)
     if status: query = query.filter(D.StaffMember.status == status)
     total = query.count(); rows = query.order_by(D.StaffMember.emp_id).offset((page - 1) * page_size).limit(page_size).all()
-    departments = {row.id: row for row in s.query(D.Department).all()}
-    all_rows = s.query(D.StaffMember).all()
+    departments = {row.id: row for row in s.query(D.Department).filter(D.Department.tenant_id == tenant_id).all()}
+    all_rows = query.all()
     teaching = sum(1 for row in all_rows if "professor" in (row.designation or "").lower())
-    return {"staff": [{"id": row.id, "employee_id": row.emp_id, "name": row.name, "email": row.email, "department": departments[row.dept_id].name if row.dept_id in departments else "Administration", "department_code": departments[row.dept_id].code if row.dept_id in departments else "", "designation": row.designation, "type": "Teaching" if "professor" in (row.designation or "").lower() else "Non-Teaching", "status": row.status, "campus": row.campus, "on_leave": row.id in on_leave_ids} for row in rows], "total": total, "page": page, "page_size": page_size, "total_pages": max(1, (total + page_size - 1) // page_size), "summary": {"total": len(all_rows), "teaching": teaching, "non_teaching": len(all_rows)-teaching, "on_leave": len(on_leave_ids), "vacancies": sum(job.openings for job in s.query(D.JobPosting).filter(D.JobPosting.status == "open").all())}, "departments": [{"code": d.code, "name": d.name} for d in departments.values() if s.query(D.StaffMember).filter(D.StaffMember.dept_id == d.id).count()], "designations": sorted(set(row.designation for row in all_rows if row.designation)), "statuses": sorted(set(row.status for row in all_rows if row.status))}
+    scoped_leave_ids = {row.id for row in all_rows if row.id in on_leave_ids}
+    scoped_dept_ids = {row.dept_id for row in all_rows if row.dept_id}
+    summary = {"total": len(all_rows), "teaching": teaching,
+               "non_teaching": len(all_rows) - teaching,
+               "on_leave": len(scoped_leave_ids),
+               "vacancies": None if ctx.get("office_n") == 3 else sum(job.openings for job in s.query(D.JobPosting).filter(D.JobPosting.tenant_id == ctx["tenant_id"], D.JobPosting.status == "open").all())}
+    return {"staff": [{"id": row.id, "employee_id": row.emp_id, "name": row.name, "email": row.email, "department": departments[row.dept_id].name if row.dept_id in departments else "Administration", "department_code": departments[row.dept_id].code if row.dept_id in departments else "", "designation": row.designation, "type": "Teaching" if "professor" in (row.designation or "").lower() else "Non-Teaching", "status": row.status, "campus": row.campus, "on_leave": row.id in on_leave_ids} for row in rows], "total": total, "page": page, "page_size": page_size, "total_pages": max(1, (total + page_size - 1) // page_size), "summary": summary, "departments": [{"code": d.code, "name": d.name} for d in departments.values() if d.id in scoped_dept_ids], "designations": sorted(set(row.designation for row in all_rows if row.designation)), "statuses": sorted(set(row.status for row in all_rows if row.status))}
 
 
 @router.get("/faculty-staff/{staff_id}")
 def faculty_profile(staff_id: str, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "hr", "view")[0])
-    row = s.query(D.StaffMember).get(staff_id)
+    query = s.query(D.StaffMember).filter(D.StaffMember.id == staff_id, D.StaffMember.tenant_id == ctx["tenant_id"])
+    campus = _authenticated_campus_scope(s, ctx)
+    if campus:
+        query = query.filter(D.StaffMember.campus_scope_id == campus.id)
+    row = query.first()
     if not row: raise HTTPException(404, "Faculty or staff member not found")
-    department = s.query(D.Department).get(row.dept_id)
-    sections = s.query(D.Section).filter(D.Section.faculty_person_id == row.id).all()
-    students = sum(s.query(D.Enrollment).filter(D.Enrollment.section_id == section.id, D.Enrollment.status == "enrolled").count() for section in sections)
-    leave = s.query(D.LeaveRequest).filter(D.LeaveRequest.staff_id == row.id).order_by(D.LeaveRequest.from_date.desc()).all()
+    department = s.query(D.Department).filter(D.Department.id == row.dept_id, D.Department.tenant_id == ctx["tenant_id"]).first()
+    sections = s.query(D.Section).filter(D.Section.faculty_person_id == row.id, D.Section.tenant_id == ctx["tenant_id"]).all()
+    students = sum(s.query(D.Enrollment).filter(D.Enrollment.section_id == section.id, D.Enrollment.tenant_id == ctx["tenant_id"], D.Enrollment.status == "enrolled").count() for section in sections)
+    leave = s.query(D.LeaveRequest).filter(D.LeaveRequest.staff_id == row.id, D.LeaveRequest.tenant_id == ctx["tenant_id"]).order_by(D.LeaveRequest.from_date.desc()).all()
     return {"staff": {"id": row.id, "employee_id": row.emp_id, "name": row.name, "email": row.email, "department": department.name if department else "Administration", "designation": row.designation, "type": "Teaching" if "professor" in (row.designation or "").lower() else "Non-Teaching", "status": row.status, "campus": row.campus, "date_joined": row.date_joined.isoformat() if row.date_joined else None, "classes": len(sections), "students": students}, "sections": [{"code": section.section_code, "term": section.term, "schedule": section.schedule, "room": section.room} for section in sections], "leave": [{"kind": item.kind, "from": item.from_date.isoformat(), "to": item.to_date.isoformat(), "days": item.days, "status": item.status, "reason": item.reason} for item in leave]}
 
 
@@ -6407,17 +3718,28 @@ class LeaveDecisionIn(BaseModel):
 
 @router.post("/hr/leave/decide")
 def decide_leave(body: LeaveDecisionIn, ctx=Depends(auth), s=Depends(db)):
+    if body.action not in ("approve", "reject"):
+        raise HTTPException(400, "Invalid leave decision")
     act = "approve_leave" if body.action == "approve" else "reject_leave"
     dec, verb = gate(s, ctx, "hr", act)
     require(dec)
-    l = s.query(D.LeaveRequest).get(body.leave_id)
+    l = s.get(D.LeaveRequest, body.leave_id)
     if not l:
         raise HTTPException(404, "Leave request not found")
+    if l.tenant_id != ctx["tenant_id"]:
+        raise HTTPException(403, "Leave request is outside your authorized tenant")
+    staff = s.query(D.StaffMember).filter(D.StaffMember.id == l.staff_id, D.StaffMember.tenant_id == ctx["tenant_id"]).first()
+    campus = _authenticated_campus_scope(s, ctx)
+    if campus and (not staff or l.campus_scope_id != campus.id or staff.campus_scope_id != campus.id):
+        raise HTTPException(403, "Leave request is outside your authorized campus")
+    if l.status != "pending":
+        raise HTTPException(409, "This leave request has already been decided")
     l.status = "approved" if body.action == "approve" else "rejected"
     l.decided_by = actor_name(s, ctx)
     s.commit()
     write_audit(s, ctx["sub"], l.decided_by, ctx["office_n"], f"leave.{body.action}",
-                f"leave:{l.id}", "pending", l.status, f"{body.action} {l.staff_name}'s leave")
+                f"leave:{l.id}", "pending", l.status, f"{body.action} {l.staff_name}'s leave",
+                tenant_id=ctx["tenant_id"], campus_scope_id=l.campus_scope_id)
     return {"status": l.status, "decision": dec.as_dict()}
 
 
@@ -6425,427 +3747,250 @@ def decide_leave(body: LeaveDecisionIn, ctx=Depends(auth), s=Depends(db)):
 #  PROCUREMENT / ASSETS
 # --------------------------------------------------------------------------- #
 @router.get("/assets")
-def list_assets(ctx=Depends(auth), s=Depends(db)):
+def list_assets(q: str = "", category: str = "", status: str = "", ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "assets", "view")[0])
-    rows = s.query(D.Asset).filter(D.Asset.tenant_id == ctx.get("tenant_id", TENANT)).all()
-    return {"assets": [{"id": a.id, "tag": a.tag, "name": a.name, "category": a.category,
+    tenant_id = ctx["tenant_id"]
+    campus = None
+    if ctx.get("office_n") == 3:
+        campus = _campus_scope_for_campus_head(s, ctx)
+    scope_query = s.query(D.Asset).filter(D.Asset.tenant_id == tenant_id)
+    if campus:
+        scope_query = scope_query.filter(D.Asset.campus_scope_id == campus.id)
+    query = scope_query
+    if q:
+        like = f"%{q}%"
+        query = query.filter((D.Asset.tag.ilike(like)) | (D.Asset.name.ilike(like)) | (D.Asset.location.ilike(like)))
+    if category:
+        query = query.filter(D.Asset.category == category)
+    if status:
+        query = query.filter(D.Asset.status == status)
+    rows = query.order_by(D.Asset.tag).all()
+    all_rows = scope_query.order_by(D.Asset.tag).all()
+    if campus and not all_rows:
+        return {"assets": [], "categories": [], "statuses": [], "category_summary": [],
+                "summary": {}, "can_add": False, "data_status": "unavailable",
+                "reason": "No campus-owned asset records are available."}
+    assets = [{"id": a.id, "tag": a.tag, "name": a.name, "category": a.category,
                         "location": a.location, "status": a.status, "value": a.value}
-                       for a in rows],
-            "can_add": can(s, ctx, "assets", "add")}
+                       for a in rows]
+    return {"assets": assets,
+            "categories": sorted({a.category for a in all_rows if a.category}),
+            "statuses": sorted({a.status for a in all_rows if a.status}),
+            "category_summary": [{"category": category_name, "count": sum(a.category == category_name for a in all_rows),
+                                  "book_value": sum(a.value or 0 for a in all_rows if a.category == category_name)}
+                                 for category_name in sorted({a.category for a in all_rows if a.category})],
+            "summary": {"total": len(all_rows), "book_value": sum(a.value or 0 for a in all_rows), "in_service": sum(a.status == "in-service" for a in all_rows), "maintenance": sum(a.status == "maintenance" for a in all_rows)},
+            "can_add": can(s, ctx, "assets", "add"),
+            "campus_scope_id": campus.id if campus else None,
+            "data_status": "available"}
+
+
+@router.get("/procurement")
+def procurement(ctx=Depends(auth), s=Depends(db)):
+    """Completed procurement records from the existing asset register.
+
+    The schema has no requisition or PO table, so those arrays remain honestly
+    empty instead of fabricating operational records.
+    """
+    require(gate(s, ctx, "procurement", "view")[0])
+    rows = (s.query(D.Asset).filter(D.Asset.tenant_id == ctx["tenant_id"])
+            .order_by(D.Asset.id.desc()).all())
+    requests = (s.query(WorkflowInstance).filter(WorkflowInstance.tenant_id == ctx["tenant_id"], WorkflowInstance.process_key == "purchase_request")
+                .order_by(WorkflowInstance.updated_at.desc()).all())
+    return {"assets": [{"id": a.id, "tag": a.tag, "item": a.name, "category": a.category,
+                         "location": a.location, "value": a.value, "status": a.status}
+                        for a in rows],
+            "requisitions": [{"id": item.id, "title": item.title, "amount": item.amount,
+                                "state": item.state, "escalated": item.escalated,
+                                "initiator": item.initiator_name, "updated_at": item.updated_at.isoformat()}
+                               for item in requests],
+            "purchase_orders": []}
+
+
+@router.get("/approval-history")
+def approval_history(q: str = "", action: str = "", ctx=Depends(auth), s=Depends(db)):
+    """Actual approval decisions relevant to the signed-in Principal."""
+    require(gate(s, ctx, "approvals", "view")[0])
+    query = (s.query(Approval, WorkflowInstance)
+             .join(WorkflowInstance, Approval.workflow_id == WorkflowInstance.id)
+             .filter(WorkflowInstance.tenant_id == ctx["tenant_id"]))
+    if action:
+        query = query.filter(Approval.decision == action.upper())
+    if q:
+        like = f"%{q}%"
+        query = query.filter(or_(WorkflowInstance.title.ilike(like), WorkflowInstance.label.ilike(like), Approval.actor_name.ilike(like)))
+    rows = query.order_by(Approval.created_at.desc()).limit(200).all()
+    return {"events": [{"id": approval.id, "workflow_id": workflow.id, "request": workflow.title,
+                         "module": workflow.label, "requested_by": workflow.initiator_name,
+                         "action": approval.decision, "approver": approval.actor_name,
+                         "reason": approval.reason, "at": approval.created_at.isoformat(),
+                         "state": workflow.state}
+                        for approval, workflow in rows]}
+
+
+@router.get("/escalations")
+def escalations(q: str = "", state: str = "", ctx=Depends(auth), s=Depends(db)):
+    """Workflow escalation views, plus Principal-visible campus risk escalations."""
+    require(gate(s, ctx, "approvals", "view")[0])
+    if ctx.get("office_n") == 3:
+        return phase5d_escalations(status=state, ctx=ctx, s=s)
+    query = s.query(WorkflowInstance).filter(WorkflowInstance.tenant_id == ctx["tenant_id"], WorkflowInstance.escalated.is_(True))
+    if state:
+        query = query.filter(WorkflowInstance.state == state)
+    if q:
+        like = f"%{q}%"
+        query = query.filter(or_(WorkflowInstance.title.ilike(like), WorkflowInstance.label.ilike(like), WorkflowInstance.initiator_name.ilike(like)))
+    workflows = query.order_by(WorkflowInstance.updated_at.desc()).all()
+    destinations = {item["key"]: item.get("escalation", "") for item in APPROVAL_MATRIX}
+    outgoing_ids = {row[0] for row in s.query(Approval.workflow_id).filter(Approval.actor_id == ctx["sub"], Approval.decision == "ESCALATE").all()}
+    def row(workflow):
+        return {"id": workflow.id, "reference": workflow.id, "module": workflow.label,
+                "title": workflow.title, "from": workflow.initiator_name,
+                "to": destinations.get(workflow.process_key, ""), "status": workflow.state,
+                "created_at": workflow.created_at.isoformat(), "updated_at": workflow.updated_at.isoformat()}
+    incoming = [row(item) for item in workflows if "principal" in destinations.get(item.process_key, "").lower()]
+
+    # Campus risk escalations are persisted separately from workflow-state
+    # escalations.  A Principal must see only records explicitly routed to the
+    # Principal; this supplements the existing workflow list without changing
+    # its outgoing behaviour or any other office's visibility.
+    if ctx.get("office_n") == 4:
+        risk_query = s.query(D.EscalationRecord).filter(
+            D.EscalationRecord.tenant_id == ctx["tenant_id"],
+            D.EscalationRecord.destination_office_n == 4,
+        )
+        if state and state.upper() in ESCALATION_STATUSES:
+            risk_query = risk_query.filter(D.EscalationRecord.status == state.upper())
+        risk_rows = risk_query.order_by(desc(D.EscalationRecord.updated_at)).all()
+        for escalation in risk_rows:
+            risk = (s.query(D.RiskRecord)
+                    .filter(D.RiskRecord.id == escalation.source_ref,
+                            D.RiskRecord.tenant_id == escalation.tenant_id)
+                    .first()) if escalation.source_type == "risk" else None
+            initiator = actor_name(s, {"sub": escalation.created_by})
+            item = {
+                "id": escalation.id,
+                "reference": escalation.id,
+                "module": "Campus risk escalation",
+                "title": risk.title if risk else escalation.reason,
+                "from": initiator,
+                "to": office(escalation.destination_office_n).get("name", ""),
+                "status": escalation.status,
+                "created_at": escalation.created_at.isoformat(),
+                "updated_at": escalation.updated_at.isoformat(),
+            }
+            if not q or any(q.lower() in str(value).lower() for value in (
+                item["title"], item["from"], item["module"], escalation.reason,
+            )):
+                incoming.append(item)
+        incoming.sort(key=lambda item: item["updated_at"], reverse=True)
+    return {"incoming": incoming,
+            "outgoing": [row(item) for item in workflows if item.id in outgoing_ids]}
 
 
 # --------------------------------------------------------------------------- #
 #  HOSTEL / TRANSPORT
 # --------------------------------------------------------------------------- #
+def _hostel_scoped(s, model, ctx):
+    """Return records authorised by canonical tenant and campus ownership."""
+    query, _ = _scope_filter(s.query(model), model, s, ctx)
+    return query
+
+
+def _hostel_request_or_404(s, alloc_id: str, ctx, lock: bool = False):
+    query = _hostel_scoped(s, D.HostelAllocation, ctx).filter(D.HostelAllocation.id == alloc_id)
+    if lock:
+        query = query.with_for_update()
+    allocation = query.first()
+    if not allocation:
+        raise HTTPException(404, "Allocation request was not found in your authorized tenant or campus")
+    return allocation
+
+
 @router.get("/hostel")
 def hostel(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "hostel", "view")[0])
-    rooms = s.query(D.HostelRoom).all()
-    allocs = s.query(D.HostelAllocation).filter(D.HostelAllocation.status == "requested").all()
-    admission_requests = s.query(D.AdmissionServiceRequest).filter_by(department="HOSTEL", status="requested").all()
+    rooms = _hostel_scoped(s, D.HostelRoom, ctx).all()
+    allocs = (_hostel_scoped(s, D.HostelAllocation, ctx)
+              .filter(D.HostelAllocation.status == "requested").all())
     cap = sum(r.capacity for r in rooms)
     occ = sum(r.occupied for r in rooms)
     return {"summary": {"rooms": len(rooms), "capacity": cap, "occupied": occ,
                         "vacant": cap - occ},
-            "requests": ([{"id": a.id, "student": a.student_name, "status": a.status,
-                           "source": "student", "campus": "", "section": "", "group": ""} for a in allocs] +
-                         [{"id": a.id, "student": a.applicant_name, "status": a.status,
-                           "source": "admission", "campus": a.campus, "section": a.section_code,
-                           "group": a.group_name} for a in admission_requests]),
+            "requests": [{"id": a.id, "student": a.student_name, "status": a.status}
+                         for a in allocs],
             "can_allocate": can(s, ctx, "hostel", "allocate")}
 
 
+@router.get("/hostel/available-rooms/{alloc_id}")
+def available_hostel_rooms(alloc_id: str, ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "hostel", "allocate")[0])
+    allocation = _hostel_request_or_404(s, alloc_id, ctx)
+    if allocation.status != "requested":
+        raise HTTPException(409, "This allocation request has already been decided")
+    rooms = (_hostel_scoped(s, D.HostelRoom, ctx)
+             .filter(D.HostelRoom.occupied < D.HostelRoom.capacity)
+             .order_by(D.HostelRoom.block, D.HostelRoom.room_no).all())
+    return {"request": {"id": allocation.id, "student": allocation.student_name},
+            "rooms": [{"id": room.id, "block": room.block, "room_no": room.room_no,
+                       "capacity": room.capacity, "occupied": room.occupied,
+                       "vacant": room.capacity - room.occupied} for room in rooms]}
+
+
+class HostelAllocationIn(BaseModel):
+    room_id: str
+
+
 @router.post("/hostel/allocate/{alloc_id}")
-def allocate_hostel(alloc_id: str, ctx=Depends(auth), s=Depends(db)):
+def allocate_hostel(alloc_id: str, body: HostelAllocationIn, ctx=Depends(auth), s=Depends(db)):
     dec, verb = gate(s, ctx, "hostel", "allocate")
     require(dec)
-    a = s.query(D.HostelAllocation).get(alloc_id)
-    admission_request = None if a else s.query(D.AdmissionServiceRequest).get(alloc_id)
-    if not a and (not admission_request or admission_request.department != "HOSTEL"):
-        raise HTTPException(404, "Request not found")
-    if admission_request: admission_request.status = "allocated"
-    else: a.status = "allocated"
+    a = _hostel_request_or_404(s, alloc_id, ctx, lock=True)
+    if a.status != "requested":
+        raise HTTPException(409, "This allocation request has already been decided")
+    if a.student_id and (s.query(D.HostelAllocation)
+        .filter(D.HostelAllocation.tenant_id == ctx["tenant_id"],
+                                 D.HostelAllocation.student_id == a.student_id,
+                                 D.HostelAllocation.status == "allocated",
+                                 D.HostelAllocation.id != a.id).first()):
+        raise HTTPException(409, "This student already has an active hostel allocation")
+    room = (_hostel_scoped(s, D.HostelRoom, ctx)
+            .filter(D.HostelRoom.id == body.room_id).with_for_update().first())
+    if not room:
+        raise HTTPException(404, "Room was not found in your authorized tenant or campus")
+    if room.occupied >= room.capacity:
+        raise HTTPException(409, "This room is no longer available")
+    a.room_id = room.id
+    a.campus_scope_id = room.campus_scope_id
+    a.status = "allocated"
+    room.occupied += 1
     s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "hostel.allocate",
-                f"alloc:{alloc_id}", "requested", "allocated", f"Allocated room to {(a.student_name if a else admission_request.applicant_name)}")
-    return {"status": "allocated", "decision": dec.as_dict()}
+                f"alloc:{alloc_id}", "requested", "allocated",
+                f"Allocated {room.block} {room.room_no} to {a.student_name}",
+                tenant_id=ctx["tenant_id"], campus_scope_id=room.campus_scope_id)
+    return {"status": "allocated", "room": {"id": room.id, "block": room.block, "room_no": room.room_no},
+            "decision": dec.as_dict()}
 
-
-class TransportRouteIn(BaseModel):
-    name: str
-    route_code: str = ""
-    vehicle_no: str = ""
-    seats: int = Field(40, ge=1, le=200)
-
-class TransportStopIn(BaseModel):
-    route_id: str
-    name: str
-    sequence: int = Field(1, ge=1)
-    address: str = ""
-    pickup_time: str = ""
-    drop_time: str = ""
-    latitude: float | None = None
-    longitude: float | None = None
-
-class TransportVehicleIn(BaseModel):
-    number: str = ""
-    vehicle_number: str = ""
-    kind: str = "Bus"
-    capacity: int = Field(40, ge=1, le=200)
-    status: str = "available"
-    driver_id: str | None = None
-
-class TransportDriverIn(BaseModel):
-    name: str
-    employee_id: str = ""
-    phone: str = ""
-    license_no: str = ""
-    license_number: str = ""
-    license_expiry: date | None = None
-
-class TransportRequestIn(BaseModel):
-    route_id: str
-    stop_id: str = ""
-    pickup_stop_id: str = ""
-
-class TransportAllocationIn(BaseModel):
-    student_id: str
-    route_id: str
-    stop_id: str = ""
-    pickup_stop_id: str = ""
-    vehicle_id: str
-    driver_id: str | None = None
-
-def _transport_bundle(s):
-    routes = s.query(D.TransportRoute).filter(D.TransportRoute.status != "inactive").all()
-    vehicles = s.query(D.TransportVehicle).all()
-    drivers = s.query(D.TransportDriver).all()
-    reqs = s.query(D.TransportRequest).order_by(desc(D.TransportRequest.created_at)).all()
-    allocs = s.query(D.TransportAllocation).filter(D.TransportAllocation.status == "active").all()
-    students = s.query(D.Student).filter(D.Student.status == "active").all()
-    student_map = {x.id: x for x in students}
-    route_map = {x.id: x for x in routes}
-    vehicle_map = {x.id: x for x in vehicles}
-    driver_map = {x.id: x for x in drivers}
-    def stop_id(body): return body.stop_id or body.pickup_stop_id
-    def allocation_driver(a):
-        vehicle = vehicle_map.get(a.vehicle_id)
-        driver_id = a.driver_id or (vehicle.driver_id if vehicle else None)
-        return driver_id, driver_map.get(driver_id)
-    def allocation_payload(a):
-        student = student_map.get(a.student_id)
-        vehicle = vehicle_map.get(a.vehicle_id)
-        driver_id, driver = allocation_driver(a)
-        stop = s.get(D.TransportStop, a.stop_id)
-        route = route_map.get(a.route_id)
-        return {"id": a.id, "student_id": a.student_id, "student_name": student.name if student else a.student_id,
-                "roll_no": student.roll_no if student else "", "route_id": a.route_id,
-                "route": route.name if route else a.route_id, "stop_id": a.stop_id,
-                "pickup_stop_id": a.stop_id, "pickup": stop.name if stop else "",
-                "vehicle_id": a.vehicle_id, "vehicle": vehicle.number if vehicle else a.vehicle_id,
-                "driver_id": driver_id, "driver": driver.name if driver else "", "status": a.status}
-    return {
-        "routes": [{"id": r.id, "name": r.name, "route_code": r.id[:6].upper(), "status": "ACTIVE", "vehicle_no": r.vehicle_no, "seats": r.seats,
-                    "taken": sum(a.vehicle_id == r.vehicle_no for a in allocs),
-                    "stops": [{"id": x.id, "name": x.name, "sequence": x.sequence, "address": x.address,
-                               "pickup_time": x.pickup_time, "drop_time": x.drop_time,
-                               "latitude": x.latitude, "longitude": x.longitude}
-                              for x in s.query(D.TransportStop).filter(D.TransportStop.route_id == r.id).order_by(D.TransportStop.sequence).all()]}
-                   for r in routes],
-        "vehicles": [{"id": v.id, "number": v.number, "vehicle_number": v.number, "kind": v.kind, "vehicle_type": v.kind, "capacity": v.capacity,
-                      "status": v.status, "occupied": sum(a.vehicle_id == v.id for a in allocs),
-                      "driver_id": v.driver_id} for v in vehicles],
-        "drivers": [{"id": d.id, "name": d.name, "employee_id": d.employee_id, "phone": d.phone,
-                     "license_no": d.license_no, "license_expiry": d.license_expiry.isoformat() if d.license_expiry else "",
-                     "status": d.status} for d in drivers],
-        "requests": [{"id": q.id, "student_id": q.student_id, "student_name": (s.get(D.Student, q.student_id).name if s.get(D.Student, q.student_id) else q.student_id), "student": (s.get(D.Student, q.student_id).name if s.get(D.Student, q.student_id) else q.student_id),
-                      "route_id": q.route_id, "stop_id": q.stop_id, "pickup_stop_id": q.stop_id, "status": q.status.upper()} for q in reqs],
-        "allocations": [allocation_payload(a) for a in allocs],
-        "students": [{"id": x.id, "roll_no": x.roll_no, "name": x.name} for x in students],
-    }
 
 @router.get("/transport")
 def transport(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "transport", "view")[0])
-    rows = s.query(D.TransportRoute).all()
+    tenant_ids = [ctx["tenant_id"]]
+    if ctx["office_n"] == 1:
+        institution_id = ctx["institution_id"]
+        if not institution_id:
+            raise HTTPException(403, "An institution authority is required")
+        tenant_ids = [row.id for row in s.query(Tenant.id).filter(Tenant.institution_id == institution_id).all()]
+    query = s.query(D.TransportRoute).filter(D.TransportRoute.tenant_id.in_(tenant_ids))
+    campus = _authenticated_campus_scope(s, ctx)
+    if campus:
+        query = query.filter(D.TransportRoute.campus_scope_id == campus.id)
+    rows = query.order_by(D.TransportRoute.name).all()
     return {"routes": [{"id": r.id, "name": r.name, "stops": r.stops,
                         "vehicle": r.vehicle_no, "seats": r.seats,
                         "taken": r.seats_taken, "free": r.seats - r.seats_taken}
-                       for r in rows],
-            "requests": ([{"id": request.id, "student": request.student_name,
-                           "pickup_point": request.pickup_point, "status": request.status,
-                           "campus": "", "section": "", "group": ""}
-                          for request in s.query(D.TransportRequest).filter(D.TransportRequest.status == "requested").all()] +
-                         [{"id": request.id, "student": request.applicant_name,
-                           "pickup_point": request.pickup_point, "status": request.status,
-                           "campus": request.campus, "section": request.section_code, "group": request.group_name}
-                          for request in s.query(D.AdmissionServiceRequest).filter_by(department="TRANSPORT", status="requested").all()])}
-    return _transport_bundle(s)
-
-@router.post("/transport/routes")
-def create_transport_route(body: TransportRouteIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
-    row = D.TransportRoute(id=uid(), tenant_id=TENANT, name=body.name, vehicle_no=body.vehicle_no, seats=body.seats, status="active")
-    s.add(row); s.commit(); return {"id": row.id, "decision": dec.as_dict()}
-
-@router.post("/transport/stops")
-def create_transport_stop(body: TransportStopIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
-    if not s.get(D.TransportRoute, body.route_id): raise HTTPException(404, "Route not found")
-    row = D.TransportStop(id=uid(), tenant_id=TENANT, **body.model_dump())
-    s.add(row); s.commit(); return {"id": row.id, "decision": dec.as_dict()}
-
-@router.post("/transport/vehicles")
-def create_transport_vehicle(body: TransportVehicleIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
-    number = body.number or body.vehicle_number
-    if not number: raise HTTPException(422, "Vehicle number is required")
-    if s.query(D.TransportVehicle).filter(D.TransportVehicle.number == number).first(): raise HTTPException(409, "Vehicle number already exists")
-    if body.driver_id and not s.get(D.TransportDriver, body.driver_id):
-        raise HTTPException(404, "Driver not found")
-    row = D.TransportVehicle(id=uid(), tenant_id=TENANT, number=number, kind=body.kind, capacity=body.capacity, status=(body.status or "available").lower(), driver_id=body.driver_id); s.add(row); s.commit(); return {"id": row.id, "decision": dec.as_dict()}
-
-@router.post("/transport/drivers")
-def create_transport_driver(body: TransportDriverIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
-    phone = body.phone.strip()
-    if not phone:
-        raise HTTPException(422, "Driver phone number is required for login")
-    username = phone.replace(" ", "")
-    if s.query(User).filter(func.lower(User.username) == username.lower()).first():
-        raise HTTPException(409, "A login account already exists for this phone number")
-    driver_id, person_id, user_id = uid(), uid(), uid()
-    s.add(Person(id=person_id, tenant_id=TENANT, name=body.name.strip(), email=f"{username}@icms.edu", contact=phone))
-    s.add(User(id=user_id, tenant_id=TENANT, person_id=person_id, username=username,
-               password_hash=pwhash("demo123"), status="active", mfa_enabled=False,
-               office_n=31, role="Driver", scope_level="individual", scope_ref=driver_id))
-    row = D.TransportDriver(id=driver_id, tenant_id=TENANT, name=body.name.strip(), employee_id=body.employee_id,
-                            phone=phone, license_no=body.license_no or body.license_number,
-                            license_expiry=body.license_expiry, user_id=user_id)
-    s.add(row); s.commit()
-    return {"id": row.id, "login": {"username": username, "password": "demo123"}, "decision": dec.as_dict()}
-
-@router.post("/transport/requests")
-def create_transport_request(body: TransportRequestIn, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "transport", "view")[0])
-    student = s.query(D.Student).filter(or_(D.Student.user_id == ctx["sub"], D.Student.id == ctx.get("scope_ref"))).first()
-    if not student: raise HTTPException(403, "Student account required")
-    if s.query(D.TransportRequest).filter(D.TransportRequest.student_id == student.id, D.TransportRequest.status == "pending").first(): raise HTTPException(409, "Request already pending")
-    stop_id = body.stop_id or body.pickup_stop_id
-    if not stop_id: raise HTTPException(422, "Pickup stop is required")
-    row = D.TransportRequest(id=uid(), tenant_id=TENANT, student_id=student.id, route_id=body.route_id, stop_id=stop_id); s.add(row); s.commit(); return {"id": row.id, "status": row.status}
-
-@router.post("/transport/allocations")
-def create_transport_allocation(body: TransportAllocationIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
-    v = s.get(D.TransportVehicle, body.vehicle_id) or s.query(D.TransportVehicle).filter(D.TransportVehicle.number == body.vehicle_id).first()
-    # The UI historically used both ACTIVE and AVAILABLE (and older records
-    # may use ASSIGNED). Only maintenance/inactive vehicles must be blocked;
-    # assignment itself is a valid way to move an operational vehicle forward.
-    if not v or (v.status or "").strip().lower() in ("maintenance", "inactive", "retired"): raise HTTPException(400, "Vehicle is not available")
-    if s.query(D.TransportAllocation).filter(D.TransportAllocation.student_id == body.student_id, D.TransportAllocation.status == "active").first(): raise HTTPException(409, "Student already allocated")
-    occupied = s.query(D.TransportAllocation).filter(D.TransportAllocation.vehicle_id == v.id, D.TransportAllocation.status == "active").count()
-    if occupied >= v.capacity: raise HTTPException(400, "Vehicle has no available seats")
-    stop_id = body.stop_id or body.pickup_stop_id
-    row = D.TransportAllocation(id=uid(), tenant_id=TENANT, student_id=body.student_id, route_id=body.route_id, stop_id=stop_id, vehicle_id=body.vehicle_id, driver_id=body.driver_id); s.add(row); s.commit(); return {"id": row.id, "decision": dec.as_dict()}
-
-@router.post("/transport/requests/{request_id}/approve")
-def approve_transport_request(request_id: str, body: TransportAllocationIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
-    q = s.get(D.TransportRequest, request_id)
-    if not q or q.status != "pending": raise HTTPException(404, "Pending request not found")
-    q.status = "approved"
-    v = s.get(D.TransportVehicle, body.vehicle_id) or s.query(D.TransportVehicle).filter(D.TransportVehicle.number == body.vehicle_id).first()
-    if not v: raise HTTPException(404, "Vehicle not found")
-    s.add(D.TransportAllocation(id=uid(), tenant_id=TENANT, student_id=q.student_id, route_id=body.route_id, stop_id=body.stop_id or body.pickup_stop_id, vehicle_id=body.vehicle_id, driver_id=body.driver_id))
-    s.commit(); return {"status": q.status, "decision": dec.as_dict()}
-
-@router.post("/transport/requests/{request_id}/reject")
-def reject_transport_request(request_id: str, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
-    q=s.get(D.TransportRequest, request_id)
-    if not q: raise HTTPException(404, "Request not found")
-    q.status="rejected"; s.commit(); return {"status": q.status, "decision": dec.as_dict()}
-
-@router.put("/transport/allocations/{allocation_id}")
-def update_transport_allocation(allocation_id: str, body: TransportAllocationIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
-    a=s.get(D.TransportAllocation, allocation_id)
-    if not a: raise HTTPException(404, "Allocation not found")
-    for k in ("student_id","route_id","vehicle_id","driver_id"): setattr(a,k,getattr(body,k))
-    a.stop_id=body.stop_id or body.pickup_stop_id; s.commit(); return {"id":a.id,"decision":dec.as_dict()}
-
-@router.delete("/transport/allocations/{allocation_id}")
-def delete_transport_allocation(allocation_id: str, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
-    a=s.get(D.TransportAllocation, allocation_id)
-    if not a: raise HTTPException(404, "Allocation not found")
-    a.status="inactive"; s.commit(); return {"status":"inactive","decision":dec.as_dict()}
-
-@router.delete("/transport/routes/{route_id}")
-def delete_transport_route(route_id: str, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
-    r=s.get(D.TransportRoute, route_id)
-    if not r: raise HTTPException(404, "Route not found")
-    # Keep the route for history, but atomically remove its operational links.
-    # vehicle_no is the route assignment; clearing it leaves the vehicle and its
-    # driver assignment intact while making the vehicle route-less.
-    for allocation in s.query(D.TransportAllocation).filter(
-        D.TransportAllocation.route_id == route_id,
-        D.TransportAllocation.status == "active",
-    ).all():
-        allocation.status = "inactive"
-    r.status = "inactive"
-    r.vehicle_no = ""
-    s.commit()
-    return {"status":"inactive","decision":dec.as_dict()}
-
-@router.put("/transport/routes/{route_id}")
-def update_transport_route(route_id: str, body: TransportRouteIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
-    r = s.get(D.TransportRoute, route_id)
-    if not r: raise HTTPException(404, "Route not found")
-    r.name = body.name.strip() or r.name
-    r.vehicle_no = body.vehicle_no.strip()
-    r.seats = body.seats
-    s.commit()
-    return {"id": r.id, "decision": dec.as_dict()}
-
-@router.put("/transport/stops/{stop_id}")
-def update_transport_stop(stop_id: str, body: TransportStopIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
-    x=s.get(D.TransportStop, stop_id)
-    if not x: raise HTTPException(404, "Stop not found")
-    for k,v in body.model_dump().items(): setattr(x,k,v)
-    s.commit(); return {"id":x.id,"decision":dec.as_dict()}
-
-@router.delete("/transport/stops/{stop_id}")
-def delete_transport_stop(stop_id: str, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "add_route"); require(dec)
-    x=s.get(D.TransportStop, stop_id)
-    if not x: raise HTTPException(404, "Stop not found")
-    s.delete(x); s.commit(); return {"status":"deleted","decision":dec.as_dict()}
-
-@router.put("/transport/vehicles/{vehicle_id}")
-def update_transport_vehicle(vehicle_id: str, body: TransportVehicleIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
-    v=s.get(D.TransportVehicle, vehicle_id)
-    if not v: raise HTTPException(404, "Vehicle not found")
-    if body.driver_id and not s.get(D.TransportDriver, body.driver_id):
-        raise HTTPException(404, "Driver not found")
-    v.number=body.number or body.vehicle_number or v.number; v.kind=body.kind; v.capacity=body.capacity; v.status=(body.status or "available").lower(); v.driver_id=body.driver_id
-    s.commit(); return {"id":v.id,"decision":dec.as_dict()}
-
-@router.delete("/transport/vehicles/{vehicle_id}")
-def delete_transport_vehicle(vehicle_id: str, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
-    v = s.get(D.TransportVehicle, vehicle_id)
-    if not v: raise HTTPException(404, "Vehicle not found")
-    v.status = "inactive"; s.commit()
-    return {"status": "inactive", "decision": dec.as_dict()}
-
-@router.put("/transport/drivers/{driver_id}")
-def update_transport_driver(driver_id: str, body: TransportDriverIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
-    d = s.get(D.TransportDriver, driver_id)
-    if not d: raise HTTPException(404, "Driver not found")
-    d.name, d.employee_id, d.phone = body.name, body.employee_id, body.phone
-    d.license_no, d.license_expiry = body.license_no or body.license_number, body.license_expiry
-    s.commit(); return {"id": d.id, "decision": dec.as_dict()}
-
-@router.delete("/transport/drivers/{driver_id}")
-def delete_transport_driver(driver_id: str, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
-    d = s.get(D.TransportDriver, driver_id)
-    if not d: raise HTTPException(404, "Driver not found")
-    for v in s.query(D.TransportVehicle).filter(D.TransportVehicle.driver_id == driver_id).all(): v.driver_id = None
-    d.status = "inactive"; s.commit()
-    return {"status": "inactive", "decision": dec.as_dict()}
-
-class TransportTripIn(BaseModel):
-    vehicle_id: str
-    driver_id: str
-    trip_type: str
-
-class TransportLocationIn(BaseModel):
-    vehicle_id: str
-    trip_id: str
-    latitude: float
-    longitude: float
-
-@router.post("/transport/trips/start")
-def start_transport_trip(body: TransportTripIn, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
-    if body.trip_type not in ("PICKUP","DROP"): raise HTTPException(400,"Invalid trip type")
-    if s.query(D.TransportTrip).filter(D.TransportTrip.vehicle_id==body.vehicle_id,D.TransportTrip.status=="running").first(): raise HTTPException(409,"Trip already running")
-    t=D.TransportTrip(id=uid(),tenant_id=TENANT,vehicle_id=body.vehicle_id,driver_id=body.driver_id,trip_type=body.trip_type); s.add(t); s.commit(); return {"id":t.id,"status":t.status,"trip_type":t.trip_type}
-
-@router.post("/transport/trips/{trip_id}/end")
-def end_transport_trip(trip_id: str, ctx=Depends(auth), s=Depends(db)):
-    dec, _ = gate(s, ctx, "transport", "assign"); require(dec)
-    t=s.get(D.TransportTrip,trip_id)
-    if not t: raise HTTPException(404,"Trip not found")
-    t.status="ended"; t.ended_at=datetime.utcnow(); s.commit(); return {"status":t.status,"decision":dec.as_dict()}
-
-@router.post("/transport/locations")
-def send_transport_location(body: TransportLocationIn, ctx=Depends(auth), s=Depends(db)):
-    t=s.get(D.TransportTrip,body.trip_id)
-    if not t or t.status!="running" or t.vehicle_id!=body.vehicle_id: raise HTTPException(400,"No running trip")
-    t.latitude=body.latitude; t.longitude=body.longitude; t.updated_at=datetime.utcnow(); s.commit(); return {"status":"recorded"}
-
-@router.get("/transport/live-location/{vehicle_id}")
-def live_transport_location(vehicle_id: str, ctx=Depends(auth), s=Depends(db)):
-    t=s.query(D.TransportTrip).filter(D.TransportTrip.vehicle_id==vehicle_id).order_by(desc(D.TransportTrip.started_at)).first()
-    if not t: return {"status":"NOT_STARTED","location":None}
-    return {"status":t.status.upper(),"location":{"latitude":t.latitude,"longitude":t.longitude,"recorded_at":t.updated_at.isoformat() if t.updated_at else ""} if t.latitude is not None else None}
-
-@router.get("/transport/my-allocation")
-def my_transport_allocation(ctx=Depends(auth), s=Depends(db)):
-    student=s.query(D.Student).filter(or_(D.Student.user_id==ctx["sub"],D.Student.id==ctx.get("scope_ref"))).first()
-    a=s.query(D.TransportAllocation).filter(D.TransportAllocation.student_id==student.id,D.TransportAllocation.status=="active").first() if student else None
-    return {"allocation": {"id":a.id,"student_id":a.student_id,"route_id":a.route_id,"pickup_stop_id":a.stop_id,"vehicle_id":a.vehicle_id,"status":a.status} if a else None}
-
-@router.get("/transport/driver-dashboard")
-def transport_driver_dashboard(ctx=Depends(auth), s=Depends(db)):
-    d=s.query(D.TransportDriver).filter(D.TransportDriver.user_id==ctx["sub"]).first()
-    if not d: raise HTTPException(403,"Driver account required")
-    v=s.query(D.TransportVehicle).filter(D.TransportVehicle.driver_id==d.id).first()
-    allocs=s.query(D.TransportAllocation).filter(D.TransportAllocation.vehicle_id==v.id,D.TransportAllocation.status=="active").all() if v else []
-    route = s.get(D.TransportRoute, allocs[0].route_id) if allocs else None
-    students = []
-    for allocation in allocs:
-        student = s.get(D.Student, allocation.student_id)
-        students.append({
-            "student_id": allocation.student_id,
-            "student_name": student.name if student else allocation.student_id,
-            "roll_no": student.roll_no if student else "",
-        })
-    route_payload = None
-    if route:
-        route_payload = {
-            "id": route.id,
-            "name": route.name,
-            "vehicle_no": route.vehicle_no,
-            "stops": [{
-                "id": stop.id,
-                "name": stop.name,
-                "sequence": stop.sequence,
-                "pickup_time": stop.pickup_time,
-                "drop_time": stop.drop_time,
-            } for stop in s.query(D.TransportStop).filter_by(route_id=route.id).order_by(D.TransportStop.sequence).all()],
-        }
-    trip = s.query(D.TransportTrip).filter(
-        D.TransportTrip.driver_id == d.id,
-        D.TransportTrip.status == "running",
-    ).order_by(desc(D.TransportTrip.started_at)).first()
-    return {
-        "driver": {"id": d.id, "name": d.name, "phone": d.phone},
-        "driver_id": d.id,
-        "vehicle": {"id": v.id, "number": v.number, "vehicle_number": v.number, "capacity": v.capacity} if v else None,
-        "route": route_payload,
-        "students": students,
-        "trip": {"id": trip.id, "trip_type": trip.trip_type, "status": trip.status} if trip else None,
-    }
+                       for r in rows]}
 
 
 # --------------------------------------------------------------------------- #
@@ -6854,8 +3999,18 @@ def transport_driver_dashboard(ctx=Depends(auth), s=Depends(db)):
 @router.get("/research")
 def research(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "research", "view")[0])
-    rows = s.query(D.ResearchProject).all()
-    total = s.query(func.coalesce(func.sum(D.ResearchProject.grant_amount), 0)).scalar() or 0
+    tenant_ids = [ctx["tenant_id"]]
+    if ctx["office_n"] == 1:
+        institution_id = ctx["institution_id"]
+        if not institution_id:
+            raise HTTPException(403, "An institution authority is required")
+        tenant_ids = [row.id for row in s.query(Tenant.id).filter(Tenant.institution_id == institution_id).all()]
+    query = s.query(D.ResearchProject).filter(D.ResearchProject.tenant_id.in_(tenant_ids))
+    campus = _authenticated_campus_scope(s, ctx)
+    if campus:
+        query = query.filter(D.ResearchProject.campus_scope_id == campus.id)
+    rows = query.order_by(D.ResearchProject.title).all()
+    total = query.with_entities(func.coalesce(func.sum(D.ResearchProject.grant_amount), 0)).scalar() or 0
     return {"projects": [{"id": p.id, "title": p.title, "pi": p.pi_name, "dept": p.dept,
                           "agency": p.agency, "grant": p.grant_amount, "status": p.status}
                          for p in rows],
@@ -6869,68 +4024,1124 @@ def research(ctx=Depends(auth), s=Depends(db)):
 @router.get("/placements")
 def placements(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "placements", "view")[0])
-    rows = s.query(D.PlacementDrive).order_by(desc(D.PlacementDrive.ctc)).all()
-    placed = s.query(func.coalesce(func.sum(D.PlacementDrive.offers), 0)).scalar() or 0
+    tenant_id = ctx["tenant_id"]
+    campus = None
+    if ctx.get("office_n") == 3:
+        campus = _campus_scope_for_campus_head(s, ctx)
+    rows = s.query(D.PlacementDrive).filter(D.PlacementDrive.tenant_id == tenant_id)
+    if campus:
+        rows = rows.filter(D.PlacementDrive.campus_scope_id == campus.id)
+    rows = rows.order_by(desc(D.PlacementDrive.ctc)).all()
+    if campus and not rows:
+        return {"drives": [], "summary": {}, "can_add": False,
+                "data_status": "unavailable",
+                "reason": "No campus-owned placement drive records are available."}
+    placed = sum(d.offers or 0 for d in rows)
     top = max([r.ctc for r in rows], default=0)
     return {"drives": [{"id": d.id, "company": d.company, "role": d.role, "ctc": d.ctc,
                         "date": d.date.isoformat() if d.date else "", "eligible_cgpa": d.eligible_cgpa,
                         "status": d.status, "offers": d.offers} for d in rows],
             "summary": {"offers": placed, "top_ctc": top, "drives": len(rows)},
-            "can_add": can(s, ctx, "placements", "add_drive")}
+            "can_add": can(s, ctx, "placements", "add_drive"),
+            "campus_scope_id": campus.id if campus else None,
+            "data_status": "available"}
 
 
 # --------------------------------------------------------------------------- #
 #  GRIEVANCE
 # --------------------------------------------------------------------------- #
+_COMPLAINT_KINDS = {"Grievance", "Ragging", "Discipline"}
+_COMPLAINT_SEVERITIES = {"low", "normal", "high", "critical"}
+
+
+def _complaint_scope_query(s, ctx):
+    """Return complaints visible to the authenticated tenant and campus.
+
+    Campus-scoped actors intentionally cannot fall back to historical rows
+    without canonical ownership.  Those rows can be viewed only from a
+    tenant-wide authority until a safe ownership backfill is available.
+    """
+    query = s.query(D.Complaint).filter(D.Complaint.tenant_id == ctx["tenant_id"])
+    campus = _authenticated_campus_scope(s, ctx)
+    if campus is not None:
+        query = query.filter(D.Complaint.campus_scope_id == campus.id)
+    return query, campus
+
+
+def _complaint_or_404(s, ctx, complaint_id):
+    query, campus = _complaint_scope_query(s, ctx)
+    complaint = query.filter(D.Complaint.id == complaint_id).first()
+    if not complaint:
+        # Do not reveal whether a complaint exists in another tenant/campus.
+        raise HTTPException(404, "Complaint not found")
+    return complaint, campus
+
+
+def _complaint_payload(complaint, include_details=False):
+    payload = {
+        "id": complaint.id,
+        "kind": complaint.kind,
+        "raised_by": complaint.raised_by,
+        "subject": complaint.subject,
+        "status": complaint.status,
+        "severity": complaint.severity,
+        "created_at": complaint.created_at.isoformat() if complaint.created_at else None,
+    }
+    if include_details:
+        payload.update({
+            "detail": complaint.detail or "",
+            "investigation_notes": complaint.investigation_notes or "",
+            "investigated_by": complaint.investigated_by or "",
+            "investigated_at": complaint.investigated_at.isoformat() if complaint.investigated_at else None,
+            "resolution_notes": complaint.resolution_notes or "",
+            "resolved_by": complaint.resolved_by or "",
+            "resolved_at": complaint.resolved_at.isoformat() if complaint.resolved_at else None,
+        })
+    return payload
+
+
+def _commit_complaint_with_audit(s, ctx, complaint, action, previous, reason, campus):
+    """Commit the complaint change and its audit entry as one transaction."""
+    try:
+        write_audit(
+            s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], action,
+            f"complaint:{complaint.id}", previous, complaint.status, reason,
+            ctx.get("auth_level", "mfa"), tenant_id=ctx["tenant_id"],
+            campus_scope_id=campus.id,
+        )
+    except Exception:
+        # write_audit commits the SQLAlchemy session.  Any exception before
+        # that commit must discard both the complaint mutation and audit row.
+        s.rollback()
+        raise
+
+
 @router.get("/grievance")
 def grievance(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "grievance", "view")[0])
-    rows = s.query(D.Complaint).order_by(desc(D.Complaint.created_at)).all()
-    return {"complaints": [{"id": c.id, "kind": c.kind, "raised_by": c.raised_by,
-                            "subject": c.subject, "status": c.status,
-                            "severity": c.severity,
-                            "created_at": c.created_at.isoformat()} for c in rows],
+    query, _campus = _complaint_scope_query(s, ctx)
+    rows = query.order_by(desc(D.Complaint.created_at)).all()
+    return {"complaints": [_complaint_payload(c) for c in rows],
+            "can_investigate": can(s, ctx, "grievance", "investigate"),
             "can_resolve": can(s, ctx, "grievance", "resolve"),
-            "can_raise": can(s, ctx, "grievance", "raise")}
+            "can_raise": can(s, ctx, "grievance", "raise"),
+            "data_status": "available"}
 
 
 class ComplaintIn(BaseModel):
     kind: str = "Grievance"
     subject: str
-    detail: str = ""
+    detail: str
+    severity: str = "normal"
+
+
+class ComplaintNotesIn(BaseModel):
+    notes: str
+
+
+class ResolveIn(BaseModel):
+    complaint_id: str
+    # status is retained only to decode the old request shape.  Transitions are
+    # now server-controlled and cannot be selected by the browser.
+    status: str = "resolved"
+    notes: str = ""
+
+
+def _validated_complaint_input(body: ComplaintIn):
+    kind = (body.kind or "").strip().title()
+    subject = (body.subject or "").strip()
+    detail = (body.detail or "").strip()
+    severity = (body.severity or "normal").strip().lower()
+    if kind not in _COMPLAINT_KINDS:
+        raise HTTPException(422, "Complaint type must be Grievance, Ragging, or Discipline")
+    if not subject:
+        raise HTTPException(422, "Subject is required")
+    if not detail:
+        raise HTTPException(422, "Complaint details are required")
+    if severity not in _COMPLAINT_SEVERITIES:
+        raise HTTPException(422, "Severity must be low, normal, high, or critical")
+    return kind, subject, detail, severity
 
 
 @router.post("/grievance")
 def raise_complaint(body: ComplaintIn, ctx=Depends(auth), s=Depends(db)):
     dec, verb = gate(s, ctx, "grievance", "raise")
     require(dec)
+    campus = _authenticated_campus_scope(s, ctx)
+    if campus is None:
+        raise HTTPException(403, "A canonical campus scope is required to raise a complaint")
+    kind, subject, detail, severity = _validated_complaint_input(body)
     cid = uid()
-    s.add(D.Complaint(id=cid, tenant_id=TENANT, kind=body.kind,
-                      raised_by=actor_name(s, ctx), subject=body.subject,
-                      detail=body.detail, status="open"))
-    s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "grievance.raise",
-                f"complaint:{cid}", "", "open", body.subject)
-    return {"id": cid, "decision": dec.as_dict()}
+    complaint = D.Complaint(
+        id=cid, tenant_id=ctx["tenant_id"], campus_scope_id=campus.id,
+        kind=kind, raised_by=actor_name(s, ctx), subject=subject, detail=detail,
+        severity=severity, status="open",
+    )
+    s.add(complaint)
+    _commit_complaint_with_audit(s, ctx, complaint, "grievance.raise", "", subject, campus)
+    return {"id": cid, "complaint": _complaint_payload(complaint, include_details=True),
+            "decision": dec.as_dict()}
 
 
-class ResolveIn(BaseModel):
-    complaint_id: str
-    status: str = "resolved"
+@router.get("/grievance/{complaint_id}")
+def grievance_detail(complaint_id: str, ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "grievance", "view")[0])
+    complaint, _campus = _complaint_or_404(s, ctx, complaint_id)
+    return {"complaint": _complaint_payload(complaint, include_details=True)}
+
+
+@router.post("/grievance/{complaint_id}/investigate")
+def investigate_complaint(complaint_id: str, body: ComplaintNotesIn,
+                          ctx=Depends(auth), s=Depends(db)):
+    dec, _verb = gate(s, ctx, "grievance", "investigate")
+    require(dec)
+    complaint, campus = _complaint_or_404(s, ctx, complaint_id)
+    notes = (body.notes or "").strip()
+    if not notes:
+        raise HTTPException(422, "Investigation notes are required")
+    if complaint.status != "open":
+        raise HTTPException(409, "Only open complaints can be investigated")
+    previous = complaint.status
+    complaint.status = "investigating"
+    complaint.investigation_notes = notes
+    complaint.investigated_by = actor_name(s, ctx)
+    complaint.investigated_at = datetime.utcnow()
+    _commit_complaint_with_audit(s, ctx, complaint, "grievance.investigate", previous, notes, campus)
+    return {"complaint": _complaint_payload(complaint, include_details=True),
+            "decision": dec.as_dict()}
 
 
 @router.post("/grievance/resolve")
-def resolve_complaint(body: ResolveIn, ctx=Depends(auth), s=Depends(db)):
+def resolve_complaint_legacy(body: ResolveIn, ctx=Depends(auth), s=Depends(db)):
+    """Backward-compatible endpoint for clients predating the detail modal."""
+    return _resolve_complaint(body.complaint_id, body.notes, ctx, s)
+
+
+@router.post("/grievance/{complaint_id}/resolve")
+def resolve_complaint(complaint_id: str, body: ComplaintNotesIn,
+                      ctx=Depends(auth), s=Depends(db)):
+    return _resolve_complaint(complaint_id, body.notes, ctx, s)
+
+
+def _resolve_complaint(complaint_id: str, notes: str, ctx, s):
     dec, verb = gate(s, ctx, "grievance", "resolve")
     require(dec)
-    c = s.query(D.Complaint).get(body.complaint_id)
-    if not c:
-        raise HTTPException(404, "Complaint not found")
-    c.status = body.status
+    complaint, campus = _complaint_or_404(s, ctx, complaint_id)
+    resolution = (notes or "").strip()
+    if not resolution:
+        raise HTTPException(422, "Resolution details are required")
+    if complaint.status != "investigating":
+        raise HTTPException(409, "Only investigating complaints can be resolved")
+    previous = complaint.status
+    complaint.status = "resolved"
+    complaint.resolution_notes = resolution
+    complaint.resolved_by = actor_name(s, ctx)
+    complaint.resolved_at = datetime.utcnow()
+    _commit_complaint_with_audit(s, ctx, complaint, "grievance.resolve", previous, resolution, campus)
+    return {"complaint": _complaint_payload(complaint, include_details=True),
+            "decision": dec.as_dict()}
+
+
+# --------------------------------------------------------------------------- #
+#  CAMPUS ESCALATIONS & REPORTING
+# ---------------------------------------------------------------------------
+ESCALATION_PRIORITIES = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
+ESCALATION_STATUSES = {"DRAFT", "SUBMITTED", "RECEIVED", "FOLLOW_UP", "RESOLVED", "CLOSED"}
+REPORT_TYPES = {"MONTHLY_CAMPUS_REPORT", "IMMEDIATE_RISK_EXCEPTION_REPORT"}
+REPORT_STATUSES = {"DRAFT", "SUBMITTED", "VC_REVIEW", "RETURNED", "RESUBMITTED", "APPROVED"}
+
+
+def _phase5d_scope(s, ctx):
+    if ctx.get("office_n") not in (1, 2, 3, 4):
+        raise HTTPException(403, "This action is restricted to authorized escalation/report offices")
+    tenant_id = ctx["tenant_id"]
+    query = s.query(OrgScope).filter(OrgScope.tenant_id == tenant_id, OrgScope.level == "campus")
+    ref = (ctx["scope_ref"] or "").strip()
+    scope = query.filter(OrgScope.id == ref).first() if ref.startswith("scope_") else query.filter(OrgScope.name == ref).first()
+    if ctx.get("office_n") in (3, 4) and not scope:
+        raise HTTPException(403, "A canonical campus scope is required")
+    return scope
+
+
+def _phase5d_gate(s, ctx, module, action):
+    decision, _ = gate(s, ctx, module, action)
+    require(decision)
+    return decision
+
+
+def _escalation_destination(s, source_type, source_ref, priority, ctx):
+    category = ""
+    if source_type == "risk":
+        risk, _ = _risk_or_404(s, source_ref, ctx)
+        category = risk.category
+    if priority == "CRITICAL":
+        if category == "Operations":
+            return 2, "Vice Chairman", [4]
+        if category in ("Safety", "Compliance", "Administration"):
+            return 1, "Chairman", [2]
+        return 2, "Vice Chairman", [4]
+    if priority == "HIGH":
+        if category in ("Academic", "Student", "Faculty/Workforce", "Compliance"):
+            return 4, "Principal", []
+        return 2, "Vice Chairman", []
+    return 4, "Principal", []
+
+
+def _escalation_event(s, row, ctx, event_type, previous, current, reason=""):
+    event = D.EscalationEvent(id=uid(), tenant_id=ctx["tenant_id"], escalation_id=row.id,
+                              actor_id=ctx["sub"], event_type=event_type, reason=reason,
+                              previous_status=previous, new_status=current)
+    s.add(event); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], f"escalation.{event_type}", f"escalation:{row.id}", previous, current, reason, ctx.get("auth_level", "mfa"))
+
+
+def _escalation_payload(s, row):
+    return {"id": row.id, "tenant_id": row.tenant_id, "campus_scope_id": row.campus_scope_id,
+            "created_by": row.created_by, "owner_id": row.owner_id, "owner": _risk_owner_name(s, row.owner_id),
+            "source_type": row.source_type, "source_ref": row.source_ref, "reason": row.reason,
+            "priority": row.priority, "destination_office_n": row.destination_office_n,
+            "destination_user_id": row.destination_user_id, "destination": office(row.destination_office_n).get("name", ""),
+            "status": row.status, "due_at": row.due_at.isoformat() if row.due_at else None,
+            "received_at": row.received_at.isoformat() if row.received_at else None,
+            "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+            "closed_at": row.closed_at.isoformat() if row.closed_at else None,
+            "resolution_notes": row.resolution_notes, "workflow_id": row.workflow_id,
+            "overdue": bool(row.due_at and row.due_at < datetime.utcnow() and row.status not in ("RESOLVED", "CLOSED")),
+            "created_at": row.created_at.isoformat(), "updated_at": row.updated_at.isoformat()}
+
+
+class EscalationCreateIn(BaseModel):
+    source_type: str
+    source_ref: str
+    reason: str
+    priority: str
+    owner_id: str | None = None
+    due_at: datetime | None = None
+
+
+class EscalationUpdateIn(BaseModel):
+    reason: str | None = None
+    owner_id: str | None = None
+    due_at: datetime | None = None
+
+
+class Phase5DReasonIn(BaseModel):
+    reason: str = ""
+    feedback: str = ""
+
+
+class ReportCreateIn(BaseModel):
+    report_type: str
+    period_start: date
+    period_end: date
+    title: str
+
+
+class ReportUpdateIn(BaseModel):
+    title: str | None = None
+    period_start: date | None = None
+    period_end: date | None = None
+
+
+class ReportFeedbackIn(BaseModel):
+    feedback: str = ""
+
+
+def _escalation_or_404(s, escalation_id, ctx):
+    campus = _phase5d_scope(s, ctx)
+    query = s.query(D.EscalationRecord).filter(D.EscalationRecord.id == escalation_id,
+                                               D.EscalationRecord.tenant_id == ctx["tenant_id"])
+    if ctx.get("office_n") == 3:
+        query = query.filter(D.EscalationRecord.campus_scope_id == campus.id)
+    row = query.first()
+    if not row:
+        raise HTTPException(404, "Escalation not found")
+    return row
+
+
+@router.get("/escalations")
+def phase5d_escalations(status: str = "", priority: str = "", source_type: str = "", destination_office_n: int | None = None, ctx=Depends(auth), s=Depends(db)):
+    _phase5d_gate(s, ctx, "escalations", "view")
+    query = s.query(D.EscalationRecord).filter(D.EscalationRecord.tenant_id == ctx["tenant_id"])
+    campus = _phase5d_scope(s, ctx)
+    if ctx.get("office_n") == 3:
+        query = query.filter(D.EscalationRecord.campus_scope_id == campus.id)
+    if status:
+        if status not in ESCALATION_STATUSES: raise HTTPException(400, "Unknown escalation status")
+        query = query.filter(D.EscalationRecord.status == status)
+    if priority:
+        if priority not in ESCALATION_PRIORITIES: raise HTTPException(400, "Unknown escalation priority")
+        query = query.filter(D.EscalationRecord.priority == priority)
+    if source_type: query = query.filter(D.EscalationRecord.source_type == source_type)
+    if destination_office_n: query = query.filter(D.EscalationRecord.destination_office_n == destination_office_n)
+    rows = query.order_by(desc(D.EscalationRecord.updated_at)).all()
+    return {"escalations": [_escalation_payload(s, row) for row in rows], "total": len(rows)}
+
+
+@router.post("/escalations")
+def create_escalation(body: EscalationCreateIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _phase5d_gate(s, ctx, "escalations", "create")
+    campus = _phase5d_scope(s, ctx)
+    if body.priority not in ESCALATION_PRIORITIES or body.source_type != "risk":
+        raise HTTPException(400, "Escalations must reference a supported risk source and priority")
+    risk, _ = _risk_or_404(s, body.source_ref, ctx)
+    destination_office, _, additional_offices = _escalation_destination(s, body.source_type, body.source_ref, body.priority, ctx)
+    owner = _risk_owner_for_scope(s, body.owner_id, campus, ctx["tenant_id"]) if body.owner_id else None
+    escalation_id = uid()
+    row = D.EscalationRecord(id=escalation_id, tenant_id=ctx["tenant_id"], campus_scope_id=campus.id,
+                             created_by=ctx["sub"], owner_id=owner.id if owner else risk.owner_id,
+                             source_type=body.source_type, source_ref=body.source_ref, reason=body.reason.strip(),
+                             priority=body.priority, destination_office_n=destination_office, status="DRAFT", due_at=body.due_at)
+    s.add(row); s.commit(); _escalation_event(s, row, ctx, "create", "", "DRAFT", row.reason)
+    return {"escalation": _escalation_payload(s, row), "decision": decision.as_dict(), "additional_destinations": additional_offices}
+
+
+@router.post("/risks/{risk_id}/escalations")
+def create_risk_escalation(risk_id: str, body: EscalationCreateIn, ctx=Depends(auth), s=Depends(db)):
+    body.source_type = "risk"; body.source_ref = risk_id
+    return create_escalation(body, ctx, s)
+
+
+@router.get("/escalations/{escalation_id}")
+def get_escalation(escalation_id: str, ctx=Depends(auth), s=Depends(db)):
+    _phase5d_gate(s, ctx, "escalations", "view")
+    row = _escalation_or_404(s, escalation_id, ctx)
+    events = s.query(D.EscalationEvent).filter(D.EscalationEvent.escalation_id == row.id).order_by(D.EscalationEvent.created_at).all()
+    return {"escalation": _escalation_payload(s, row), "events": [{"id": e.id, "event_type": e.event_type, "reason": e.reason, "previous_status": e.previous_status, "new_status": e.new_status, "created_at": e.created_at.isoformat()} for e in events]}
+
+
+@router.patch("/escalations/{escalation_id}")
+def update_escalation(escalation_id: str, body: EscalationUpdateIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _phase5d_gate(s, ctx, "escalations", "edit")
+    row = _escalation_or_404(s, escalation_id, ctx)
+    if row.created_by != ctx["sub"] or row.status not in ("DRAFT", "FOLLOW_UP"):
+        raise HTTPException(403, "Only the creator may edit a draft or follow-up escalation")
+    if body.reason is not None: row.reason = body.reason.strip()
+    if body.due_at is not None: row.due_at = body.due_at
+    if body.owner_id is not None: row.owner_id = _risk_owner_for_scope(s, body.owner_id, _phase5d_scope(s, ctx), ctx["tenant_id"]).id
+    row.updated_at = datetime.utcnow(); s.commit(); _escalation_event(s, row, ctx, "follow_up", row.status, row.status, row.reason)
+    return {"escalation": _escalation_payload(s, row), "decision": decision.as_dict()}
+
+
+def _change_escalation(escalation_id, target, event_type, body, ctx, s):
+    action = ("submit" if target == "SUBMITTED" else
+              "receive" if target == "RECEIVED" else
+              "follow_up" if target == "FOLLOW_UP" else
+              "resolve" if target == "RESOLVED" else
+              "close")
+    decision = _phase5d_gate(s, ctx, "escalations", action)
+    row = _escalation_or_404(s, escalation_id, ctx); previous = row.status
+    allowed = {"SUBMITTED": {"DRAFT"}, "RECEIVED": {"SUBMITTED"}, "FOLLOW_UP": {"RECEIVED", "SUBMITTED"}, "RESOLVED": {"FOLLOW_UP", "RECEIVED", "SUBMITTED"}, "CLOSED": {"RESOLVED"}}
+    if previous not in allowed[target]: raise HTTPException(409, f"Cannot transition escalation from {previous} to {target}")
+    if target == "CLOSED" and row.created_by == ctx["sub"] and ctx.get("office_n") == 3:
+        raise HTTPException(403, "Independent review is required before creator closure")
+    row.status = target; row.updated_at = datetime.utcnow()
+    if target == "RECEIVED": row.received_at = row.updated_at
+    if target == "RESOLVED": row.resolved_at = row.updated_at
+    if target == "CLOSED": row.closed_at = row.updated_at; row.resolution_notes = body.feedback if hasattr(body, "feedback") else body.reason
+    s.commit(); _escalation_event(s, row, ctx, event_type, previous, target, getattr(body, "reason", "") or getattr(body, "feedback", ""))
+    if target == "SUBMITTED":
+        recipients = [row.destination_user_id] if row.destination_user_id else []
+        additional_offices = []
+        if row.source_type == "risk":
+            _, _, additional_offices = _escalation_destination(
+                s, row.source_type, row.source_ref, row.priority, ctx)
+        recipients.extend(user.id for office_n in ([row.destination_office_n] + additional_offices)
+                          for user in s.query(User).filter(User.tenant_id == row.tenant_id, User.office_n == office_n, User.status == "active").all())
+        for recipient_id in set(recipients):
+            notify(s, recipient_id, "Escalation received", f"escalation:{row.id} — {row.reason}", severity="critical" if row.priority == "CRITICAL" else "action")
+    elif target in ("FOLLOW_UP", "RESOLVED", "CLOSED") and row.created_by != ctx["sub"]:
+        notify(s, row.created_by, f"Escalation {target.lower()}", f"escalation:{row.id} — {getattr(body, 'reason', '') or getattr(body, 'feedback', '')}", severity="info")
+    return {"escalation": _escalation_payload(s, row), "decision": decision.as_dict()}
+
+
+@router.post("/escalations/{escalation_id}/submit")
+def submit_escalation(escalation_id: str, body: Phase5DReasonIn, ctx=Depends(auth), s=Depends(db)):
+    return _change_escalation(escalation_id, "SUBMITTED", "submit", body, ctx, s)
+
+
+@router.post("/escalations/{escalation_id}/receive")
+def receive_escalation(escalation_id: str, body: Phase5DReasonIn, ctx=Depends(auth), s=Depends(db)):
+    row = _escalation_or_404(s, escalation_id, ctx)
+    if ctx.get("office_n") != row.destination_office_n:
+        raise HTTPException(403, "Only the configured destination office may receive this escalation")
+    return _change_escalation(escalation_id, "RECEIVED", "receive", body, ctx, s)
+
+
+@router.post("/escalations/{escalation_id}/follow-up")
+def follow_up_escalation(escalation_id: str, body: Phase5DReasonIn, ctx=Depends(auth), s=Depends(db)):
+    return _change_escalation(escalation_id, "FOLLOW_UP", "follow_up", body, ctx, s)
+
+
+@router.post("/escalations/{escalation_id}/resolve")
+def resolve_escalation(escalation_id: str, body: Phase5DReasonIn, ctx=Depends(auth), s=Depends(db)):
+    return _change_escalation(escalation_id, "RESOLVED", "resolve", body, ctx, s)
+
+
+@router.post("/escalations/{escalation_id}/close")
+def close_escalation(escalation_id: str, body: Phase5DReasonIn, ctx=Depends(auth), s=Depends(db)):
+    return _change_escalation(escalation_id, "CLOSED", "close", body, ctx, s)
+
+
+def _report_scope_or_404(s, report_id, ctx):
+    campus = _phase5d_scope(s, ctx)
+    query = s.query(D.CampusReport).filter(D.CampusReport.id == report_id, D.CampusReport.tenant_id == ctx["tenant_id"])
+    if ctx.get("office_n") == 3: query = query.filter(D.CampusReport.campus_scope_id == campus.id)
+    row = query.first()
+    if not row: raise HTTPException(404, "Campus report not found")
+    return row, campus
+
+
+def _report_payload(row, snapshot=None):
+    return {"id": row.id, "tenant_id": row.tenant_id, "campus_scope_id": row.campus_scope_id, "created_by": row.created_by,
+            "owner_id": row.owner_id, "report_type": row.report_type, "period_start": row.period_start.isoformat(),
+            "period_end": row.period_end.isoformat(), "title": row.title, "status": row.status, "version": row.version,
+            "submitted_at": row.submitted_at.isoformat() if row.submitted_at else None, "returned_at": row.returned_at.isoformat() if row.returned_at else None,
+            "approved_at": row.approved_at.isoformat() if row.approved_at else None, "vc_feedback": row.vc_feedback,
+            "workflow_id": row.workflow_id, "created_at": row.created_at.isoformat(), "updated_at": row.updated_at.isoformat(), "snapshot": snapshot}
+
+
+def _report_data_snapshot(s, campus, ctx):
+    risks = s.query(D.RiskRecord).filter(D.RiskRecord.tenant_id == ctx["tenant_id"], D.RiskRecord.campus_scope_id == campus.id).all()
+    actions = s.query(D.CorrectiveAction).join(D.RiskRecord, D.CorrectiveAction.risk_id == D.RiskRecord.id).filter(D.CorrectiveAction.tenant_id == ctx["tenant_id"], D.RiskRecord.campus_scope_id == campus.id).all()
+    escalations = s.query(D.EscalationRecord).filter(D.EscalationRecord.tenant_id == ctx["tenant_id"], D.EscalationRecord.campus_scope_id == campus.id).all()
+    now = datetime.utcnow().isoformat()
+    unavailable = {"status": "unavailable", "source_as_of": now, "notes": "No verified campus-scoped provider is available."}
+    return {"source_as_of": now, "sections": {
+        "risks": {"status": "available", "source_as_of": now, "items": [_risk_payload(s, r, ctx) for r in risks]},
+        "corrective_actions": {"status": "available", "source_as_of": now, "items": [_action_payload(s, a) for a in actions]},
+        "escalations": {"status": "available", "source_as_of": now, "items": [_escalation_payload(s, e) for e in escalations]},
+        "executive_summary": unavailable, "academic": unavailable, "students": unavailable, "attendance": unavailable,
+        "workforce": unavailable, "finance": unavailable, "infrastructure": unavailable, "placements": unavailable,
+        "approvals": unavailable, "kpis": unavailable, "bop_status": unavailable,
+        "requests_for_decision": {"status": "available", "source_as_of": now, "items": []},
+    }}
+
+
+def _report_snapshot(s, row):
+    return s.query(D.CampusReportSnapshot).filter(D.CampusReportSnapshot.report_id == row.id, D.CampusReportSnapshot.version == row.version).first()
+
+
+@router.get("/campus-reports")
+def list_campus_reports(ctx=Depends(auth), s=Depends(db)):
+    _phase5d_gate(s, ctx, "campus_reports", "view"); campus = _phase5d_scope(s, ctx)
+    query = s.query(D.CampusReport).filter(D.CampusReport.tenant_id == ctx["tenant_id"])
+    if ctx.get("office_n") == 3: query = query.filter(D.CampusReport.campus_scope_id == campus.id)
+    rows = query.order_by(desc(D.CampusReport.updated_at)).all()
+    return {"reports": [_report_payload(row) for row in rows], "total": len(rows)}
+
+
+@router.post("/campus-reports")
+def create_campus_report(body: ReportCreateIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _phase5d_gate(s, ctx, "campus_reports", "create"); campus = _phase5d_scope(s, ctx)
+    if body.report_type not in REPORT_TYPES or body.period_end < body.period_start or not body.title.strip(): raise HTTPException(400, "Invalid report type, period, or title")
+    row = D.CampusReport(id=uid(), tenant_id=ctx["tenant_id"], campus_scope_id=campus.id, created_by=ctx["sub"], owner_id=ctx["sub"], report_type=body.report_type, period_start=body.period_start, period_end=body.period_end, title=body.title.strip(), status="DRAFT", version=1)
+    s.add(row); s.commit(); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "report.create", f"report:{row.id}", "", "DRAFT", row.title, ctx.get("auth_level", "mfa"))
+    return {"report": _report_payload(row), "decision": decision.as_dict()}
+
+
+@router.get("/campus-reports/{report_id}")
+def get_campus_report(report_id: str, ctx=Depends(auth), s=Depends(db)):
+    _phase5d_gate(s, ctx, "campus_reports", "view"); row, _ = _report_scope_or_404(s, report_id, ctx); snapshot = _report_snapshot(s, row)
+    payload = json.loads(snapshot.snapshot_payload) if snapshot else None
+    return {"report": _report_payload(row, payload)}
+
+
+@router.patch("/campus-reports/{report_id}")
+def update_campus_report(report_id: str, body: ReportUpdateIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _phase5d_gate(s, ctx, "campus_reports", "edit"); row, _ = _report_scope_or_404(s, report_id, ctx)
+    if row.created_by != ctx["sub"] or row.status not in ("DRAFT", "RETURNED"): raise HTTPException(403, "Only draft or returned reports may be edited")
+    values = body.model_dump(exclude_unset=True) if hasattr(body, "model_dump") else body.dict(exclude_unset=True)
+    for key, value in values.items(): setattr(row, key, value.strip() if isinstance(value, str) else value)
+    if row.period_end < row.period_start: raise HTTPException(400, "Report period is invalid")
+    row.updated_at = datetime.utcnow(); s.commit(); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "report.edit", f"report:{row.id}", row.status, row.status, row.title, ctx.get("auth_level", "mfa"))
+    return {"report": _report_payload(row), "decision": decision.as_dict()}
+
+
+def _submit_report(report_id, resubmit, ctx, s):
+    decision = _phase5d_gate(s, ctx, "campus_reports", "resubmit" if resubmit else "submit"); row, campus = _report_scope_or_404(s, report_id, ctx)
+    allowed = ("RETURNED",) if resubmit else ("DRAFT",)
+    if row.created_by != ctx["sub"] or row.status not in allowed: raise HTTPException(409, "Report is not eligible for submission")
+    row.version += 1 if resubmit else 0; row.status = "VC_REVIEW"; row.submitted_at = datetime.utcnow(); row.updated_at = row.submitted_at
+    snapshot = D.CampusReportSnapshot(id=uid(), report_id=row.id, version=row.version, snapshot_payload=json.dumps(_report_data_snapshot(s, campus, ctx), sort_keys=True), source_as_of=datetime.utcnow())
+    s.add(snapshot)
+    wf = WorkflowInstance(id=uid(), tenant_id=ctx["tenant_id"], process_key="campus_report_v1", label="Campus report", office_n=3, title=row.title, state="under_review", initiator_id=ctx["sub"], initiator_name=actor_name(s, ctx), current_stage=1, scope_level="campus", campus_scope_id=campus.id)
+    s.add(wf); row.workflow_id = wf.id; s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "report.resubmit" if resubmit else "report.submit", f"report:{row.id}", "RETURNED" if resubmit else "DRAFT", row.status, row.title, ctx.get("auth_level", "mfa"))
+    vc = s.query(User).filter(User.tenant_id == ctx["tenant_id"], User.office_n == 2, User.status == "active").first()
+    if vc: notify(s, vc.id, "Campus report submitted", f"report:{row.id} — {row.title}", severity="action")
+    return {"report": _report_payload(row, json.loads(snapshot.snapshot_payload)), "decision": decision.as_dict()}
+
+
+@router.post("/campus-reports/{report_id}/submit")
+def submit_campus_report(report_id: str, ctx=Depends(auth), s=Depends(db)):
+    return _submit_report(report_id, False, ctx, s)
+
+
+@router.post("/campus-reports/{report_id}/resubmit")
+def resubmit_campus_report(report_id: str, ctx=Depends(auth), s=Depends(db)):
+    return _submit_report(report_id, True, ctx, s)
+
+
+@router.get("/campus-reports/{report_id}/snapshot")
+def get_campus_report_snapshot(report_id: str, ctx=Depends(auth), s=Depends(db)):
+    _phase5d_gate(s, ctx, "campus_reports", "view"); row, _ = _report_scope_or_404(s, report_id, ctx); snapshot = _report_snapshot(s, row)
+    if not snapshot: raise HTTPException(404, "Report snapshot not found")
+    return {"report_id": row.id, "version": snapshot.version, "snapshot": json.loads(snapshot.snapshot_payload), "source_as_of": snapshot.source_as_of.isoformat()}
+
+
+@router.get("/campus-reports/vc/inbox")
+def vc_campus_report_inbox(ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") != 2: raise HTTPException(403, "Only the Vice Chairman may review campus reports")
+    rows = s.query(D.CampusReport).filter(D.CampusReport.tenant_id == ctx["tenant_id"], D.CampusReport.status == "VC_REVIEW").order_by(desc(D.CampusReport.submitted_at)).all()
+    return {"reports": [_report_payload(row) for row in rows], "total": len(rows)}
+
+
+@router.post("/campus-reports/{report_id}/return")
+def return_campus_report(report_id: str, body: ReportFeedbackIn, ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") != 2: raise HTTPException(403, "Only the Vice Chairman may return reports")
+    decision = _phase5d_gate(s, ctx, "campus_reports", "return")
+    if not body.feedback.strip(): raise HTTPException(400, "Feedback is required when returning a report")
+    row, _ = _report_scope_or_404(s, report_id, {**ctx, "office_n": 2, "scope_level": "university", "scope_ref": "scope_global"}); previous = row.status
+    if previous != "VC_REVIEW": raise HTTPException(409, "Report is not awaiting VC review")
+    row.status = "RETURNED"; row.returned_at = datetime.utcnow(); row.vc_feedback = body.feedback.strip(); row.updated_at = row.returned_at; s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "report.return", f"report:{row.id}", previous, row.status, body.feedback, ctx.get("auth_level", "mfa"))
+    notify(s, row.created_by, "Campus report returned", f"report:{row.id} — {body.feedback}", severity="action")
+    return {"report": _report_payload(row), "decision": decision.as_dict()}
+
+
+@router.post("/campus-reports/{report_id}/approve")
+def approve_campus_report(report_id: str, ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") != 2: raise HTTPException(403, "Only the Vice Chairman may approve reports")
+    row, _ = _report_scope_or_404(s, report_id, {**ctx, "office_n": 2, "scope_level": "university", "scope_ref": "scope_global"}); previous = row.status
+    if previous != "VC_REVIEW": raise HTTPException(409, "Report is not awaiting VC review")
+    decision = authorize(ctx=ctx, action="approve", resource="campus_reports", rbac_authority=rbac_for(2, 2, "approve"), workflow_state=previous, workflow_valid_states=["VC_REVIEW"], target_scope_level="campus")
+    require(decision); row.status = "APPROVED"; row.approved_at = datetime.utcnow(); row.updated_at = row.approved_at; s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "report.approve", f"report:{row.id}", previous, row.status, row.title, ctx.get("auth_level", "mfa")); notify(s, row.created_by, "Campus report approved", f"report:{row.id} — {row.title}", severity="info")
+    return {"report": _report_payload(row), "decision": decision.as_dict()}
+
+
+# --------------------------------------------------------------------------- #
+#  CAMPUS RISK & ISSUES
+# --------------------------------------------------------------------------- #
+RISK_CATEGORIES = {
+    "Academic", "Student", "Faculty/Workforce", "Finance", "Infrastructure",
+    "Operations", "Compliance", "Safety", "Administration",
+}
+RISK_SEVERITIES = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
+RISK_RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+RISK_LEVELS = {"LOW", "MEDIUM", "HIGH"}
+RISK_STATUSES = {"OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED"}
+ACTION_STATUSES = {"OPEN", "IN_PROGRESS", "COMPLETED", "VERIFIED"}
+RISK_TRANSITIONS = {
+    "OPEN": {"OPEN", "IN_PROGRESS", "RESOLVED"},
+    "IN_PROGRESS": {"IN_PROGRESS", "RESOLVED"},
+    "RESOLVED": {"RESOLVED", "CLOSED"},
+    "CLOSED": {"CLOSED"},
+}
+ACTION_TRANSITIONS = {
+    "OPEN": {"OPEN", "IN_PROGRESS", "COMPLETED"},
+    "IN_PROGRESS": {"IN_PROGRESS", "COMPLETED"},
+    "COMPLETED": {"COMPLETED", "VERIFIED"},
+    "VERIFIED": {"VERIFIED"},
+}
+
+
+def _risk_campus_scope(s, ctx):
+    if ctx.get("office_n") != 3 or ctx.get("scope_level") != "campus":
+        raise HTTPException(403, "Only a Campus Head may access campus risks")
+    tenant_id = ctx["tenant_id"]
+    scope_ref = (ctx["scope_ref"] or "").strip()
+    query = s.query(OrgScope).filter(OrgScope.tenant_id == tenant_id,
+                                     OrgScope.level == "campus")
+    if scope_ref.startswith("scope_"):
+        scope = query.filter(OrgScope.id == scope_ref).first()
+    else:
+        scope = query.filter(OrgScope.name == scope_ref).first()
+    if not scope:
+        raise HTTPException(403, "A canonical campus scope is required")
+    return scope
+
+
+def _risk_gate(s, ctx, action):
+    _risk_campus_scope(s, ctx)
+    decision, _ = gate(s, ctx, "risks", action)
+    require(decision)
+    return decision
+
+
+def _risk_owner_for_scope(s, owner_id, campus_scope, tenant_id):
+    if not owner_id:
+        return None
+    owner = (s.query(User)
+             .filter(User.id == owner_id, User.tenant_id == tenant_id, User.status == "active")
+             .first())
+    if not owner or not scope_covers(owner.scope_level or "individual", "campus"):
+        raise HTTPException(400, "Owner is not authorized for this campus")
+    if owner.scope_level == "campus":
+        ref = (owner.scope_ref or "").strip()
+        owner_scope = s.query(OrgScope).filter(OrgScope.tenant_id == tenant_id,
+                                                OrgScope.level == "campus")
+        owner_scope = (owner_scope.filter(OrgScope.id == ref).first()
+                       if ref.startswith("scope_") else owner_scope.filter(OrgScope.name == ref).first())
+        if not owner_scope or owner_scope.id != campus_scope.id:
+            raise HTTPException(400, "Owner is outside the authorized campus")
+    return owner
+
+
+def _risk_owner_name(s, owner_id):
+    if not owner_id:
+        return "Unassigned"
+    owner = s.get(User, owner_id)
+    if not owner:
+        return "Unknown"
+    person = s.get(Person, owner.person_id)
+    return person.name if person else owner.username
+
+
+def _risk_overdue(row, now=None):
+    return bool(row.due_at and row.due_at < (now or datetime.utcnow()) and row.status != "CLOSED")
+
+
+def _risk_payload(s, row, ctx):
+    actions = []
+    if row.status in ("OPEN", "IN_PROGRESS"):
+        actions.extend(["edit", "assign", "resolve"])
+    elif row.status == "RESOLVED":
+        actions.append("close")
+    if row.status != "CLOSED" and row.severity in ("HIGH", "CRITICAL") and not row.escalated_at:
+        actions.append("escalate")
+    action_rows = s.query(D.CorrectiveAction).filter(
+        D.CorrectiveAction.tenant_id == ctx["tenant_id"],
+        D.CorrectiveAction.risk_id == row.id).order_by(D.CorrectiveAction.created_at).all()
+    return {
+        "id": row.id, "tenant_id": row.tenant_id, "campus_scope_id": row.campus_scope_id,
+        "created_by": row.created_by, "owner_id": row.owner_id,
+        "owner": _risk_owner_name(s, row.owner_id), "category": row.category,
+        "title": row.title, "description": row.description, "severity": row.severity,
+        "likelihood": row.likelihood, "impact": row.impact, "priority": row.priority,
+        "status": row.status, "source_type": row.source_type, "source_ref": row.source_ref,
+        "due_at": row.due_at.isoformat() if row.due_at else None,
+        "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+        "closed_at": row.closed_at.isoformat() if row.closed_at else None,
+        "resolution_notes": row.resolution_notes, "escalated_at": row.escalated_at.isoformat() if row.escalated_at else None,
+        "escalation_destination": row.escalation_destination,
+        "escalation_reason": row.escalation_reason, "overdue": _risk_overdue(row),
+        "escalation_workflow_id": row.escalation_workflow_id,
+        "actions": [_action_payload(s, item) for item in action_rows],
+        "available_actions": actions,
+    }
+
+
+def _action_payload(s, row):
+    return {
+        "id": row.id, "risk_id": row.risk_id, "owner_id": row.owner_id,
+        "owner": _risk_owner_name(s, row.owner_id), "description": row.description,
+        "status": row.status, "progress": row.progress,
+        "due_at": row.due_at.isoformat() if row.due_at else None,
+        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+        "verified_by": row.verified_by, "verified_at": row.verified_at.isoformat() if row.verified_at else None,
+        "completion_notes": row.completion_notes, "overdue": bool(row.due_at and row.due_at < datetime.utcnow() and row.status != "VERIFIED"),
+    }
+
+
+def _risk_or_404(s, risk_id, ctx):
+    campus = _risk_campus_scope(s, ctx)
+    row = (s.query(D.RiskRecord)
+           .filter(D.RiskRecord.id == risk_id,
+                   D.RiskRecord.tenant_id == ctx["tenant_id"],
+                   D.RiskRecord.campus_scope_id == campus.id).first())
+    if not row:
+        raise HTTPException(404, "Risk not found")
+    return row, campus
+
+
+def _risk_notify_owner(s, row, title, body):
+    if title == "Risk owner assignment":
+        title = "Informational — risk owner assignment"
+        body = f"{row.title} — you are assigned as risk owner; no approval action is required."
+    if row.owner_id:
+        notify(s, row.owner_id, title, body, severity="action")
+
+
+def _risk_oversight_offices(severity):
+    offices = [4]
+    target = RISK_ESCALATION_TARGETS.get(severity)
+    if target and target[0] not in offices:
+        offices.append(target[0])
+    return offices
+
+
+def _risk_notify_oversight(s, row, ctx, title, body, severity="action"):
+    tenant_id = ctx["tenant_id"]
+    excluded = {ctx.get("sub"), row.owner_id}
+    notified = set()
+    for office_n in _risk_oversight_offices(row.severity):
+        recipient = (s.query(User)
+                     .filter(User.tenant_id == tenant_id, User.office_n == office_n,
+                             User.status == "active")
+                     .order_by(User.id).first())
+        if recipient and recipient.id not in excluded and recipient.id not in notified:
+            notify(s, recipient.id, title, body, severity=severity, tenant_id=tenant_id)
+            notified.add(recipient.id)
+
+
+class RiskCreateIn(BaseModel):
+    title: str
+    description: str = ""
+    category: str
+    severity: str
+    likelihood: str
+    impact: str
+    priority: str | None = None
+    owner_id: str | None = None
+    due_at: datetime | None = None
+    source_type: str = "manual"
+    source_ref: str = ""
+
+
+class RiskUpdateIn(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    category: str | None = None
+    severity: str | None = None
+    likelihood: str | None = None
+    impact: str | None = None
+    priority: str | None = None
+    due_at: datetime | None = None
+
+
+class RiskOwnerIn(BaseModel):
+    owner_id: str
+
+
+class RiskReasonIn(BaseModel):
+    reason: str = ""
+    resolution_notes: str = ""
+
+
+class ActionCreateIn(BaseModel):
+    description: str
+    owner_id: str
+    due_at: datetime | None = None
+
+
+class ActionUpdateIn(BaseModel):
+    description: str | None = None
+    owner_id: str | None = None
+    due_at: datetime | None = None
+    status: str | None = None
+    progress: int | None = None
+    completion_notes: str | None = None
+
+
+class ActionCompleteIn(BaseModel):
+    completion_notes: str = ""
+
+
+@router.get("/risks/owners")
+def risk_owners(ctx=Depends(auth), s=Depends(db)):
+    campus = _risk_campus_scope(s, ctx)
+    owners = []
+    for owner in s.query(User).filter(User.tenant_id == ctx["tenant_id"], User.status == "active").all():
+        try:
+            eligible = _risk_owner_for_scope(s, owner.id, campus, ctx["tenant_id"])
+        except HTTPException:
+            eligible = None
+        if eligible:
+            owners.append({"id": owner.id, "name": _risk_owner_name(s, owner.id), "office_n": owner.office_n, "role": owner.role})
+    return {"owners": owners}
+
+
+@router.get("/risks/summary")
+def risk_summary(ctx=Depends(auth), s=Depends(db)):
+    _risk_gate(s, ctx, "view")
+    campus = _risk_campus_scope(s, ctx)
+    rows = s.query(D.RiskRecord).filter(D.RiskRecord.tenant_id == ctx["tenant_id"], D.RiskRecord.campus_scope_id == campus.id).all()
+    actions = s.query(D.CorrectiveAction).join(D.RiskRecord, D.CorrectiveAction.risk_id == D.RiskRecord.id).filter(
+        D.CorrectiveAction.tenant_id == ctx["tenant_id"], D.RiskRecord.campus_scope_id == campus.id).all()
+    return {"summary": {
+        "open": sum(row.status in ("OPEN", "IN_PROGRESS") for row in rows),
+        "high_critical": sum(row.severity in ("HIGH", "CRITICAL") and row.status != "CLOSED" for row in rows),
+        "overdue_actions": sum(bool(action.due_at and action.due_at < datetime.utcnow() and action.status != "VERIFIED") for action in actions),
+        "escalated": sum(row.escalated_at is not None and row.status != "CLOSED" for row in rows),
+        "resolved": sum(row.status in ("RESOLVED", "CLOSED") for row in rows),
+    }, "campus_scope_id": campus.id}
+
+
+@router.get("/risks")
+def list_risks(status: str = "", severity: str = "", category: str = "", owner_id: str = "", ctx=Depends(auth), s=Depends(db)):
+    _risk_gate(s, ctx, "view")
+    campus = _risk_campus_scope(s, ctx)
+    query = s.query(D.RiskRecord).filter(D.RiskRecord.tenant_id == ctx["tenant_id"], D.RiskRecord.campus_scope_id == campus.id)
+    if status:
+        if status not in RISK_STATUSES:
+            raise HTTPException(400, "Unknown risk status")
+        query = query.filter(D.RiskRecord.status == status)
+    if severity:
+        if severity not in RISK_SEVERITIES:
+            raise HTTPException(400, "Unknown risk severity")
+        query = query.filter(D.RiskRecord.severity == severity)
+    if category:
+        if category not in RISK_CATEGORIES:
+            raise HTTPException(400, "Unknown risk category")
+        query = query.filter(D.RiskRecord.category == category)
+    if owner_id:
+        query = query.filter(D.RiskRecord.owner_id == owner_id)
+    rows = query.order_by(desc(D.RiskRecord.updated_at)).all()
+    return {"risks": [_risk_payload(s, row, ctx) for row in rows], "total": len(rows), "campus_scope_id": campus.id,
+            "categories": sorted(RISK_CATEGORIES), "severities": sorted(RISK_SEVERITIES)}
+
+
+@router.post("/risks")
+def create_risk(body: RiskCreateIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "create")
+    campus = _risk_campus_scope(s, ctx)
+    if body.category not in RISK_CATEGORIES or body.severity not in RISK_SEVERITIES or body.likelihood not in RISK_LEVELS or body.impact not in RISK_LEVELS:
+        raise HTTPException(400, "Invalid risk category, severity, likelihood, or impact")
+    priority = body.priority or body.severity
+    if priority not in RISK_SEVERITIES:
+        raise HTTPException(400, "Invalid risk priority")
+    owner = _risk_owner_for_scope(s, body.owner_id, campus, ctx["tenant_id"])
+    risk_id = uid()
+    row = D.RiskRecord(id=risk_id, tenant_id=ctx["tenant_id"], campus_scope_id=campus.id,
+                       created_by=ctx["sub"], owner_id=owner.id if owner else None, category=body.category,
+                       title=body.title.strip(), description=body.description.strip(), severity=body.severity,
+                       likelihood=body.likelihood, impact=body.impact, priority=priority, status="OPEN",
+                       source_type=body.source_type, source_ref=body.source_ref, due_at=body.due_at)
+    if not row.title:
+        raise HTTPException(400, "Risk title is required")
+    s.add(row); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "risk.create", f"risk:{risk_id}", "", "OPEN", row.title,
+                tenant_id=ctx["tenant_id"], campus_scope_id=campus.id)
+    _risk_notify_owner(s, row, "Risk owner assignment", f"{row.title} — you are responsible for this campus risk.")
+    campus_name = campus.name
+    oversight_body = (f"Risk '{row.title}' ({row.category}, {row.severity}) was entered by "
+                      f"{actor_name(s, ctx)} for {campus_name}.")
+    _risk_notify_oversight(s, row, ctx, "Informational — campus risk oversight", oversight_body,
+                           severity="critical" if row.severity == "CRITICAL" else "info")
+    return {"risk": _risk_payload(s, row, ctx), "decision": decision.as_dict()}
+
+
+@router.get("/risks/oversight")
+def risk_oversight(ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") not in (1, 2, 4):
+        raise HTTPException(403, "Risk oversight is available only to governance offices")
+    tenant_id = ctx["tenant_id"]
+    query = (s.query(D.RiskRecord, OrgScope.name)
+             .join(OrgScope, OrgScope.id == D.RiskRecord.campus_scope_id)
+             .filter(D.RiskRecord.tenant_id == tenant_id,
+                     OrgScope.tenant_id == tenant_id,
+                     D.RiskRecord.escalated_at.isnot(None),
+                     D.RiskRecord.status != "CLOSED"))
+    if ctx.get("office_n") == 2:
+        query = query.filter(D.RiskRecord.severity == "HIGH")
+    rows = query.order_by(desc(D.RiskRecord.updated_at)).all()
+    risks = []
+    for row, campus_name in rows:
+        payload = _risk_payload(s, row, ctx)
+        payload["campus"] = campus_name
+        risks.append(payload)
+    return {"risks": risks, "total": len(risks), "data_status": "available", "reason": ""}
+
+
+@router.get("/risks/{risk_id}")
+def get_risk(risk_id: str, ctx=Depends(auth), s=Depends(db)):
+    _risk_gate(s, ctx, "view")
+    row, _ = _risk_or_404(s, risk_id, ctx)
+    return {"risk": _risk_payload(s, row, ctx)}
+
+
+@router.patch("/risks/{risk_id}")
+@router.put("/risks/{risk_id}")
+def update_risk(risk_id: str, body: RiskUpdateIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "edit")
+    row, _ = _risk_or_404(s, risk_id, ctx)
+    if row.status == "CLOSED":
+        raise HTTPException(409, "Closed risks cannot be edited")
+    previous_severity = row.severity
+    values = body.model_dump(exclude_unset=True) if hasattr(body, "model_dump") else body.dict(exclude_unset=True)
+    for key, value in values.items():
+        if key == "category" and value not in RISK_CATEGORIES:
+            raise HTTPException(400, "Invalid risk category")
+        if key in ("severity", "priority") and value not in RISK_SEVERITIES:
+            raise HTTPException(400, "Invalid risk severity or priority")
+        if key in ("likelihood", "impact") and value not in RISK_LEVELS:
+            raise HTTPException(400, "Invalid likelihood or impact")
+        if key == "title" and not value.strip():
+            raise HTTPException(400, "Risk title is required")
+        setattr(row, key, value.strip() if isinstance(value, str) else value)
+    row.updated_at = datetime.utcnow(); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "risk.edit", f"risk:{row.id}", row.status, row.status, row.title)
+    if RISK_RANK.get(row.severity, 0) > RISK_RANK.get(previous_severity, 0):
+        campus = s.get(OrgScope, row.campus_scope_id)
+        body_text = (f"Risk '{row.title}' ({row.category}) increased to {row.severity}; "
+                     f"actor: {actor_name(s, ctx)}; campus: {campus.name if campus else row.campus_scope_id}.")
+        _risk_notify_oversight(s, row, ctx, "Campus risk severity increased", body_text,
+                               severity="critical" if row.severity == "CRITICAL" else "action")
+    return {"risk": _risk_payload(s, row, ctx), "decision": decision.as_dict()}
+
+
+@router.post("/risks/{risk_id}/assign")
+def assign_risk(risk_id: str, body: RiskOwnerIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "assign")
+    row, campus = _risk_or_404(s, risk_id, ctx)
+    if row.status == "CLOSED":
+        raise HTTPException(409, "Closed risks cannot be reassigned")
+    owner = _risk_owner_for_scope(s, body.owner_id, campus, ctx["tenant_id"])
+    row.owner_id = owner.id; row.updated_at = datetime.utcnow(); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "risk.assign", f"risk:{row.id}", "", owner.id, row.title)
+    _risk_notify_owner(s, row, "Risk owner assignment", f"{row.title} — you are now responsible for this campus risk.")
+    return {"risk": _risk_payload(s, row, ctx), "decision": decision.as_dict()}
+
+
+def _set_risk_status(row, status, reason, ctx, s, action):
+    if status not in RISK_TRANSITIONS[row.status]:
+        raise HTTPException(409, f"Cannot transition risk from {row.status} to {status}")
+    previous = row.status; row.status = status; row.updated_at = datetime.utcnow()
+    if status == "RESOLVED": row.resolved_at = row.updated_at
+    if status == "CLOSED": row.closed_at = row.updated_at
     s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "grievance.resolve",
-                f"complaint:{c.id}", "open", c.status, f"Set {c.subject} → {c.status}")
-    return {"status": c.status, "decision": dec.as_dict()}
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "risk.status_change", f"risk:{row.id}", previous, status, reason)
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], action, f"risk:{row.id}", previous, status, reason)
+
+
+@router.post("/risks/{risk_id}/resolve")
+def resolve_risk(risk_id: str, body: RiskReasonIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "resolve")
+    row, _ = _risk_or_404(s, risk_id, ctx)
+    _set_risk_status(row, "RESOLVED", body.resolution_notes or body.reason, ctx, s, "risk.resolve")
+    row.resolution_notes = body.resolution_notes or body.reason; s.commit()
+    _risk_notify_owner(s, row, "Risk resolved", f"{row.title} — risk resolved by Campus Head.")
+    return {"risk": _risk_payload(s, row, ctx), "decision": decision.as_dict()}
+
+
+@router.post("/risks/{risk_id}/close")
+def close_risk(risk_id: str, body: RiskReasonIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "close")
+    row, _ = _risk_or_404(s, risk_id, ctx)
+    actions = s.query(D.CorrectiveAction).filter(D.CorrectiveAction.risk_id == row.id).all()
+    if any(action.status != "VERIFIED" for action in actions):
+        raise HTTPException(409, "All corrective actions must be verified before closure")
+    _set_risk_status(row, "CLOSED", body.reason, ctx, s, "risk.close")
+    _risk_notify_owner(s, row, "Risk closed", f"{row.title} — risk closed by Campus Head.")
+    return {"risk": _risk_payload(s, row, ctx), "decision": decision.as_dict()}
+
+
+@router.post("/risks/{risk_id}/escalate")
+def escalate_risk(risk_id: str, body: RiskReasonIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "escalate")
+    row, _ = _risk_or_404(s, risk_id, ctx)
+    if row.status == "CLOSED":
+        raise HTTPException(409, "Closed risks cannot be escalated")
+    if row.severity not in RISK_ESCALATION_TARGETS and not _risk_overdue(row):
+        raise HTTPException(409, "Only high, critical, or overdue risks may be escalated")
+    office_n, destination = RISK_ESCALATION_TARGETS.get(row.severity, (2, "Vice Chairman"))
+    row.escalated_at = datetime.utcnow(); row.escalated_by = ctx["sub"]; row.escalation_destination = destination
+    row.escalation_reason = body.reason; row.updated_at = row.escalated_at
+    if not row.escalation_workflow_id:
+        from main import _start_workflow_record
+        process_key = RISK_ESCALATION_PROCESS.get(row.severity, "campus_risk_escalation")
+        workflow, _ = _start_workflow_record(
+            s, ctx, process_key, row.title,
+            notes=json.dumps({"risk_id": row.id, "category": row.category,
+                              "campus_scope_id": row.campus_scope_id,
+                              "escalation_reason": body.reason}, sort_keys=True),
+        )
+        row.escalation_workflow_id = workflow.id
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "risk.escalate", f"risk:{row.id}", row.status, row.status, body.reason or destination,
+                tenant_id=ctx["tenant_id"], campus_scope_id=row.campus_scope_id)
+    # `_start_workflow_record` already sends the sole actionable notice to
+    # its persisted Principal owner; do not create a duplicate alert here.
+    target = None
+    if target:
+        notify(s, target.id, "Campus risk escalated", f"{row.title} — escalated by Campus Head to {destination}.", severity="critical")
+    return {"risk": _risk_payload(s, row, ctx), "destination": destination,
+            "escalation_workflow_id": row.escalation_workflow_id,
+            "decision": decision.as_dict()}
+
+
+@router.get("/risks/{risk_id}/actions")
+def list_risk_actions(risk_id: str, ctx=Depends(auth), s=Depends(db)):
+    _risk_gate(s, ctx, "view")
+    row, _ = _risk_or_404(s, risk_id, ctx)
+    actions = s.query(D.CorrectiveAction).filter(D.CorrectiveAction.tenant_id == ctx["tenant_id"], D.CorrectiveAction.risk_id == row.id).all()
+    return {"actions": [_action_payload(s, action) for action in actions]}
+
+
+@router.post("/risks/{risk_id}/actions")
+def create_risk_action(risk_id: str, body: ActionCreateIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "corrective_action")
+    row, campus = _risk_or_404(s, risk_id, ctx)
+    if row.status == "CLOSED":
+        raise HTTPException(409, "Closed risks cannot receive corrective actions")
+    if not body.description.strip():
+        raise HTTPException(400, "Corrective action description is required")
+    owner = _risk_owner_for_scope(s, body.owner_id, campus, ctx["tenant_id"])
+    action_id = uid()
+    action = D.CorrectiveAction(id=action_id, tenant_id=ctx["tenant_id"], risk_id=row.id,
+                                owner_id=owner.id, description=body.description.strip(), due_at=body.due_at)
+    s.add(action); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "risk.corrective_action.create", f"risk-action:{action_id}", "", "OPEN", row.title)
+    notify(s, owner.id, "Corrective action assigned", f"{row.title} — {action.description}", severity="action")
+    return {"action": _action_payload(s, action), "decision": decision.as_dict()}
+
+
+def _risk_action_or_404(s, action_id, ctx):
+    _risk_gate(s, ctx, "view")
+    action = s.query(D.CorrectiveAction).filter(D.CorrectiveAction.id == action_id, D.CorrectiveAction.tenant_id == ctx["tenant_id"]).first()
+    if not action:
+        raise HTTPException(404, "Corrective action not found")
+    risk, campus = _risk_or_404(s, action.risk_id, ctx)
+    return action, risk, campus
+
+
+@router.patch("/risk-actions/{action_id}")
+@router.put("/risk-actions/{action_id}")
+def update_risk_action(action_id: str, body: ActionUpdateIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "corrective_update")
+    action, risk, campus = _risk_action_or_404(s, action_id, ctx)
+    values = body.model_dump(exclude_unset=True) if hasattr(body, "model_dump") else body.dict(exclude_unset=True)
+    if "owner_id" in values:
+        owner = _risk_owner_for_scope(s, values["owner_id"], campus, ctx["tenant_id"]); values["owner_id"] = owner.id
+    if "status" in values:
+        if values["status"] not in ACTION_STATUSES or values["status"] not in ACTION_TRANSITIONS[action.status]:
+            raise HTTPException(409, f"Cannot transition action from {action.status} to {values['status']}")
+        if values["status"] == "COMPLETED": action.completed_at = datetime.utcnow()
+    if "progress" in values and not 0 <= values["progress"] <= 100:
+        raise HTTPException(400, "Progress must be between 0 and 100")
+    for key, value in values.items():
+        setattr(action, key, value.strip() if isinstance(value, str) else value)
+    action.updated_at = datetime.utcnow(); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "risk.corrective_action.update", f"risk-action:{action.id}", "", action.status, risk.title)
+    if action.owner_id:
+        notify(s, action.owner_id, "Corrective action updated", f"{risk.title} — {action.description}", severity="action")
+    return {"action": _action_payload(s, action), "decision": decision.as_dict()}
+
+
+@router.post("/risk-actions/{action_id}/complete")
+def complete_risk_action(action_id: str, body: ActionCompleteIn, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "corrective_update")
+    action, risk, _ = _risk_action_or_404(s, action_id, ctx)
+    if "COMPLETED" not in ACTION_TRANSITIONS[action.status]:
+        raise HTTPException(409, f"Cannot complete action from {action.status}")
+    action.status = "COMPLETED"; action.progress = 100; action.completed_at = datetime.utcnow(); action.completion_notes = body.completion_notes
+    action.updated_at = datetime.utcnow(); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "risk.corrective_action.update", f"risk-action:{action.id}", "", "COMPLETED", risk.title)
+    return {"action": _action_payload(s, action), "decision": decision.as_dict()}
+
+
+@router.post("/risk-actions/{action_id}/verify")
+def verify_risk_action(action_id: str, ctx=Depends(auth), s=Depends(db)):
+    decision = _risk_gate(s, ctx, "corrective_update")
+    action, risk, _ = _risk_action_or_404(s, action_id, ctx)
+    if "VERIFIED" not in ACTION_TRANSITIONS[action.status]:
+        raise HTTPException(409, f"Cannot verify action from {action.status}")
+    action.status = "VERIFIED"; action.verified_by = ctx["sub"]; action.verified_at = datetime.utcnow(); action.updated_at = action.verified_at
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "risk.corrective_action.update", f"risk-action:{action.id}", "COMPLETED", "VERIFIED", risk.title)
+    return {"action": _action_payload(s, action), "decision": decision.as_dict()}
 
 
 # --------------------------------------------------------------------------- #
@@ -6950,9 +5161,9 @@ def _governance_rating(score: float) -> str:
     return "Needs Attention"
 
 
-def _governance_snapshots(s):
+def _governance_snapshots(s, tenant_id):
     return (
-        s.query(D.GovernanceDashboardSnapshot)
+        s.query(D.GovernanceDashboardSnapshot).filter(D.GovernanceDashboardSnapshot.tenant_id == tenant_id)
         .order_by(desc(D.GovernanceDashboardSnapshot.is_default),
                   desc(D.GovernanceDashboardSnapshot.as_of_date),
                   D.GovernanceDashboardSnapshot.semester_label)
@@ -6960,8 +5171,8 @@ def _governance_snapshots(s):
     )
 
 
-def _governance_period_range(s):
-    snapshots = (s.query(D.InstitutionSnapshot)
+def _governance_period_range(s, tenant_id):
+    snapshots = (s.query(D.InstitutionSnapshot).filter(D.InstitutionSnapshot.tenant_id == tenant_id)
                  .order_by(D.InstitutionSnapshot.snapshot_month.desc()).all())
     selected = snapshots[0].snapshot_month if snapshots else _month_start(date.today())
     ranges = [{
@@ -6983,8 +5194,8 @@ def _governance_period_range(s):
     }
 
 
-def _governance_snapshot_bundle(s, semester: str = ""):
-    snapshots = _governance_snapshots(s)
+def _governance_snapshot_bundle(s, tenant_id, semester: str = ""):
+    snapshots = _governance_snapshots(s, tenant_id)
     if not snapshots:
         return None, [], [], []
 
@@ -6996,13 +5207,13 @@ def _governance_snapshot_bundle(s, semester: str = ""):
 
     compliance_rows = (
         s.query(D.GovernanceComplianceMetric)
-        .filter(D.GovernanceComplianceMetric.snapshot_id == selected.id)
+        .filter(D.GovernanceComplianceMetric.tenant_id == tenant_id, D.GovernanceComplianceMetric.snapshot_id == selected.id)
         .order_by(D.GovernanceComplianceMetric.sort_order, D.GovernanceComplianceMetric.label)
         .all()
     )
     performance_rows = (
         s.query(D.GovernancePerformanceMetric)
-        .filter(D.GovernancePerformanceMetric.snapshot_id == selected.id)
+        .filter(D.GovernancePerformanceMetric.tenant_id == tenant_id, D.GovernancePerformanceMetric.snapshot_id == selected.id)
         .order_by(D.GovernancePerformanceMetric.sort_order, D.GovernancePerformanceMetric.area)
         .all()
     )
@@ -7079,21 +5290,23 @@ def _governance_payload_from_snapshot(snapshot, compliance_rows, performance_row
     }
 
 
-def _governance_live_fallback(s, can_edit_dashboard=False):
-    students = s.query(D.Student).count()
-    faculty = s.query(D.StaffMember).count()
+def _governance_live_fallback(s, tenant_id, can_edit_dashboard=False):
+    students = s.query(D.Student).filter(D.Student.tenant_id == tenant_id).count()
+    faculty = s.query(D.StaffMember).filter(D.StaffMember.tenant_id == tenant_id).count()
     ratio = round(students / faculty, 1) if faculty else 0
-    collected = s.query(func.coalesce(func.sum(D.FeeInvoice.paid), 0)).scalar() or 0
-    billed = s.query(func.coalesce(func.sum(D.FeeInvoice.amount), 0)).scalar() or 0
-    grants = s.query(func.coalesce(func.sum(D.ResearchProject.grant_amount), 0)).scalar() or 0
-    placed = s.query(func.coalesce(func.sum(D.PlacementDrive.offers), 0)).scalar() or 0
-    avg_cgpa = round(s.query(func.coalesce(func.avg(D.Student.cgpa), 0)).scalar() or 0, 2)
-    total_budget = s.query(func.coalesce(func.sum(D.BudgetLine.allocated), 0)).scalar() or 0
-    utilized_budget = s.query(func.coalesce(func.sum(D.BudgetLine.spent), 0)).scalar() or 0
+    collected = s.query(func.coalesce(func.sum(D.FeeInvoice.paid), 0)).filter(D.FeeInvoice.tenant_id == tenant_id).scalar() or 0
+    billed = s.query(func.coalesce(func.sum(D.FeeInvoice.amount), 0)).filter(D.FeeInvoice.tenant_id == tenant_id).scalar() or 0
+    grants = s.query(func.coalesce(func.sum(D.ResearchProject.grant_amount), 0)).filter(D.ResearchProject.tenant_id == tenant_id).scalar() or 0
+    placed = s.query(func.coalesce(func.sum(D.PlacementDrive.offers), 0)).filter(D.PlacementDrive.tenant_id == tenant_id).scalar() or 0
+    avg_cgpa = round(s.query(func.coalesce(func.avg(D.Student.cgpa), 0)).filter(D.Student.tenant_id == tenant_id).scalar() or 0, 2)
+    total_budget = s.query(func.coalesce(func.sum(D.BudgetLine.allocated), 0)).filter(D.BudgetLine.tenant_id == tenant_id).scalar() or 0
+    utilized_budget = s.query(func.coalesce(func.sum(D.BudgetLine.spent), 0)).filter(D.BudgetLine.tenant_id == tenant_id).scalar() or 0
     utilization_pct = round(100 * utilized_budget / total_budget, 1) if total_budget else 0
-    active_accreditations = s.query(D.Accreditation).filter(D.Accreditation.status == "active").count()
-    open_risk = s.query(D.Complaint).filter(D.Complaint.status != "resolved").count()
-    compliance_score = max(80, min(98, round((100 + min(active_accreditations * 6, 96) + 88 + max(82, 96 - open_risk)) / 4)))
+    # A tenant with no persisted governance snapshot has no authoritative
+    # compliance/performance metrics.  Returning calculated demo rows here
+    # would make an empty branch look as though it had Main Campus governance
+    # data, so expose only tenant-owned operational aggregates and an explicit
+    # empty governance state.
 
     return {
         "title": "Governance dashboard",
@@ -7115,28 +5328,14 @@ def _governance_live_fallback(s, can_edit_dashboard=False):
             "utilization_pct": utilization_pct,
         },
         "compliance": {
-            "score": compliance_score,
-            "label": "Healthy",
+            "score": 0,
+            "label": "No governance data",
             "filters": [
                 {"value": "all", "label": "All"},
-                {"value": "regulatory", "label": "Regulatory"},
-                {"value": "quality", "label": "Quality"},
-                {"value": "policy", "label": "Policy"},
-                {"value": "risk", "label": "Risk"},
             ],
-            "items": [
-                {"id": "live_comp_01", "metric_key": "statutory_compliance", "category": "regulatory", "category_label": "Regulatory", "label": "Statutory Compliance", "score": 100, "status": "healthy"},
-                {"id": "live_comp_02", "metric_key": "accreditations", "category": "quality", "category_label": "Quality", "label": "Accreditations", "score": min(100, max(80, active_accreditations * 8)), "status": "healthy"},
-                {"id": "live_comp_03", "metric_key": "policies_sops", "category": "policy", "category_label": "Policy", "label": "Policies & SOPs", "score": 88, "status": "healthy"},
-                {"id": "live_comp_04", "metric_key": "audit_risk", "category": "risk", "category_label": "Risk", "label": "Audit & Risk", "score": max(82, 96 - open_risk), "status": "healthy"},
-            ],
+            "items": [],
         },
-        "performance_summary": [
-            {"id": "live_perf_01", "area": "Academics", "metric": "Average CGPA", "current_value": f"{avg_cgpa:.2f}", "target_value": ">= 7.50", "status": "Achieved" if avg_cgpa >= 7.5 else "On Track", "trend_pct": 3, "trend_direction": "up", "icon": "academics"},
-            {"id": "live_perf_02", "area": "Finance", "metric": "Budget Utilisation", "current_value": f"{utilization_pct:.1f}%", "target_value": "<= 60%", "status": "On Track" if utilization_pct <= 60 else "Attention", "trend_pct": 2, "trend_direction": "up", "icon": "finance"},
-            {"id": "live_perf_03", "area": "Placements", "metric": "Placement Offers", "current_value": str(placed), "target_value": ">= 60", "status": "Achieved" if placed >= 60 else "On Track", "trend_pct": 4, "trend_direction": "up", "icon": "placements"},
-            {"id": "live_perf_04", "area": "Research", "metric": "Research Grants", "current_value": f"{grants / 1e7:.2f} Cr", "target_value": ">= 12 Cr", "status": "Achieved" if grants >= 12 * 1e7 else "On Track", "trend_pct": 5, "trend_direction": "up", "icon": "research"},
-        ],
+        "performance_summary": [],
         "can_edit": can_edit_dashboard,
         "last_updated": date.today().isoformat(),
         "last_updated_label": _fmt_day(date.today()),
@@ -7147,17 +5346,87 @@ def _governance_live_fallback(s, can_edit_dashboard=False):
 def governance(semester: str = Query("", description="Semester key"), ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "governance", "view")[0])
     can_edit_dashboard = can(s, ctx, "governance", "edit_dashboard")
-    selected, snapshots, compliance_rows, performance_rows = _governance_snapshot_bundle(s, semester)
+    tenant_id = ctx["tenant_id"]
+    selected, snapshots, compliance_rows, performance_rows = _governance_snapshot_bundle(s, tenant_id, semester)
     if not snapshots or not selected:
-        payload = _governance_live_fallback(s, can_edit_dashboard)
-        payload["range"] = _governance_period_range(s)
+        payload = _governance_live_fallback(s, tenant_id, can_edit_dashboard)
+        payload["range"] = _governance_period_range(s, tenant_id)
         return payload
 
     semesters = [{"key": row.semester_key, "label": row.semester_label} for row in snapshots]
     payload = _governance_payload_from_snapshot(selected, compliance_rows, performance_rows, semesters)
     payload["can_edit"] = can_edit_dashboard
-    payload["range"] = _governance_period_range(s)
+    payload["range"] = _governance_period_range(s, tenant_id)
     return payload
+
+
+def _principal_compliance_requirement(s, ctx, requirement_id: str):
+    if ctx.get("office_n") != 4:
+        raise HTTPException(403, "Compliance requirements are available to the Principal only")
+    requirement = (s.query(D.ComplianceRequirement)
+                   .filter(D.ComplianceRequirement.id == requirement_id,
+                           D.ComplianceRequirement.tenant_id == ctx["tenant_id"]).first())
+    campus = _authenticated_campus_scope(s, ctx)
+    if not requirement or (campus and requirement.campus_scope_id != campus.id):
+        raise HTTPException(404, "Compliance requirement was not found in your authorized campus")
+    return requirement
+
+
+def _compliance_requirement_payload(s, requirement, ctx=None, include_history=False):
+    workflow = (s.query(WorkflowInstance)
+                .filter(WorkflowInstance.id == requirement.workflow_id,
+                        WorkflowInstance.tenant_id == requirement.tenant_id).first())
+    payload = {"id": requirement.id, "reference_code": requirement.reference_code,
+               "title": requirement.title, "description": requirement.description,
+               "category": requirement.category, "responsible_department": requirement.responsible_department,
+               "campus": requirement.campus, "priority": requirement.priority,
+               "due_date": requirement.due_date.isoformat() if requirement.due_date else None,
+               "evidence_reference": requirement.evidence_reference,
+               "workflow_id": requirement.workflow_id, "status": workflow.state if workflow else "unavailable",
+               "escalated": bool(workflow and workflow.escalated),
+               "updated_at": requirement.updated_at.isoformat() if requirement.updated_at else None}
+    if workflow and ctx:
+        # This Principal screen consumes the same server-authoritative action
+        # contract as My Approvals; it does not infer authority from its route.
+        from main import _workflow_actions_for_context, _workflow_process
+        payload["available_actions"], payload["action_message"] = _workflow_actions_for_context(
+            s, workflow, _workflow_process(workflow.process_key), ctx)
+    if include_history:
+        history = (s.query(Approval).filter(Approval.workflow_id == requirement.workflow_id)
+                   .order_by(Approval.created_at.desc()).all())
+        payload["history"] = [{"id": item.id, "actor": item.actor_name, "stage": item.stage_label,
+                               "decision": item.decision, "reason": item.reason,
+                               "at": item.created_at.isoformat()} for item in history]
+    return payload
+
+
+@router.get("/compliance-requirements")
+def compliance_requirements(q: str = "", category: str = "", status: str = "", priority: str = "", ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "governance", "view")[0])
+    if ctx.get("office_n") != 4:
+        raise HTTPException(403, "Compliance requirements are available to the Principal only")
+    base_query = s.query(D.ComplianceRequirement).filter(D.ComplianceRequirement.tenant_id == ctx["tenant_id"])
+    campus = _authenticated_campus_scope(s, ctx)
+    if campus: base_query = base_query.filter(D.ComplianceRequirement.campus_scope_id == campus.id)
+    authorized_rows = base_query.order_by(D.ComplianceRequirement.due_date).all()
+    query = base_query
+    if q:
+        like = f"%{q}%"; query = query.filter(or_(D.ComplianceRequirement.title.ilike(like), D.ComplianceRequirement.reference_code.ilike(like)))
+    if category: query = query.filter(D.ComplianceRequirement.category == category)
+    if priority: query = query.filter(D.ComplianceRequirement.priority == priority)
+    rows = query.order_by(D.ComplianceRequirement.due_date).all()
+    payloads = [_compliance_requirement_payload(s, row, ctx=ctx) for row in rows]
+    if status: payloads = [row for row in payloads if row["status"] == status]
+    authorized_payloads = [_compliance_requirement_payload(s, row, ctx=ctx) for row in authorized_rows]
+    return {"requirements": payloads,
+            "filters": {"categories": sorted({row.category for row in authorized_rows}), "priorities": sorted({row.priority for row in authorized_rows}),
+                        "statuses": sorted({row["status"] for row in authorized_payloads})}}
+
+
+@router.get("/compliance-requirements/{requirement_id}")
+def compliance_requirement(requirement_id: str, ctx=Depends(auth), s=Depends(db)):
+    require(gate(s, ctx, "governance", "view")[0])
+    return {"requirement": _compliance_requirement_payload(s, _principal_compliance_requirement(s, ctx, requirement_id), ctx=ctx, include_history=True)}
 
 
 class GovernanceKpisIn(BaseModel):
@@ -7215,7 +5484,7 @@ def update_governance_dashboard(semester_key: str, body: GovernanceDashboardUpda
     dec, _ = gate(s, ctx, "governance", "edit_dashboard")
     require(dec)
 
-    selected, snapshots, compliance_rows, performance_rows = _governance_snapshot_bundle(s, semester_key)
+    selected, snapshots, compliance_rows, performance_rows = _governance_snapshot_bundle(s, ctx["tenant_id"], semester_key)
     if not snapshots or not selected:
         raise HTTPException(404, "Governance semester snapshot not found")
 
@@ -7252,7 +5521,7 @@ def update_governance_dashboard(semester_key: str, body: GovernanceDashboardUpda
         row = compliance_by_id.get(item_id)
         if row is None:
             row = D.GovernanceComplianceMetric(
-                id=item_id, tenant_id=TENANT, snapshot_id=selected.id
+                id=item_id, tenant_id=ctx["tenant_id"], snapshot_id=selected.id
             )
             s.add(row)
         row.metric_key = slug(item.label)
@@ -7273,7 +5542,7 @@ def update_governance_dashboard(semester_key: str, body: GovernanceDashboardUpda
         row = performance_by_id.get(item_id)
         if row is None:
             row = D.GovernancePerformanceMetric(
-                id=item_id, tenant_id=TENANT, snapshot_id=selected.id
+                id=item_id, tenant_id=ctx["tenant_id"], snapshot_id=selected.id
             )
             s.add(row)
         row.area = item.area.strip()
@@ -7299,7 +5568,7 @@ def update_governance_dashboard(semester_key: str, body: GovernanceDashboardUpda
         ctx.get("auth_level", "mfa"),
     )
 
-    selected, snapshots, compliance_rows, performance_rows = _governance_snapshot_bundle(s, semester_key)
+    selected, snapshots, compliance_rows, performance_rows = _governance_snapshot_bundle(s, ctx["tenant_id"], semester_key)
     semesters = [{"key": row.semester_key, "label": row.semester_label} for row in snapshots]
     payload = _governance_payload_from_snapshot(selected, compliance_rows, performance_rows, semesters)
     payload["can_edit"] = can(s, ctx, "governance", "edit_dashboard")
@@ -7309,7 +5578,7 @@ def update_governance_dashboard(semester_key: str, body: GovernanceDashboardUpda
 @router.get("/admin/users")
 def admin_users(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "admin", "view")[0])
-    rows = s.query(User).limit(60).all()
+    rows = s.query(User).filter(User.tenant_id == ctx["tenant_id"]).limit(60).all()
     return {"users": [{"username": u.username, "office_n": u.office_n, "role": u.role,
                        "scope_level": u.scope_level, "mfa": u.mfa_enabled,
                        "status": u.status} for u in rows],

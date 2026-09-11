@@ -91,6 +91,104 @@ CREATE TABLE complaints (
 	PRIMARY KEY (id)
 );
 
+CREATE TABLE risk_records (
+	id VARCHAR NOT NULL,
+	tenant_id VARCHAR,
+	campus_scope_id VARCHAR NOT NULL,
+	created_by VARCHAR,
+	owner_id VARCHAR,
+	category VARCHAR,
+	title VARCHAR,
+	description TEXT,
+	severity VARCHAR,
+	likelihood VARCHAR,
+	impact VARCHAR,
+	priority VARCHAR,
+	status VARCHAR,
+	source_type VARCHAR,
+	source_ref VARCHAR,
+	due_at TIMESTAMP WITHOUT TIME ZONE,
+	resolved_at TIMESTAMP WITHOUT TIME ZONE,
+	closed_at TIMESTAMP WITHOUT TIME ZONE,
+	resolution_notes TEXT,
+	escalated_at TIMESTAMP WITHOUT TIME ZONE,
+	escalated_by VARCHAR,
+	escalation_destination VARCHAR,
+	escalation_reason TEXT,
+	escalation_workflow_id VARCHAR,
+	created_at TIMESTAMP WITHOUT TIME ZONE,
+	updated_at TIMESTAMP WITHOUT TIME ZONE,
+	PRIMARY KEY (id),
+	FOREIGN KEY(campus_scope_id) REFERENCES org_scopes (id)
+);
+
+CREATE TABLE corrective_actions (
+	id VARCHAR NOT NULL,
+	tenant_id VARCHAR,
+	risk_id VARCHAR NOT NULL,
+	owner_id VARCHAR NOT NULL,
+	description TEXT,
+	status VARCHAR,
+	progress INTEGER,
+	due_at TIMESTAMP WITHOUT TIME ZONE,
+	completed_at TIMESTAMP WITHOUT TIME ZONE,
+	verified_by VARCHAR,
+	verified_at TIMESTAMP WITHOUT TIME ZONE,
+	completion_notes TEXT,
+	created_at TIMESTAMP WITHOUT TIME ZONE,
+	updated_at TIMESTAMP WITHOUT TIME ZONE,
+	PRIMARY KEY (id),
+	FOREIGN KEY(risk_id) REFERENCES risk_records (id)
+);
+
+CREATE INDEX ix_risk_records_tenant_id ON risk_records (tenant_id);
+CREATE INDEX ix_risk_records_campus_scope_id ON risk_records (campus_scope_id);
+CREATE INDEX ix_risk_records_status ON risk_records (status);
+CREATE INDEX ix_risk_records_severity ON risk_records (severity);
+CREATE INDEX ix_corrective_actions_tenant_id ON corrective_actions (tenant_id);
+CREATE INDEX ix_corrective_actions_risk_id ON corrective_actions (risk_id);
+CREATE INDEX ix_corrective_actions_status ON corrective_actions (status);
+
+CREATE TABLE escalation_records (
+	id VARCHAR NOT NULL, tenant_id VARCHAR, campus_scope_id VARCHAR NOT NULL,
+	created_by VARCHAR, owner_id VARCHAR, source_type VARCHAR, source_ref VARCHAR,
+	reason TEXT, priority VARCHAR, destination_office_n INTEGER,
+	destination_user_id VARCHAR, status VARCHAR, due_at TIMESTAMP WITHOUT TIME ZONE,
+	received_at TIMESTAMP WITHOUT TIME ZONE, resolved_at TIMESTAMP WITHOUT TIME ZONE,
+	closed_at TIMESTAMP WITHOUT TIME ZONE, resolution_notes TEXT, workflow_id VARCHAR,
+	created_at TIMESTAMP WITHOUT TIME ZONE, updated_at TIMESTAMP WITHOUT TIME ZONE,
+	PRIMARY KEY (id), FOREIGN KEY(campus_scope_id) REFERENCES org_scopes (id)
+);
+CREATE TABLE escalation_events (
+	id VARCHAR NOT NULL, tenant_id VARCHAR, escalation_id VARCHAR NOT NULL,
+	actor_id VARCHAR, event_type VARCHAR, reason TEXT, previous_status VARCHAR,
+	new_status VARCHAR, created_at TIMESTAMP WITHOUT TIME ZONE, PRIMARY KEY (id),
+	FOREIGN KEY(escalation_id) REFERENCES escalation_records (id)
+);
+CREATE TABLE campus_reports (
+	id VARCHAR NOT NULL, tenant_id VARCHAR, campus_scope_id VARCHAR NOT NULL,
+	created_by VARCHAR, owner_id VARCHAR, report_type VARCHAR, period_start DATE NOT NULL,
+	period_end DATE NOT NULL, title VARCHAR, status VARCHAR, version INTEGER,
+	submitted_at TIMESTAMP WITHOUT TIME ZONE, returned_at TIMESTAMP WITHOUT TIME ZONE,
+	approved_at TIMESTAMP WITHOUT TIME ZONE, vc_feedback TEXT, workflow_id VARCHAR,
+	created_at TIMESTAMP WITHOUT TIME ZONE, updated_at TIMESTAMP WITHOUT TIME ZONE,
+	PRIMARY KEY (id), FOREIGN KEY(campus_scope_id) REFERENCES org_scopes (id)
+);
+CREATE TABLE campus_report_snapshots (
+	id VARCHAR NOT NULL, report_id VARCHAR NOT NULL, version INTEGER NOT NULL,
+	snapshot_payload TEXT, source_as_of TIMESTAMP WITHOUT TIME ZONE,
+	created_at TIMESTAMP WITHOUT TIME ZONE, PRIMARY KEY (id),
+	FOREIGN KEY(report_id) REFERENCES campus_reports (id)
+);
+CREATE INDEX ix_escalation_records_tenant_id ON escalation_records (tenant_id);
+CREATE INDEX ix_escalation_records_campus_scope_id ON escalation_records (campus_scope_id);
+CREATE INDEX ix_escalation_records_status ON escalation_records (status);
+CREATE INDEX ix_escalation_events_escalation_id ON escalation_events (escalation_id);
+CREATE INDEX ix_campus_reports_tenant_id ON campus_reports (tenant_id);
+CREATE INDEX ix_campus_reports_campus_scope_id ON campus_reports (campus_scope_id);
+CREATE INDEX ix_campus_reports_status ON campus_reports (status);
+CREATE INDEX ix_campus_report_snapshots_report_id ON campus_report_snapshots (report_id);
+
 CREATE TABLE delegations (
 	id VARCHAR NOT NULL, 
 	tenant_id VARCHAR, 
@@ -268,11 +366,15 @@ CREATE TABLE workflow_instances (
 	initiator_name VARCHAR, 
 	current_stage INTEGER, 
 	scope_level VARCHAR, 
+	campus_scope_id VARCHAR, 
 	escalated BOOLEAN, 
 	created_at TIMESTAMP WITHOUT TIME ZONE, 
 	updated_at TIMESTAMP WITHOUT TIME ZONE, 
-	PRIMARY KEY (id)
+	PRIMARY KEY (id),
+	FOREIGN KEY(campus_scope_id) REFERENCES org_scopes (id)
 );
+
+CREATE INDEX ix_workflow_instances_campus_scope_id ON workflow_instances (campus_scope_id);
 
 CREATE TABLE approvals (
 	id VARCHAR NOT NULL, 

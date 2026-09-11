@@ -47,7 +47,7 @@ const PIPELINE = [
   'Decide & write to hash-chained audit',
 ]
 
-export default function Landing({ onSignIn, onApply }: { onSignIn: () => void; onApply: () => void }) {
+export default function Landing({ onSignIn }: { onSignIn: () => void }) {
   return (
     <div className="lp">
       {/* top utility bar */}
@@ -56,10 +56,9 @@ export default function Landing({ onSignIn, onApply }: { onSignIn: () => void; o
           <div className="tl"><span>◆ ICMS University Group</span></div>
           <div>
             <a href="#audiences">Portals</a>
-            <a href="#" onClick={e => { e.preventDefault(); onApply(); }}>Apply for admission</a>
             <a href="#offices">Offices</a>
             <a href="#platform">Platform</a>
-            <a href="#" onClick={e => { e.preventDefault(); onSignIn(); }}>Sign in</a>
+            <a href="#" onClick={e => { e.preventDefault(); onSignIn() }}>Sign in</a>
           </div>
         </div>
       </div>
@@ -96,7 +95,7 @@ export default function Landing({ onSignIn, onApply }: { onSignIn: () => void; o
               that always knows who may do what.
             </p>
             <div className="lp-hero-cta">
-              <button className="lp-btn-gold" onClick={onApply}>Apply for admission →</button>
+              <button className="lp-btn-gold" onClick={onSignIn}>Sign in to your portal →</button>
               <a className="lp-btn-ghost" href="#audiences">Explore the portals</a>
             </div>
           </div>

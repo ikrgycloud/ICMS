@@ -14,6 +14,7 @@ services:
       - backend
     environment:
       VITE_API_PROXY: http://backend:8000
+      VITE_DEMO_MODE: "true"
       CHOKIDAR_USEPOLLING: "true"
     volumes:
       - ./frontend:/app

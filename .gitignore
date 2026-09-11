@@ -1,94 +1,16 @@
-# ================================
-# Environment / Secrets
-# ================================
-.env
-.env.*
-!.env.example
-
-# Backend environment files
-backend/.env
-backend/.envm
-
-# ================================
-# Node / React
-# ================================
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# Build output
-dist/
-build/
-.vite/
-.cache/
-
-# ================================
-# Python Backend
-# ================================
+# Python
 __pycache__/
-*.py[cod]
-*$py.class
-
+*.pyc
+icms.db
+*.db
+.pytest_cache/
 .venv/
 venv/
-env/
 
-.pytest_cache/
-.mypy_cache/
+# Node
+node_modules/
+frontend/dist/
 
-# ================================
-# Logs
-# ================================
-*.log
-logs/
-
-# ================================
-# IDE / Editors
-# ================================
-.vscode/
-.idea/
-
-# ================================
-# OS Files
-# ================================
-.DS_Store
-Thumbs.db
-Desktop.ini
-
-# ================================
-# Coverage
-# ================================
-coverage/
-.nyc_output/
-
-# ================================
-# Temporary Files
-# ================================
-*.tmp
-*.temp
-*.swp
-*.swo
-
-# ================================
-# Database / Local Data
-# ================================
-*.sqlite
-*.sqlite3
-*.db
-
-# ================================
-# Certificates / Keys
-# ================================
-*.pem
-*.key
-*.crt
-*.p12
-*.pfx
-
-# ================================
-# Local uploads
-# ================================
-uploads/
-media/
+# Env
+.env
+*.local
