@@ -3903,7 +3903,15 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
                  "at_risk_advisees": at_risk_advisees, "average_attendance": average_attendance,
                  "average_grade": average_score},
         "sections": section_rows, "pending_tasks": pending[:4],
-        "announcements": [{"id": item.id, "title": item.title, "detail": item.detail, "date": item.created_at.date().isoformat()} for item in notes],
+        "announcements": [
+    {
+        "id": item.id,
+        "title": item.title or "",
+        "detail": item.body or "",
+        "date": item.created_at.date().isoformat() if item.created_at else ""
+    }
+    for item in notes
+],
         "teaching_schedule": teaching_schedule,
         "attendance_trend": attendance_trend,
         "marks_distribution": [{"label": label, "value": value} for label, value in distribution.items()],
@@ -3934,7 +3942,18 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
 @router.get("/faculty/sections")
 def faculty_sections(ctx=Depends(auth), s=Depends(db)):
     stf = _staff_or_404(s, ctx)
-    sections = [section for section in faculty_active_sections(s, stf.id) if not stf.dept_id or section.dept_id == stf.dept_id]
+    sections = (
+    s.query(D.Section)
+    .filter(D.Section.faculty_person_id == stf.id)
+    .all()
+)
+
+if stf.dept_id:
+    sections = [
+        section
+        for section in sections
+        if not section.dept_id or section.dept_id == stf.dept_id
+    ]
     course_map = {row.id: row for row in s.query(D.Course).all()}
     out = []
     for section in sections:
