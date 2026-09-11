@@ -75,6 +75,17 @@ class FrontOfficeCleanupTests(unittest.TestCase):
         self.assertIn("academic_calendar", modules_for_office(14))
         self.assertIn("directory", modules_for_office(36))
 
+    def test_academic_governance_is_limited_to_dean_hod_and_coordinator(self):
+        for office_n in (6, 10, 17):
+            with self.subTest(office_n=office_n):
+                decision, _ = gate(self.db, context(office_n, "Academic Office"), "academic_calendar", "view", governance=True)
+                self.assertEqual(decision.outcome, "ALLOW")
+
+        for office_n in (41, 42, 43, 15, 22, 23):
+            with self.subTest(office_n=office_n):
+                decision, _ = gate(self.db, context(office_n, "Academic Office"), "academic_calendar", "view", governance=True)
+                self.assertEqual(decision.outcome, "DENY")
+
     def test_generic_shared_screens_reject_front_office(self):
         for role in FRONT_OFFICE_ROLES:
             with self.subTest(role=role):

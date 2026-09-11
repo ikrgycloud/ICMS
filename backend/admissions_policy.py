@@ -20,7 +20,10 @@ CANONICAL_STATES = {
 ACTION_TRANSITIONS = {
     "submit": ({"DRAFT"}, "SUBMITTED"),
     "start_review": ({"SUBMITTED", "RESUBMITTED"}, "REVIEW_IN_PROGRESS"),
-    "request_correction": ({"REVIEW_IN_PROGRESS"}, "CORRECTION_REQUIRED"),
+    # A reviewer may request a correction immediately after submission or after
+    # a resubmission; starting a separate review remains available but is not a
+    # prerequisite for returning incomplete work to the applicant.
+    "request_correction": ({"SUBMITTED", "RESUBMITTED", "REVIEW_IN_PROGRESS"}, "CORRECTION_REQUIRED"),
     "resubmit": ({"CORRECTION_REQUIRED"}, "RESUBMITTED"),
     # Submitted is permitted for the original verify endpoint, whose legacy
     # implementation had no separate review step. New clients use start_review.
@@ -63,7 +66,7 @@ ACTION_CAPABILITIES = {
     "submit": "submit", "start_review": "start_review", "request_correction": "request_correction",
     "resubmit": "resubmit", "complete_document_verification": "complete_document_verification",
     "start_eligibility": "evaluate_eligibility", "mark_eligible": "evaluate_eligibility",
-    "mark_ineligible": "evaluate_eligibility", "allocate": "allocate", "waitlist": "allocate",
+    "mark_ineligible": "evaluate_eligibility", "allocate": "allocate_seat", "waitlist": "allocate_seat",
     "start_assessment": "record_assessment", "qualify_assessment": "record_assessment",
     "assessment_not_qualified": "record_assessment",
     "start_counselling": "record_counselling", "complete_counselling": "record_counselling",

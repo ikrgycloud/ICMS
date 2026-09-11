@@ -25,6 +25,7 @@ services:
       # this to production and inject a non-placeholder JWT_SECRET.
       ICMS_ENVIRONMENT: development
       DEMO_DATA_ENABLED: "true"
+      PROVISION_PAYROLL_DATA: "true"
     depends_on:
       db:
         condition: service_healthy
@@ -45,6 +46,7 @@ services:
       JWT_SECRET: change-me-in-production
       ICMS_ENVIRONMENT: development
       DEMO_DATA_ENABLED: "true"
+      PROVISION_PAYROLL_DATA: "true"
     depends_on:
       db:
         condition: service_healthy

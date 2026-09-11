@@ -593,6 +593,23 @@ def _ensure_student_portal_demo_sections(s, dept_id: str):
         course.credits = spec["credits"]
         course.semester = spec["semester"]
         course.description = f"{spec['title']} core course for semester {spec['semester']}."
+        if not course.program_id:
+            program = (s.query(D.Program).filter(D.Program.tenant_id == TENANT,
+                                                 D.Program.dept_id == dept_id)
+                       .order_by(D.Program.id).first())
+            if program:
+                course.program_id = program.id
+
+        offering_id = f"offering_{course.id}_{term.replace('-', '_').lower()}"
+        offering = _ensure(
+            s, D.CourseOffering, offering_id,
+            lambda: D.CourseOffering(
+                id=offering_id, tenant_id=TENANT, course_id=course.id,
+                program_id=course.program_id, academic_year=f"{DEMO_ATTENDANCE_TODAY.year}-{str(DEMO_ATTENDANCE_TODAY.year + 1)[-2:]}",
+                term=term, semester=course.semester, status="Published",
+                created_by="seed", updated_by="seed",
+            ),
+        ) if course.program_id else None
 
         faculty = _ensure(
             s, D.StaffMember, spec["faculty_id"],
@@ -633,6 +650,7 @@ def _ensure_student_portal_demo_sections(s, dept_id: str):
             ),
         )
         section.course_id = course.id
+        section.offering_id = offering.id if offering else None
         section.dept_id = dept_id
         section.term = term
         section.section_code = spec["section_code"]
@@ -1670,13 +1688,24 @@ def _seed_core_domain(s):
     # so persist courses and faculty before creating sections and students.
     s.flush()
 
+    offering_ids = {}
+    for cid, did, code, sem in course_rows:
+        offering_id = f"offering_{cid}_{today.year}_odd"
+        offering_ids[cid] = offering_id
+        s.add(D.CourseOffering(
+            id=offering_id, tenant_id=TENANT, course_id=cid,
+            program_id=f"prog_{code.lower()}_btech", academic_year=fiscal_year,
+            term=term, semester=sem, status="Published", created_by="seed", updated_by="seed",
+        ))
+    s.flush()
+
     section_rows = []
     for cid, did, code, sem in course_rows:
         for sec_code in (["A", "B"] if R.random() > 0.5 else ["A"]):
             fid, _ = R.choice(faculty_by_dept[code])
             sid = f"sec_{cid.split('_')[1]}_{sec_code.lower()}"
             section_rows.append((sid, cid, did, code, sem, fid, sec_code))
-            s.add(D.Section(id=sid, tenant_id=TENANT, course_id=cid, dept_id=did,
+            s.add(D.Section(id=sid, tenant_id=TENANT, course_id=cid, offering_id=offering_ids[cid], dept_id=did,
                             term=term, section_code=sec_code,
                             faculty_person_id=fid, room=f"LH-{R.randint(1, 20)}",
                             schedule=R.choice(["Mon/Wed 10:00", "Tue/Thu 11:00",
@@ -3818,6 +3847,25 @@ def _seed_admissions_phase2(s):
             application_no="APP-PH2-SUBMITTED", applicant_name="Phase Two Submitted", email="phase2.submitted@example.test",
             phone="9000000002", program_id=program.id, selected_program_id=program.id, program_name=program.name,
             campus=binding.campus, status="submitted", current_status="SUBMITTED", status_version=1, submitted_at=now))
+    s.flush()
+    # Fully populate the applicant demo record so the public portal has useful
+    # profile, preference, and document data before a real applicant starts.
+    demo = s.get(D.Application, "app_phase2_draft")
+    if demo:
+        if not demo.profile_json or demo.profile_json == "{}":
+            demo.profile_json = json.dumps({"qualifying_percentage": 82, "board": "State Board", "category": "GENERAL"})
+        if not s.query(D.ApplicationPreference).filter_by(application_id=demo.id).first():
+            s.add(D.ApplicationPreference(id="app_pref_phase2_demo", tenant_id=TENANT,
+                application_id=demo.id, program_id=demo.selected_program_id, preference_rank=1))
+        for document_id, requirement_id, document_type, file_name in [
+            ("app_doc_phase2_demo_marks", "adm_doc_phase2_marks", "Qualifying examination marksheet", "Aarav-Sharma-marksheet.pdf"),
+            ("app_doc_phase2_demo_identity", "adm_doc_phase2_identity", "Government identity", "Aarav-Sharma-id.pdf"),
+        ]:
+            if not s.get(D.ApplicationDocument, document_id):
+                s.add(D.ApplicationDocument(id=document_id, tenant_id=TENANT, application_id=demo.id,
+                    requirement_id=requirement_id, document_type=document_type,
+                    storage_key=f"seed/admissions/{file_name}", file_name=file_name,
+                    mime_type="application/pdf", verification_status="pending"))
     s.commit()
 
 
@@ -3880,6 +3928,11 @@ def _seed_admissions_phase4(s):
     pool=s.get(D.AdmissionSeatPool,"adm_pool_phase4_regular")
     if not pool:
         pool=D.AdmissionSeatPool(id="adm_pool_phase4_regular",tenant_id=TENANT,cycle_id=cycle.id,campus=binding.campus,program_id=program.id,quota_id=quota.id if quota else None,category_code="GENERAL",intake_key="phase4",capacity=5,status="open");s.add(pool)
+    # An unrestricted pool is required for applicants who qualify through the
+    # standard path and do not have a quota-specific eligibility decision.
+    general_pool=s.get(D.AdmissionSeatPool,"adm_pool_phase4_general")
+    if not general_pool:
+        general_pool=D.AdmissionSeatPool(id="adm_pool_phase4_general",tenant_id=TENANT,cycle_id=cycle.id,campus=binding.campus,program_id=program.id,quota_id=None,category_code="GENERAL",intake_key="phase4-general",capacity=10,status="open");s.add(general_pool)
     states=["ELIGIBLE","ASSESSMENT_PENDING","ASSESSMENT_QUALIFIED","COUNSELLING_PENDING","COUNSELLING_COMPLETED","ALLOCATION_PENDING","ALLOCATED","WAITLISTED","OFFER_RECOMMENDATION_PENDING","OFFER_APPROVAL_PENDING","OFFERED","OFFER_ACCEPTED","OFFER_DECLINED","OFFER_EXPIRED"]
     active={"ALLOCATED","OFFER_RECOMMENDATION_PENDING","OFFER_APPROVAL_PENDING","OFFERED","OFFER_ACCEPTED"}
     now=datetime.utcnow()
@@ -4587,6 +4640,41 @@ def _seed_assignment_submission_demo(s):
             evaluation.submission_id = submission.id; evaluation.evaluator_id = staff.id; evaluation.status = status; evaluation.feedback = "Please revise the evidence and resubmit." if status == "returned" else "Clear analysis with supporting evidence."; evaluation.marks_awarded = None if status == "returned" else 21; evaluation.evaluated_at = now - timedelta(hours=12)
     s.commit()
 
+
+def _seed_aarav_cs404_attendance_roster(s):
+    """Ensure the checked-in CS404-A demonstration session has a real roster."""
+    professor = s.query(User).filter(User.username == "aarav_kulkarni").first()
+    staff = s.query(D.StaffMember).filter(D.StaffMember.user_id == professor.id).first() if professor else None
+    if not staff:
+        return
+    section = (s.query(D.Section)
+               .join(D.Course, D.Course.id == D.Section.course_id)
+               .filter(D.Section.id == "sec_cs404_a", D.Course.code == "CS404")
+               .first())
+    if not section or not s.query(D.TeachingAllocation).filter(
+        D.TeachingAllocation.faculty_id == staff.id,
+        D.TeachingAllocation.section_id == section.id,
+        D.TeachingAllocation.status == "active",
+    ).first():
+        return
+    if s.query(D.Enrollment).filter(D.Enrollment.section_id == section.id,
+                                    D.Enrollment.status == "enrolled").count():
+        return
+    for student_id in ("stu_1", "stu_2", "stu_3"):
+        student = s.get(D.Student, student_id)
+        if not student:
+            continue
+        enrollment = s.query(D.Enrollment).filter(D.Enrollment.section_id == section.id,
+                                                   D.Enrollment.student_id == student.id).first()
+        if not enrollment:
+            enrollment = D.Enrollment(id=f"demo_attendance_{section.id}_{student.id}",
+                                      tenant_id=TENANT, section_id=section.id,
+                                      student_id=student.id)
+            s.add(enrollment)
+        enrollment.status = "enrolled"
+    s.commit()
+
+
 def _seed_mentoring_cases_demo(s):
     """Idempotent Phase 6 cases for Aarav's real formal advisees."""
     professor = s.query(User).filter(User.username == "aarav_kulkarni").first()
@@ -4684,6 +4772,7 @@ def seed_domain():
         _seed_marks_submission_demo(s)
         _seed_faculty_leave_demo(s)
         _seed_assignment_submission_demo(s)
+        _seed_aarav_cs404_attendance_roster(s)
         _seed_mentoring_cases_demo(s)
         _seed_research_demo(s)
         legacy_published = [row[0] for row in s.query(D.Mark.assessment_id)

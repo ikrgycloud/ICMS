@@ -7,7 +7,21 @@ export default function AcademicRollover({ user }: { user: any }) {
   const [error, setError] = useState('')
   const [policy, setPolicy] = useState<any>(null)
   const [form, setForm] = useState({ source_academic_year: '', source_semester: 1, target_academic_year: '', target_semester: 2 })
-  const load = () => { api.academicRollovers().then(setData).catch((e: any) => setError(e.message)); api.academicRolloverPolicy().then(setPolicy).catch(() => setPolicy(null)) }
+  const load = async () => {
+    setError('')
+    try {
+      const rollovers = await api.academicRollovers()
+      setData(rollovers)
+
+      // The policy is restricted to academic leadership. Fetch it only after
+      // the rollover response confirms that this user can review it, rather
+      // than issuing an expected-but-noisy 403 for Finance and the Principal.
+      setPolicy(rollovers.can_review ? await api.academicRolloverPolicy() : null)
+    } catch (e: any) {
+      setError(e.message)
+      setPolicy(null)
+    }
+  }
   useEffect(() => { load() }, [])
   if (!data) return <Spinner />
   // Academic staff work on the open cycle; Finance/Principal can still view

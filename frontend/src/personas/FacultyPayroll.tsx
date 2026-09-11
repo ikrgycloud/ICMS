@@ -14,6 +14,7 @@ export default function FacultyPayroll() {
 
   if (!data) return <Spinner />
   if (data.error) return <Empty icon="!" text="Payroll details could not be loaded." />
+  if (data.payroll_configured === false) return <Empty icon="!" text="Your payroll profile has not been configured yet. Please contact Human Resources." />
 
   const profile = data.profile || {}
   const entry = data.entry || {}

@@ -68,9 +68,10 @@ export default function DeanAcademicsDashboard({ go }: { go: (view: string) => v
   const readiness = data?.timetable_readiness || { completed: 0, in_progress: 0, pending: 0, conflicts: 0 }
   const curriculumSegments = valueColoredSegments(curriculumEntries.map(([label, value]) => ({ label: niceLabel(label), value: Number(value || 0) })))
   const readinessSegments = valueColoredSegments([
-    { label: 'Completed', value: Number(readiness.completed || 0) },
-    { label: 'In Progress', value: Number(readiness.in_progress || 0) },
-    { label: 'Pending', value: Number(readiness.pending || 0) },
+    { label: 'Published', value: Number(readiness.completed || 0) },
+    { label: 'In Review', value: Number(readiness.in_progress || 0) },
+    { label: 'Returned', value: Number(readiness.returned || 0) },
+    { label: 'Not Submitted', value: Number(readiness.pending || 0) },
   ])
   const readinessTotal = readinessSegments.reduce((sum, segment) => sum + segment.value, 0)
   const healthScorecard = data?.health_scorecard || []
@@ -84,7 +85,7 @@ export default function DeanAcademicsDashboard({ go }: { go: (view: string) => v
       <div>
         <span className="dean-overview-eyebrow">Dean Academics</span>
         <h1>Academic Overview</h1>
-        <p>Monitor performance, workload, readiness, and decisions across your academic scope.</p>
+        <p>Monitor performance, readiness, and decisions across your academic scope.</p>
       </div>
       <div className="dean-live-status" aria-live="polite">
         <span className={`dean-live-dot ${loading ? 'is-loading' : ''}`} />
@@ -170,11 +171,6 @@ export default function DeanAcademicsDashboard({ go }: { go: (view: string) => v
         <div className="dean-trend-wrap">
           <TrendChart data={trendData} />
         </div>
-      </section>
-
-      <section className="dean-panel dean-workload-panel">
-        <div className="dean-panel-head"><h3>Faculty Workload</h3><button className="dean-panel-link" type="button" onClick={() => go('dean_allocation')}>View allocation</button></div>
-        <FacultyWorkload workload={data?.faculty_workload} onOpen={() => go('dean_allocation')} />
       </section>
 
       <section className="dean-panel">
@@ -293,28 +289,6 @@ function TrendChart({ data }: { data: any[] }) {
       {points.map((point) => <span key={`${point.label}-${point.value}`}>{point.label}</span>)}
     </div>
   </div>
-}
-
-function FacultyWorkload({ workload, onOpen }: { workload: any; onOpen: () => void }) {
-  const facultyCount = Number(workload?.faculty_count || 0)
-  const assigned = Number(workload?.assigned || 0)
-  const load = Number(workload?.avg_load || 0)
-  const capacity = Number(workload?.capacity_units || 0)
-  const average = Number(workload?.avg_units || 0)
-  const hasAllocationData = assigned > 0
-  const status = workload?.status || 'No allocation data'
-  return <button className="dean-workload-content" onClick={onOpen} type="button" aria-label={`Faculty workload: ${status}`}>
-    <div className="dean-workload-gauge" style={{ '--load': `${load * 1.8}deg` } as React.CSSProperties}>
-      <div className="dean-workload-gauge-hole"><strong>{hasAllocationData ? `${Math.round(load)}%` : '—'}</strong><span>{hasAllocationData ? 'average load' : 'no allocation data'}</span></div>
-    </div>
-    <div className="dean-workload-copy"><b>{status}</b><span>{hasAllocationData ? `${average.toFixed(1)} of ${capacity.toFixed(1)} workload units per faculty` : 'Create and approve faculty allocations to calculate workload.'}</span></div>
-    <div className="dean-workload-breakdown">
-      <span><i className="underloaded" />Underloaded <b>{Number(workload?.underloaded || 0)}</b></span>
-      <span><i className="balanced" />Balanced <b>{Number(workload?.balanced || 0)}</b></span>
-      <span><i className="overloaded" />Overloaded <b>{Number(workload?.overloaded || 0)}</b></span>
-      <small>{facultyCount ? `${assigned} of ${facultyCount} faculty allocated` : 'No faculty in this scope'}</small>
-    </div>
-  </button>
 }
 
 function ApprovalRow({ label, count, tone, onClick }: { label: string; count: number; tone: string; onClick: () => void }) {

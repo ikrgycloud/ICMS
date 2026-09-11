@@ -215,6 +215,26 @@ def test_active_scoped_delegation_can_approve_and_is_persisted():
     assert row["state"]=="ROUTED" and approval.delegation_id=="delegation-1" and approval.delegated_from_user_id=="principal"
 
 
+def test_delegation_authority_matches_namespaced_action_tokens():
+    from authority import authorize, DELEGATED
+    delegation = {
+        "status": "active",
+        "authority": "approve:administration",
+        "start": (datetime.utcnow() - timedelta(hours=1)).isoformat(),
+        "end": (datetime.utcnow() + timedelta(days=1)).isoformat(),
+        "limit": None,
+    }
+    decision = authorize(
+        ctx={"sub": "delegatee", "scope_level": "campus"},
+        action="approve",
+        resource="administration",
+        rbac_authority=DELEGATED,
+        active_delegation=delegation,
+        target_scope_level="campus",
+    )
+    assert decision.outcome == "ALLOW"
+
+
 def test_approval_rejection_is_audited_and_idempotent_evented():
     s=setup_db(); create_approval_policy(PolicyIn(category="FACILITIES",approver_office_n=4),ctx("principal",4),s)
     row=create_requirement(RequirementIn(title="Rejected repair",category="FACILITIES"),ctx("hod",10),s)

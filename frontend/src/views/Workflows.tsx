@@ -215,8 +215,22 @@ function DetailModal({ wf, user, onClose, onDone }: any) {
           <div style={{ display: 'flex', gap: 20, marginBottom: 18, flexWrap: 'wrap' }}>
             <Meta label="State"><StatePill s={data.state} /></Meta>
             <Meta label="Initiator">{data.initiator}</Meta>
-            {data.amount != null && <Meta label="Amount"><span className="mono">{money(data.amount)}</span></Meta>}
-            <Meta label="Current stage"><span className="mono">{data.chain?.[data.current_stage] || 'Processing'}</span></Meta>
+            <Meta label="Amount"><span className="mono">{money(data.amount)}</span></Meta>
+            <Meta label="Scope"><span className="mono">{data.scope_level}</span></Meta>
+            <Meta label="Escalates to"><span className="mono">{data.escalation}</span></Meta>
+          </div>
+
+          <div style={{ fontFamily: 'var(--ff-mono)', fontSize: 8, color: 'var(--txt-mute)', textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 10 }}>Approval chain</div>
+          <div className="chain" style={{ marginBottom: 22 }}>
+            {data.chain.map((c: string, i: number) => (
+              <>
+                <div className={`chain-node ${i < data.current_stage ? 'done' : i === data.current_stage ? 'current' : ''}`} key={i}>
+                  <div className="cn-stage">Stage {i}{i < data.current_stage ? ' ✓' : ''}</div>
+                  <div className="cn-role">{c}</div>
+                </div>
+                {i < data.chain.length - 1 && <span className="chain-arrow">→</span>}
+              </>
+            ))}
           </div>
 
           {lastDecision && (
@@ -236,11 +250,11 @@ function DetailModal({ wf, user, onClose, onDone }: any) {
                 <input className="inp" value={reason} onChange={e => setReason(e.target.value)} placeholder="Optional note for the decision" />
               </div>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {showReviewAction && <button className="btn btn-teal" disabled={busy} onClick={() => decide('review')}>Review</button>}
+                <button className="btn btn-teal" disabled={busy} onClick={() => decide('review')}>Review</button>
                 <button className="btn btn-brass" disabled={busy} onClick={() => decide('approve')}>Approve</button>
-                {data.state === 'approved' && <button className="btn btn-solid" disabled={busy} onClick={() => decide('execute')}>Execute</button>}
+                {data.state === 'approved' && data.process_key !== 'attendance_correction' && <button className="btn btn-solid" disabled={busy} onClick={() => decide('execute')}>Execute</button>}
                 <button className="btn btn-rose" disabled={busy} onClick={() => decide('reject')}>Reject</button>
-                <button className="btn btn-out" disabled={busy} onClick={() => decide('escalate')}>Escalate</button>
+                {data.process_key !== 'attendance_correction' && <button className="btn btn-out" disabled={busy} onClick={() => decide('escalate')}>Escalate</button>}
               </div>
               <div style={{ fontSize: 8, color: 'var(--txt-mute)', marginTop: 10 }}>
                 The engine runs the full authority check on each action. If you initiated this request, segregation of duties will block your own approval.

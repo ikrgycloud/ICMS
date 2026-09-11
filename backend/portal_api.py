@@ -21,7 +21,7 @@ from datetime import date, datetime, timedelta
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, desc, or_
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT
@@ -34,7 +34,6 @@ from core import auth, db, uid, write_audit
 from database import TENANT, office
 import domain_models as D
 from models import User, Notification
-from teaching import faculty_active_sections
 
 router = APIRouter(prefix="/api/portal")
 
@@ -3563,7 +3562,22 @@ def update_payroll_entry_status(entry_id: str, body: dict, ctx=Depends(auth), s=
 
 @router.get("/payroll/me")
 def my_payroll(month: str = None, ctx=Depends(auth), s=Depends(db)):
-    stf = _staff_or_404(s, ctx)
+    stf = s.query(D.StaffMember).filter(D.StaffMember.user_id == ctx["sub"]).first()
+    if not stf:
+        # A valid employee login may be provisioned before its staff record is
+        # linked. Payroll is self-service, so expose the configuration state
+        # rather than presenting this expected onboarding condition as a 404.
+        user = s.get(User, ctx["sub"])
+        person = s.get(Person, user.person_id) if user and user.person_id else None
+        return {
+            "payroll_configured": False,
+            "profile": {
+                "name": person.name if person else user.username if user else "",
+                "designation": user.role if user else "",
+            },
+            "available_months": [],
+        }
+    dept = s.query(D.Department).get(stf.dept_id) if stf.dept_id else None
 
     payroll_emp = (
         s.query(D.PayrollEmployee)
@@ -3572,7 +3586,21 @@ def my_payroll(month: str = None, ctx=Depends(auth), s=Depends(db)):
         .first()
     )
     if not payroll_emp:
-        raise HTTPException(404, "Payroll profile not found")
+        # A staff account can be active before HR has created its payroll
+        # profile. This is an expected self-service state, not a missing API
+        # resource, so return a usable response instead of a 404.
+        return {
+            "payroll_configured": False,
+            "profile": {
+                "name": stf.name,
+                "emp_id": stf.emp_id,
+                "designation": stf.designation,
+                "department": dept.name if dept else "",
+                "email": stf.email,
+                "phone": stf.phone or None,
+            },
+            "available_months": [],
+        }
 
     structure = (
         s.query(D.PayrollSalaryStructure)
@@ -3626,8 +3654,6 @@ def my_payroll(month: str = None, ctx=Depends(auth), s=Depends(db)):
             .first()
         )
 
-    dept = s.query(D.Department).get(stf.dept_id) if stf.dept_id else None
-
     earnings = []
     deductions = []
     if structure:
@@ -3649,6 +3675,7 @@ def my_payroll(month: str = None, ctx=Depends(auth), s=Depends(db)):
         ]
 
     return {
+        "payroll_configured": True,
         "profile": {
             "name": stf.name,
             "emp_id": stf.emp_id,
@@ -3709,7 +3736,6 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
     stf = _staff_or_404(s, ctx)
     sections = s.query(D.Section).filter(D.Section.faculty_person_id == stf.id).all()
     published_ids = _published_section_ids(s, sections)
-    sections = [x for x in sections if x.id in published_ids]
     section_ids = [row.id for row in sections]
     enrolled_count = 0
     if section_ids:
@@ -3798,6 +3824,10 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
     week_start = today - timedelta(days=today.weekday())
     teaching_schedule = []
     for section in sections:
+        # An allocation is already actionable for the professor.  A timetable
+        # plan only controls whether a concrete class time is shown.
+        if section.id not in published_ids:
+            continue
         parts = (section.schedule or "").split(maxsplit=1)
         days, class_time = (parts[0], parts[1] if len(parts) > 1 else "Time pending") if parts else ("", "Time pending")
         course = course_map.get(section.course_id)
@@ -3832,14 +3862,46 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
         elif score_pct >= 60: distribution["60% – 79%"] += 1
         elif score_pct >= 40: distribution["40% – 59%"] += 1
         else: distribution["Below 40%"] += 1
+    active_assignments = (s.query(D.Assignment)
+                          .filter(D.Assignment.section_id.in_(section_ids), D.Assignment.status == "published")
+                          .count() if section_ids else 0)
+    mentor_assignments = s.query(D.MentorAssignment).filter(
+        D.MentorAssignment.faculty_id == stf.id, D.MentorAssignment.status == "active"
+    ).count()
+    mentoring_cases = s.query(D.MentoringCase).filter(
+        D.MentoringCase.mentor_id == stf.id, D.MentoringCase.status.notin_(("closed", "resolved"))
+    ).all()
+    at_risk_advisees = len({case.student_id for case in mentoring_cases if case.risk_level.lower() in {"high", "critical"}})
+    active_projects = s.query(D.ResearchProject).filter(
+        D.ResearchProject.owner_id == stf.id, D.ResearchProject.status.in_(("proposed", "ongoing", "active"))
+    ).count()
+    publications = s.query(D.ResearchPublication).filter(D.ResearchPublication.owner_id == stf.id).count()
+    active_requests = s.query(D.LeaveRequest).filter(
+        D.LeaveRequest.staff_id == stf.id, D.LeaveRequest.status.in_(("pending", "returned"))
+    ).count()
+    total_requests = s.query(D.LeaveRequest).filter(D.LeaveRequest.staff_id == stf.id).count()
+    marks_reviews = sum(1 for assessment in assessments if assessment.marks_state in {"submitted", "under_review", "hod_review", "evaluation_review"})
+    returned_marks = sum(1 for assessment in assessments if assessment.marks_state == "returned")
+    upcoming = []
+    for assignment in (s.query(D.Assignment).filter(D.Assignment.section_id.in_(section_ids), D.Assignment.status == "published").all() if section_ids else []):
+        if assignment.due_at and assignment.due_at.date() >= today:
+            upcoming.append({"kind": "assignment", "title": assignment.title, "due_at": assignment.due_at.isoformat(), "route": "assignments"})
+    for assessment in assessments:
+        if assessment.scheduled_at and assessment.scheduled_at.date() >= today:
+            upcoming.append({"kind": "assessment", "title": assessment.name, "due_at": assessment.scheduled_at.isoformat(), "route": "assessments"})
+    upcoming.sort(key=lambda item: item["due_at"])
     return {
         "profile": {"name": stf.name, "emp_id": stf.emp_id,
                     "designation": stf.designation,
                     "department": dept.name if dept else "", "email": stf.email,
                     "phone": stf.phone or None, "office_hours": stf.office_hours or None},
-        "kpis": {"sections": len(sections), "students": enrolled_count, "classes_this_week": classes_this_week,
-                 "pending_tasks": len(pending), "marks_entry_pending": marks_pending,
-                 "average_attendance": average_attendance, "average_grade": average_score},
+        "kpis": {"sections": len(sections), "assigned_courses": len({section.course_id for section in sections}),
+                 "students": enrolled_count, "classes_this_week": classes_this_week,
+                 "pending_tasks": len(pending), "pending_attendance": len([item for item in pending if item["kind"] == "attendance"]),
+                 "marks_entry_pending": marks_pending, "marks_reviews": marks_reviews,
+                 "returned_marks": returned_marks, "active_assignments": active_assignments,
+                 "at_risk_advisees": at_risk_advisees, "average_attendance": average_attendance,
+                 "average_grade": average_score},
         "sections": section_rows, "pending_tasks": pending[:4],
         "announcements": [{"id": item.id, "title": item.title, "detail": item.detail, "date": item.created_at.date().isoformat()} for item in notes],
         "teaching_schedule": teaching_schedule,
@@ -3847,6 +3909,9 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
         "marks_distribution": [{"label": label, "value": value} for label, value in distribution.items()],
         "performance": {"assessments": len(assessments), "average_score": round(average_score * 10, 1) if average_score is not None else None,
                         "marks_entered": len(marks), "expected_marks": sum(enrollment_by_section.get(item.section_id, 0) for item in assessments)},
+        "dashboard": {"mentoring": {"advisees": mentor_assignments, "active_cases": len(mentoring_cases), "at_risk_advisees": at_risk_advisees},
+                      "research": {"active_projects": active_projects, "publications": publications},
+                      "requests": {"active": active_requests, "total": total_requests}, "upcoming": upcoming[:6]},
         "role_context": {"active_role": ctx.get("role"), "available_roles": office(ctx["office_n"])["internal_roles"]},
     }
     leave_rows = s.query(D.LeaveRequest).filter(D.LeaveRequest.staff_id == stf.id).all()
@@ -3895,29 +3960,117 @@ def faculty_sections(ctx=Depends(auth), s=Depends(db)):
     return {"sections": out}
 
 
+def _faculty_profile_payload(s, ctx, staff):
+    user = s.query(User).get(ctx["sub"])
+    department = s.query(D.Department).get(staff.dept_id) if staff.dept_id else None
+    assignments = []
+    for item in (s.query(D.FacultyFunctionalAssignment)
+                 .filter(D.FacultyFunctionalAssignment.faculty_id == staff.id,
+                         D.FacultyFunctionalAssignment.status == "active").all()):
+        scope = ""
+        if item.scope_type == "section":
+            section = s.query(D.Section).get(item.scope_ref)
+            course = s.query(D.Course).get(section.course_id) if section else None
+            scope = f"{course.code if course else ''}-{section.section_code if section else ''}".strip("-")
+        elif item.scope_type == "department":
+            scoped_department = s.query(D.Department).get(item.scope_ref)
+            scope = scoped_department.name if scoped_department else ""
+        assignments.append({"role": item.role_key.replace("_", " ").title(), "scope": scope or "Assigned scope"})
+    return {"profile": {"name": staff.name, "employee_id": staff.emp_id, "email": staff.email,
+                         "phone": staff.phone, "office_hours": staff.office_hours, "designation": staff.designation,
+                         "department": department.name if department else "—", "campus": staff.campus or "—",
+                         "date_joined": staff.date_joined.isoformat() if staff.date_joined else "", "employment_status": staff.status,
+                         "username": user.username if user else "", "base_role": user.role if user else ""},
+            "assignments": assignments,
+            "editable_fields": ["email", "phone", "office_hours"]}
+
+
+class FacultyProfileUpdateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    email: str | None = Field(default=None, max_length=255)
+    phone: str | None = Field(default=None, max_length=50)
+    office_hours: str | None = Field(default=None, max_length=255)
+
+
+@router.get("/faculty/profile")
+def faculty_self_profile(ctx=Depends(auth), s=Depends(db)):
+    """Return only the authenticated faculty member's safe self-service profile."""
+    staff = _staff_or_404(s, ctx)
+    return _faculty_profile_payload(s, ctx, staff)
+
+
+@router.put("/faculty/profile")
+def update_faculty_self_profile(body: FacultyProfileUpdateIn, ctx=Depends(auth), s=Depends(db)):
+    """Update an explicit, small self-service field whitelist for the token owner."""
+    staff = _staff_or_404(s, ctx)
+    changed = body.model_dump(exclude_unset=True)
+    for key, value in changed.items():
+        setattr(staff, key, (value or "").strip())
+    person = s.query(Person).get(s.query(User).get(ctx["sub"]).person_id)
+    if person:
+        if "email" in changed:
+            person.email = staff.email
+        if "phone" in changed:
+            person.contact = staff.phone
+    s.commit()
+    write_audit(s, ctx["sub"], staff.name, ctx["office_n"], "faculty.profile.update",
+                f"staff:{staff.id}", "profile", "profile", f"Updated: {', '.join(sorted(changed))}")
+    return _faculty_profile_payload(s, ctx, staff)
+
+
 @router.get("/faculty/schedule")
-def faculty_schedule(ctx=Depends(auth), s=Depends(db)):
-    """Weekly schedule built from the faculty member's assigned sections and staff events."""
+def faculty_schedule(week_start: str = "", ctx=Depends(auth), s=Depends(db)):
+    """Read-only faculty schedule from active allocations, timetable entries and sessions."""
     stf = _staff_or_404(s, ctx)
     today = date.today(); week_start = today - timedelta(days=today.weekday()); week_end = week_start + timedelta(days=6)
     courses = {row.id: row for row in s.query(D.Course).all()}
     days = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
     events = []
-    sections = [section for section in faculty_active_sections(s, stf.id) if not stf.dept_id or section.dept_id == stf.dept_id]
+    sections = s.query(D.Section).filter(D.Section.faculty_person_id == stf.id).all()
     for section in sections:
         parts = (section.schedule or "").split(maxsplit=1); names = parts[0] if parts else ""; class_time = parts[1] if len(parts) > 1 else "Time pending"
         course = courses.get(section.course_id)
-        for name in names.split("/"):
-            index = days.get(name[:3].title())
-            if index is not None:
-                events.append({"id": f"class-{section.id}-{index}", "date": (week_start + timedelta(days=index)).isoformat(), "time": class_time, "title": f"{course.code if course else 'Course'} ({section.section_code})", "detail": course.title if course else "Assigned section", "location": section.room or "Room pending", "type": "class", "route": "attendance"})
-    for event in s.query(D.CalendarEvent).filter(D.CalendarEvent.status == "published").all():
-        if not event.start_at or not (week_start <= event.start_at.date() <= week_end) or event.audience not in ("all", "staff", "leadership"):
+        return {"id": event_id, "date": when.isoformat(), "time": starts, "end_time": ends,
+                "title": f"{course.code if course else 'Course'} ({section.section_code})",
+                "course_code": course.code if course else "", "course_title": course.title if course else "",
+                "section": section.section_code, "section_id": section.id, "class_session_id": session_id,
+                "detail": course.title if course else "Assigned section", "location": room or section.room or "Room not configured",
+                "status": "unavailable" if when in approved_leave_dates else status,
+                "leave_state": "Approved leave" if when in approved_leave_dates else "", "type": "class", "route": "attendance"}
+
+    events, covered_slots = [], set()
+    sessions = (s.query(D.ClassSession)
+                .filter(D.ClassSession.tenant_id == ctx["tenant_id"], D.ClassSession.faculty_id == stf.id,
+                        D.ClassSession.section_id.in_(section_ids) if section_ids else False,
+                        D.ClassSession.session_date >= start, D.ClassSession.session_date <= end)
+                .order_by(D.ClassSession.session_date, D.ClassSession.scheduled_start).all())
+    for session in sessions:
+        section = sections.get(session.section_id)
+        if not section:
             continue
-        events.append({"id": f"event-{event.id}", "date": event.start_at.date().isoformat(), "time": "All day" if event.all_day else event.start_at.strftime("%H:%M"), "title": event.title, "detail": event.category, "location": event.location or "Campus", "type": "meeting", "route": "calendar"})
-    events.sort(key=lambda item: (item["date"], item["time"], item["title"]))
-    leaves = s.query(D.LeaveRequest).filter(D.LeaveRequest.staff_id == stf.id, D.LeaveRequest.status.in_(["pending", "approved"])).count()
-    return {"profile": {"name": stf.name, "email": stf.email, "phone": stf.phone, "office_hours": stf.office_hours}, "role": ctx.get("role"), "week_start": week_start.isoformat(), "events": events, "summary": {"classes": sum(item["type"] == "class" for item in events), "meetings": sum(item["type"] == "meeting" for item in events), "sections": len(sections), "leave_requests": leaves}}
+        start_time = session.scheduled_start.strftime("%H:%M") if session.scheduled_start else "Time not configured"
+        end_time = session.scheduled_end.strftime("%H:%M") if session.scheduled_end else ""
+        events.append(payload(f"session-{session.id}", session.session_date, start_time, end_time, section, session.room, session.status, session.id))
+        covered_slots.add((session.timetable_entry_id, session.session_date))
+        covered_slots.add((session.section_id, session.session_date, start_time))
+    entries = (s.query(D.TimetableEntry)
+               .filter(D.TimetableEntry.tenant_id == ctx["tenant_id"],
+                       D.TimetableEntry.section_id.in_(section_ids) if section_ids else False,
+                       D.TimetableEntry.status == "active",
+                       (D.TimetableEntry.effective_from == None) | (D.TimetableEntry.effective_from <= end),
+                       (D.TimetableEntry.effective_to == None) | (D.TimetableEntry.effective_to >= start)).all())
+    for entry in entries:
+        when = start + timedelta(days=entry.day_of_week)
+        if (entry.id, when) in covered_slots or (entry.section_id, when, entry.start_time) in covered_slots:
+            continue
+        section = sections.get(entry.section_id)
+        if section:
+            events.append(payload(f"timetable-{entry.id}-{when.isoformat()}", when, entry.start_time, entry.end_time, section, entry.room, "scheduled"))
+    events.sort(key=lambda item: (item["date"], item["time"], item["id"]))
+    return {"profile": {"name": stf.name, "email": stf.email, "phone": stf.phone, "office_hours": stf.office_hours or ""},
+            "week_start": start.isoformat(), "week_end": end.isoformat(), "events": events, "meetings": [],
+            "leave": [{"id": row.id, "status": row.status, "from_date": row.from_date.isoformat(), "to_date": row.to_date.isoformat()} for row in leaves],
+            "summary": {"classes": len(events), "meetings": 0, "sections": len(section_ids), "leave_requests": len(leaves)}}
 
 
 @router.get("/faculty/section/{section_id}/students")
