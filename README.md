@@ -111,7 +111,7 @@ docker compose up --build
 ```
 
 - **Frontend** → http://localhost:8080
-- **Backend API** → http://localhost:8000 (interactive docs at `/docs`)
+- **Backend API** → http://localhost:8010 (interactive docs at `/docs`; override with `ICMS_BACKEND_PORT`)
 - **PostgreSQL** → localhost:5432 (`icms` / `icms_secret`)
 
 The backend waits for Postgres, creates all tables, and seeds the 40 offices, 268 roles,
@@ -144,6 +144,10 @@ npm run dev          # http://localhost:5173, proxies /api → :8000
 Every demo account uses password **`demo123`**. The login screen lets you filter demo accounts
 by authority level (L1–L8) and fills the credentials in for you. One head account per office;
 a few good starting points:
+
+Every seeded student also receives an individual portal account. Use the student's roll number
+as the username (case-insensitive) and `demo123` as the initial password. The shared `student`
+login remains available for the showcase student profile.
 
 | Username | Office | What you can do |
 |----------|--------|-----------------|
@@ -180,5 +184,3 @@ a few good starting points:
 
 FastAPI · SQLAlchemy 2 · PostgreSQL 16 (SQLite fallback) · React 18 · Vite 5 · TypeScript ·
 Nginx (production frontend) · Docker Compose.
-
-updated

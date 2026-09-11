@@ -21,10 +21,6 @@ const DEMO_USERNAMES: Record<number, string> = {
   38: 'alumni', 39: 'external_auditor', 40: 'governing_body',
 }
 
-// Demo credential shortcuts are opt-in. Production builds do not advertise
-// or prefill development credentials.
-const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === 'true'
-
 export default function Login({ onDone, onBack }: { onDone: (u: any) => void; onBack: () => void }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -33,7 +29,10 @@ export default function Login({ onDone, onBack }: { onDone: (u: any) => void; on
   const [offices, setOffices] = useState<any[]>([])
   const [filter, setFilter] = useState(0)
 
-  useEffect(() => { api.offices().then(setOffices).catch(() => {}) }, [])
+  // The login screen is pre-authentication. Load the public catalog rather
+  // than the authenticated office directory (which correctly rejects the
+  // Front Office after sign-in).
+  useEffect(() => { api.catalog().then((catalog: any) => setOffices(catalog.offices || [])).catch(() => {}) }, [])
 
   async function submit() {
     if (!username || !password) { setErr('Enter a username and password'); return }
@@ -53,6 +52,10 @@ export default function Login({ onDone, onBack }: { onDone: (u: any) => void; on
   }
 
   const shown = offices.filter(o => filter === 0 || o.level === filter)
+  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    submit()
+  }
 
   return (
     <div className="auth">
@@ -87,24 +90,30 @@ export default function Login({ onDone, onBack }: { onDone: (u: any) => void; on
 
           {err && <div className="auth-err">{err}</div>}
 
-          <div className="auth-field">
-            <label>Username</label>
-            <input value={username} onChange={e => setUsername(e.target.value)}
-              placeholder="e.g. student" onKeyDown={e => e.key === 'Enter' && submit()} />
-          </div>
-          <div className="auth-field">
-            <label>Password</label>
-            <input type="password" value={password} onChange={e => setPassword(e.target.value)}
-              placeholder="••••••••" onKeyDown={e => e.key === 'Enter' && submit()} />
-          </div>
-          <button className="auth-submit" onClick={submit} disabled={busy}>
-            {busy ? 'Signing in…' : 'Sign in →'}
-          </button>
+          <form onSubmit={handleSubmit}>
+            <div className="auth-field">
+              <label>Username</label>
+              <input value={username} onChange={e => setUsername(e.target.value)}
+                placeholder="e.g. student" autoComplete="username" />
+            </div>
+            <div className="auth-field">
+              <label>Password</label>
+              <input type="password" value={password} onChange={e => setPassword(e.target.value)}
+                placeholder="••••••••" autoComplete="current-password" />
+            </div>
+            <button className="auth-submit" type="submit" disabled={busy}>
+              {busy ? 'Signing in…' : 'Sign in →'}
+            </button>
+          </form>
 
-          {DEMO_MODE && <><div className="auth-demo-head">
+          <div className="auth-demo-head">
             <span className="t">Demo accounts · {offices.length || 40} offices</span>
             <span className="p">password: demo123</span>
           </div>
+          <button className="auth-acct" style={{ width: '100%', marginBottom: 10 }} onClick={() => { setUsername('applicant_demo'); setPassword('demo123'); setErr('') }}>
+            <span className="idx" style={{ background: '#12855b' }}>A</span>
+            <div style={{ minWidth: 0 }}><div className="u">applicant_demo</div><div className="r">Applicant Portal · pre-enrollment application</div></div>
+          </button>
           <div className="auth-lvlfilter">
             <button className={`auth-lvl ${filter === 0 ? 'on' : ''}`} onClick={() => setFilter(0)}>All</button>
             {[1, 2, 3, 4, 5, 6, 7, 8].map(l => (
@@ -121,7 +130,7 @@ export default function Login({ onDone, onBack }: { onDone: (u: any) => void; on
                 </div>
               </button>
             ))}
-          </div></>}
+          </div>
         </div>
       </div>
     </div>

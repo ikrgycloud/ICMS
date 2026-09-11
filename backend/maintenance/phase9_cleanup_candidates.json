@@ -1,0 +1,33 @@
+{
+  "generated_at": "2026-09-03T12:53:00",
+  "purpose": "One-time Phase 9 manual cleanup manifest. This file is not read at application startup.",
+  "pre_cleanup_counts": {
+    "workflow_instances": 64,
+    "approvals": 84,
+    "leave_requests": 23,
+    "attendance_correction_requests": 2,
+    "assessments": 153
+  },
+  "attendance_correction_workflow_orphans": [
+    "124c87de5a8d", "1381fbfe5eb0", "19142119e035", "1a6675a354b9",
+    "1fcbabda172d", "20dd04624e79", "21353c20f340", "2b9bd5f9bf58",
+    "2e0d7a8e0b92", "37606c0d1bed", "3be70313b296", "457560676146",
+    "468d54e523fb", "4cd963c5423c", "7a8720fd0080", "a105088681df",
+    "b3d9a047ec05", "c5f333356986", "cd05be15d4ee", "d25af55239ab"
+  ],
+  "marks_submission_workflow_orphan": "08f461168048",
+  "leave_test_records": [
+    {"leave_request_id": "994bf1d957dc", "workflow_id": "544b0b38e84a", "dates": "2090-01-10 through 2090-01-12"},
+    {"leave_request_id": "f484d0b7a7d1", "workflow_id": "4d9029350f8a", "dates": "2090-03-10 through 2090-03-11"},
+    {"leave_request_id": "ce1ef2861689", "workflow_id": "e28676a100e2", "dates": "2090-04-10"}
+  ],
+  "classification": {
+    "workflow_orphans": "No linked domain record, not visible in the portal, and created during prior verification runs for aarav_kulkarni.",
+    "leave_test_records": "Automated leave-test dates in 2090, initiated by the seeded demo user, with no relation to retained phase5 demo requests."
+  },
+  "expected_deletions": {
+    "workflow_instances": 24,
+    "approvals": 45,
+    "leave_requests": 3
+  }
+}

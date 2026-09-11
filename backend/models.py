@@ -16,49 +16,7 @@ Base = declarative_base()
 class Tenant(Base):
     __tablename__ = "tenants"
     id = Column(String, primary_key=True)
-    institution_id = Column(String, ForeignKey("institutions.id"), index=True, nullable=True)
     name = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-
-class Institution(Base):
-    """Institutional parent for independently isolated branch tenants."""
-    __tablename__ = "institutions"
-    id = Column(String, primary_key=True)
-    name = Column(String, nullable=False)
-    status = Column(String, default="active")
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-
-class AuthorityMembership(Base):
-    """A server-side authority grant.  Institution grants have no tenant/scope."""
-    __tablename__ = "authority_memberships"
-    id = Column(String, primary_key=True)
-    user_id = Column(String, ForeignKey("users.id"), index=True, nullable=False)
-    institution_id = Column(String, ForeignKey("institutions.id"), index=True, nullable=False)
-    tenant_id = Column(String, index=True, nullable=True)
-    org_scope_id = Column(String, ForeignKey("org_scopes.id"), index=True, nullable=True)
-    office_n = Column(Integer, nullable=False)
-    role_template_key = Column(String, default="")
-    jurisdiction_type = Column(String, nullable=False)  # institution / scope
-    active_from = Column(DateTime, default=datetime.utcnow)
-    active_to = Column(DateTime, nullable=True)
-    status = Column(String, default="active", index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-
-class BranchOrganization(Base):
-    """Branch metadata only; it never contains copied operational data."""
-    __tablename__ = "branch_organizations"
-    id = Column(String, primary_key=True)
-    institution_id = Column(String, ForeignKey("institutions.id"), index=True, nullable=False)
-    tenant_id = Column(String, ForeignKey("tenants.id"), unique=True, index=True, nullable=False)
-    root_scope_id = Column(String, ForeignKey("org_scopes.id"), nullable=False)
-    campus_scope_id = Column(String, ForeignKey("org_scopes.id"), unique=True, nullable=False)
-    code = Column(String, unique=True, index=True, nullable=False)
-    location = Column(String, default="")
-    status = Column(String, default="active")
-    created_by = Column(String, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -102,27 +60,7 @@ class User(Base):
     office_n = Column(Integer)          # primary office
     role = Column(String)               # primary role label (head role)
     scope_level = Column(String)        # resolved scope level
-    # Authentication must resolve an explicit membership scope.  A missing
-    # scope must fail closed instead of silently attaching a user to t_main.
-    scope_ref = Column(String, default="")
-    last_login_at = Column(DateTime, nullable=True)
-    onboarding_completed_at = Column(DateTime, nullable=True)
-    # Records that a Chairman-created initial credential exists without ever
-    # exposing the credential or its hash through account-list APIs.
-    password_created_at = Column(DateTime, nullable=True)
-    demo_password_enabled = Column(Boolean, default=False, nullable=False)
-
-
-class OnboardingInvite(Base):
-    """One-time, hashed invitation tokens.  Raw tokens are never persisted."""
-    __tablename__ = "onboarding_invites"
-    id = Column(String, primary_key=True)
-    user_id = Column(String, ForeignKey("users.id"), index=True, nullable=False)
-    tenant_id = Column(String, ForeignKey("tenants.id"), index=True, nullable=False)
-    token_hash = Column(String, unique=True, index=True, nullable=False)
-    expires_at = Column(DateTime, nullable=False)
-    used_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    scope_ref = Column(String, default="t_main")
 
 
 class Role(Base):
@@ -274,11 +212,6 @@ class WorkflowInstance(Base):
     initiator_name = Column(String)
     current_stage = Column(Integer, default=0)   # index into approval chain
     scope_level = Column(String)
-    campus_scope_id = Column(String, ForeignKey("org_scopes.id"), index=True, nullable=True)
-    # `office_n` identifies a process template. These fields identify the
-    # authenticated identity that owns the current decision stage.
-    current_owner_office_n = Column(Integer, nullable=True, index=True)
-    current_owner_user_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)
     escalated = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
@@ -327,14 +260,25 @@ class Notification(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class NotificationDelivery(Base):
+    __tablename__ = "notification_deliveries"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    notification_id = Column(String, ForeignKey("notifications.id"), index=True)
+    channel = Column(String, default="in_app")
+    status = Column(String, default="pending")
+    attempts = Column(Integer, default=0)
+    last_error = Column(Text, default="")
+    delivered_at = Column(DateTime, nullable=True)
+    next_attempt_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class AuditLog(Base):
     """Append-only, hash-chained (Document §2, §12)."""
     __tablename__ = "audit_logs"
     id = Column(Integer, primary_key=True, autoincrement=True)
     tenant_id = Column(String, index=True)
-    # Nullable preserves historical ledger entries whose campus cannot be
-    # established authoritatively. New scoped operations populate this value.
-    campus_scope_id = Column(String, ForeignKey("org_scopes.id"), index=True, nullable=True)
     actor = Column(String)
     actor_name = Column(String)
     office_n = Column(Integer)
@@ -349,3 +293,77 @@ class AuditLog(Base):
     prev_hash = Column(String)
     hash = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class GovernancePolicy(Base):
+    __tablename__ = "governance_policies"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    proposal_type = Column(String, unique=True, index=True)
+    allowed_transitions_json = Column(Text, default="{}")
+    required_reason_states_json = Column(Text, default="[]")
+    reviewer_office_n = Column(Integer, nullable=True)
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class GovernanceDocument(Base):
+    __tablename__ = "governance_documents"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    owner_entity_type = Column(String, index=True)
+    owner_entity_id = Column(String, index=True)
+    file_name = Column(String)
+    mime_type = Column(String, default="application/octet-stream")
+    size_bytes = Column(Integer, default=0)
+    object_storage_key = Column(String)
+    checksum = Column(String, unique=True)
+    version = Column(Integer, default=1)
+    access_scope = Column(String, default="governance")
+    uploaded_by = Column(String)
+    uploaded_at = Column(DateTime, default=datetime.utcnow)
+    immutable = Column(Boolean, default=True)
+
+
+class GovernanceNotification(Base):
+    __tablename__ = "governance_notification_outcomes"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    notification_id = Column(String, nullable=True)
+    workflow_id = Column(String, index=True)
+    recipient_id = Column(String)
+    event = Column(String)
+    outcome = Column(String, default="queued")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ControlledAcademicRecord(Base):
+    __tablename__ = "controlled_academic_records"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    record_type = Column(String, index=True)
+    entity_ref = Column(String, index=True)
+    version = Column(Integer, default=1)
+    status = Column(String, default="effective")
+    effective_from = Column(DateTime, nullable=True)
+    effective_to = Column(DateTime, nullable=True)
+    payload_json = Column(Text, default="{}")
+    source_proposal_id = Column(String, index=True)
+    created_by = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TimetableExceptionWorkflow(Base):
+    __tablename__ = "timetable_exception_workflows"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    exception_id = Column(String, index=True)
+    state = Column(String, default="detected")
+    assigned_to = Column(String, default="")
+    evidence_document_ids = Column(Text, default="[]")
+    status_version = Column(Integer, default=0)
+    reason = Column(Text, default="")
+    updated_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)

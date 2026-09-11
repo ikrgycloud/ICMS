@@ -1,0 +1,535 @@
+"""Phase 5 applicant finance, final approval, and atomic conversion services."""
+from datetime import datetime, timedelta
+from email.message import EmailMessage
+import json
+import os
+import secrets
+import smtplib
+
+from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
+
+import domain_models as D
+from admissions_service import transition_application
+from core import uid, write_audit
+from models import Approval, Notification, Person, Role, User, UserRole, WorkflowInstance
+from authority import pwhash
+
+
+ACTIVE_ALLOCATIONS = {"RESERVED", "ALLOCATED"}
+
+
+def _send_student_credentials(email, name, student_id, username, temporary_password, programme,
+                              campus, section, fee_summary, hostel_requested, transport_requested,
+                              provisional=False):
+    """Deliver credentials only when the institution has configured SMTP."""
+    host = os.getenv("SMTP_HOST", "").strip()
+    if not host or not email:
+        return False, "SMTP is not configured"
+    message = EmailMessage()
+    message["From"] = os.getenv("SMTP_FROM", "admissions@example.edu")
+    message["To"] = email
+    message["Subject"] = "ICMS student account activation"
+    message.set_content(
+        f"Hello {name},\n\n"
+        f"{'Your provisional student account is ready. Complete the admission fee payment to finish enrollment.' if provisional else 'Your admission is complete.'}\n\n"
+        f"Student ID / Roll number: {student_id}\nUsername: {username}\nTemporary password: {temporary_password}\n\n"
+        f"Programme: {programme}\nCampus: {campus}\nAcademic section: {section}\n\n"
+        f"Admission fee summary: {fee_summary}\n"
+        f"Hostel request: {'Sent to Hostel Department' if hostel_requested else 'Not requested'}\n"
+        f"Transport request: {'Sent to Transport Department' if transport_requested else 'Not requested'}\n\n"
+        "Please sign in and change your password immediately. Keep these credentials private."
+    )
+    with smtplib.SMTP(host, int(os.getenv("SMTP_PORT", "587")), timeout=10) as smtp:
+        if os.getenv("SMTP_TLS", "true").lower() == "true":
+            smtp.starttls()
+        if os.getenv("SMTP_USERNAME"):
+            smtp.login(os.getenv("SMTP_USERNAME"), os.getenv("SMTP_PASSWORD", ""))
+        smtp.send_message(message)
+    return True, "Credential email delivered"
+
+
+def sync_admission_service_requests(session, app, student=None, allocation=None):
+    """Keep Hostel and Transport work queues aligned with applicant preferences."""
+    joining = json.loads(app.profile_json or "{}").get("joining_preferences", {})
+    details = {
+        "student_id": student.id if student else None,
+        "program_id": allocation.program_id if allocation else app.selected_program_id,
+        "campus": allocation.campus if allocation else app.campus,
+        "section_code": (session.get(D.Section, allocation.section_id).section_code if allocation and session.get(D.Section, allocation.section_id) else ""),
+        "group_name": allocation.group_name if allocation else "",
+    }
+    for department, requested in (("HOSTEL", joining.get("hostel_required")), ("TRANSPORT", joining.get("transport_required"))):
+        row = session.query(D.AdmissionServiceRequest).filter_by(application_id=app.id, department=department).first()
+        if not requested:
+            if row: row.status = "cancelled"
+            continue
+        if not row:
+            row = D.AdmissionServiceRequest(id=uid(), tenant_id=app.tenant_id, application_id=app.id,
+                department=department, applicant_name=app.applicant_name)
+            session.add(row)
+        row.applicant_name = app.applicant_name
+        row.pickup_point = str(joining.get("pickup_point") or "") if department == "TRANSPORT" else ""
+        row.student_id = details["student_id"]
+        row.program_id = details["program_id"]
+        row.campus = details["campus"]
+        row.section_code = details["section_code"]
+        row.group_name = details["group_name"]
+        if row.status == "cancelled": row.status = "requested"
+
+
+def provision_student_after_offer_acceptance(session, ctx, application_id, program_id=None,
+                                              campus=None, section_id=None, group_name=""):
+    """Create the student account and Finance invoice after final office allocation.
+
+    The account remains provisional until payment and final approval finish. This lets
+    Finance identify the applicant by roll number while preventing unpaid students
+    from being treated as fully enrolled.
+    """
+    app = _app(session, ctx, application_id, {"OFFER_ACCEPTED"}, lock=True)
+    existing = session.query(D.AdmissionConversion).filter_by(application_id=app.id).first()
+    if existing:
+        return app, session.get(D.Student, existing.student_id), False, "Student account already exists"
+
+    if not program_id or not campus or not section_id or not group_name.strip():
+        raise HTTPException(422, "Programme, campus, class section, and group must be selected by the Admission Office")
+    allowed_programs = {app.selected_program_id}
+    allowed_programs.update(row.program_id for row in session.query(D.ApplicationPreference).filter_by(application_id=app.id).all())
+    if program_id not in allowed_programs:
+        raise HTTPException(422, "Selected programme is not one of the applicant's preferences")
+    program = session.get(D.Program, program_id)
+    if not program or program.tenant_id != app.tenant_id:
+        raise HTTPException(404, "Selected programme not found")
+    cycle = session.get(D.AdmissionCycle, app.cycle_id)
+    section = session.get(D.Section, section_id)
+    if not section or section.tenant_id != app.tenant_id or section.dept_id != program.dept_id:
+        raise HTTPException(422, "Selected class section does not belong to the chosen programme")
+    app.selected_program_id = program.id
+    app.program_id = program.id
+    app.program_name = program.name
+    app.campus = campus
+
+    prefix = f"{(cycle.academic_year if cycle else str(datetime.utcnow().year))[-2:]}{(program.code if program else 'STU').replace('-', '')[:6]}"
+    roll = f"{prefix}{app.id.upper()[-8:]}"
+    person = Person(id=uid(), tenant_id=app.tenant_id, name=app.applicant_name, email=app.email, contact=app.phone or "")
+    session.add(person)
+    username_base = f"student-{app.application_no or app.id}"
+    username = username_base
+    # Legacy/demo accounts can already use an application-number username.
+    # Keep the visible format while guaranteeing a new admission never fails.
+    if session.query(User).filter_by(tenant_id=app.tenant_id, username=username).first():
+        username = f"{username_base}-{app.id[-4:]}"
+    while session.query(User).filter_by(tenant_id=app.tenant_id, username=username).first():
+        username = f"{username_base}-{uid()[:4]}"
+    temporary_password = secrets.token_urlsafe(10)
+    user = User(id=uid(), tenant_id=app.tenant_id, person_id=person.id, username=username,
+                password_hash=pwhash(temporary_password), office_n=36, role="Student",
+                scope_level="individual", scope_ref="")
+    session.add(user)
+    session.flush()
+    role = session.query(Role).filter_by(tenant_id=app.tenant_id, office_n=36).first()
+    if not role:
+        role = Role(id=uid(), tenant_id=app.tenant_id, office_n=36, name="Student", category="individual")
+        session.add(role)
+        session.flush()
+    session.add(UserRole(id=uid(), user_id=user.id, role_id=role.id, org_scope_id=app.tenant_id))
+    student = D.Student(id=uid(), tenant_id=app.tenant_id, roll_no=roll, name=app.applicant_name,
+                        email=app.email, program_id=app.selected_program_id,
+                        dept_id=program.dept_id, campus=campus,
+                        batch=cycle.academic_year if cycle else str(datetime.utcnow().year), semester=1,
+                        section=section.section_code, status="provisional", user_id=user.id)
+    session.add(student)
+    session.flush()
+    session.add(D.Enrollment(id=uid(), tenant_id=app.tenant_id, student_id=student.id,
+                section_id=section.id, status="provisional"))
+    for link in session.query(D.ApplicationGuardian).filter_by(application_id=app.id).all():
+        session.add(D.StudentGuardian(id=uid(), tenant_id=app.tenant_id, student_id=student.id,
+                    guardian_id=link.guardian_id, relationship=link.relationship, is_primary=link.is_primary))
+    conversion = D.AdmissionConversion(id=uid(), tenant_id=app.tenant_id, application_id=app.id,
+                student_id=student.id, user_id=user.id, status="provisional", student_identifier=roll)
+    session.add(conversion)
+    allocation = D.AdmissionClassAllocation(id=uid(), tenant_id=app.tenant_id, application_id=app.id,
+                program_id=program.id, campus=campus, section_id=section.id, group_name=group_name.strip(),
+                assigned_by_user_id=ctx["sub"] if session.get(User, ctx["sub"]) else None)
+    session.add(allocation)
+    sync_admission_service_requests(session, app, student, allocation)
+
+    assignments = []
+    try:
+        structure = _structure(session, app)
+        for item in session.query(D.FeeStructureComponent).filter_by(structure_id=structure.id).order_by(D.FeeStructureComponent.sort_order).all():
+            component = session.get(D.FeeComponent, item.component_id)
+            assignments.append((item.component_id, component.name if component else "Fee component", float(item.amount or 0)))
+    except HTTPException:
+        binding = session.get(D.AdmissionCycleProgram, app.cycle_program_id)
+        fallback_amount = float(binding.admission_fee or 0) if binding else 0
+        assignments.append((None, "Admission fee", fallback_amount))
+    if not assignments:
+        assignments.append((None, "Admission fee", 0))
+
+    app = transition_application(session, ctx, app.id, "start_fee_resolution", app.status_version,
+                                 "Student account created and fees prepared", skip_capability=True, commit=False)
+    total = 0
+    for component_id, component_name, amount in assignments:
+        amount = max(amount, 0)
+        total += amount
+        resolution = D.AdmissionFeeResolution(id=uid(), tenant_id=app.tenant_id, application_id=app.id,
+            resolution_type="admission_fee", approved_amount=amount, due_at=datetime.utcnow() + timedelta(days=14),
+            # This invoice is generated by the acceptance workflow, not a staff
+            # Finance decision. Applicant access-token IDs are not user records.
+            status="resolved", decided_by_user_id=None, notes=component_name)
+        session.add(resolution)
+        session.flush()
+        session.add(D.ApplicantFeeAssignment(id=uid(), tenant_id=app.tenant_id, application_id=app.id,
+            component_id=component_id, component_name=component_name, amount=amount, waived_amount=0,
+            status="resolved", resolution_id=resolution.id))
+    due_at = datetime.utcnow() + timedelta(days=14)
+    invoice = D.FeeInvoice(id=uid(), tenant_id=app.tenant_id, student_id=student.id, application_id=app.id,
+        term=cycle.academic_year if cycle else "Admission", invoice_type="admission_fee", issued_at=datetime.utcnow(),
+        issued_by_user_id=None, amount=round(total, 2), paid=0, status="due", due_date=due_at.date())
+    session.add(invoice)
+    session.flush()
+    challan = D.AdmissionChallan(id=uid(), tenant_id=app.tenant_id, application_id=app.id, invoice_id=invoice.id,
+        challan_no=f"CH-{datetime.utcnow().year}-{uid().upper()}", amount=invoice.amount, due_at=due_at, status="GENERATED")
+    invoice.challan_no = challan.challan_no
+    for assignment in session.query(D.ApplicantFeeAssignment).filter_by(application_id=app.id).all():
+        assignment.invoice_id = invoice.id
+    session.add(challan)
+    app = transition_application(session, ctx, app.id, "issue_invoice", app.status_version,
+                                 "Admission invoice issued", skip_capability=True, commit=False)
+    app = transition_application(session, ctx, app.id, "await_payment", app.status_version,
+                                 "Awaiting Finance payment", skip_capability=True, commit=False)
+    session.add(Notification(id=uid(), tenant_id=app.tenant_id, user_id=user.id, severity="info",
+                title="Student account created", body=f"Your roll number is {roll}. Admission fee payment is pending."))
+    session.commit()
+    fee_summary = f"Invoice {challan.challan_no}: Rs. {float(invoice.amount or 0):,.2f} due by {due_at.strftime('%d %b %Y')}. Components: " + "; ".join(f"{name}: Rs. {amount:,.2f}" for _, name, amount in assignments)
+    try:
+        delivered, note = _send_student_credentials(app.email, app.applicant_name, roll, username,
+            temporary_password, program.name if program else app.program_name, app.campus, section.section_code,
+            fee_summary, False, False, provisional=True)
+    except Exception as exc:
+        delivered, note = False, f"Credential email failed: {exc}"
+    write_audit(session, ctx["sub"], ctx["sub"], ctx["office_n"], "admission.provisional.credentials.email",
+                f"application:{app.id}", "", "DELIVERED" if delivered else "PENDING", note)
+    return app, student, delivered, note
+
+
+def _app(session, ctx, application_id, statuses=None, expected_version=None, lock=False):
+    app = (session.query(D.Application).filter_by(id=application_id).with_for_update().first()
+           if lock else session.get(D.Application, application_id))
+    if not app or app.tenant_id != ctx["tenant_id"]:
+        raise HTTPException(404, "Application not found")
+    if ctx.get("scope_level") == "campus" and ctx.get("scope_ref") and not ctx["scope_ref"].startswith("scope_") and app.campus != ctx["scope_ref"]:
+        raise HTTPException(403, "Application is outside your authorized campus")
+    if expected_version is not None and app.status_version != expected_version:
+        raise HTTPException(409, "Application changed; reload")
+    if statuses and app.current_status not in statuses:
+        raise HTTPException(409, "Application is not at the required Phase 5 stage")
+    return app
+
+
+def _office(ctx, allowed):
+    if ctx.get("office_n") not in allowed:
+        raise HTTPException(403, "Not authorized for this Phase 5 action")
+
+
+def _accepted_offer_allocation(session, app):
+    offer = session.query(D.AdmissionOffer).filter_by(application_id=app.id, status="ACCEPTED").first()
+    allocation = session.query(D.AdmissionSeatAllocation).filter(
+        D.AdmissionSeatAllocation.application_id == app.id,
+        D.AdmissionSeatAllocation.status.in_(ACTIVE_ALLOCATIONS)).first()
+    if not offer or not allocation:
+        raise HTTPException(409, "An accepted offer and active allocation are required")
+    return offer, allocation
+
+
+def _quota_id(session, app):
+    allocation = session.query(D.AdmissionSeatAllocation).filter(
+        D.AdmissionSeatAllocation.application_id == app.id,
+        D.AdmissionSeatAllocation.status.in_(ACTIVE_ALLOCATIONS)).first()
+    pool = session.get(D.AdmissionSeatPool, allocation.seat_pool_id) if allocation else None
+    return pool.quota_id if pool else None
+
+
+def _structure(session, app, structure_id=None):
+    if structure_id:
+        row = session.get(D.FeeStructure, structure_id)
+        if not row or row.tenant_id != app.tenant_id:
+            raise HTTPException(404, "Fee structure not found")
+        if ((row.academic_year and row.academic_year != (session.get(D.AdmissionCycle, app.cycle_id).academic_year if session.get(D.AdmissionCycle, app.cycle_id) else ""))
+                or (row.campus and row.campus != app.campus) or (row.program_id and row.program_id != app.selected_program_id)
+                or (row.cycle_program_id and row.cycle_program_id != app.cycle_program_id)
+                or (row.quota_id and row.quota_id != _quota_id(session, app))):
+            raise HTTPException(422, "Fee structure is outside application scope")
+        return row
+    cycle = session.get(D.AdmissionCycle, app.cycle_id)
+    academic_year = cycle.academic_year if cycle else ""
+    quota_id = _quota_id(session, app)
+    rows = session.query(D.FeeStructure).filter_by(tenant_id=app.tenant_id, academic_year=academic_year, status="active").all()
+    candidates = [r for r in rows if (not r.campus or r.campus == app.campus) and (not r.program_id or r.program_id == app.selected_program_id) and (not r.cycle_program_id or r.cycle_program_id == app.cycle_program_id) and (not r.quota_id or r.quota_id == quota_id)]
+    if not candidates:
+        raise HTTPException(409, "No active fee structure matches this application")
+    return sorted(candidates, key=lambda r: sum(bool(v) for v in (r.campus, r.program_id, r.quota_id, r.cycle_program_id)), reverse=True)[0]
+
+
+def resolve_fees(session, ctx, application_id, expected_version, structure_id=None, due_at=None):
+    _office(ctx, {22})
+    app = _app(session, ctx, application_id, {"OFFER_ACCEPTED"}, expected_version)
+    _accepted_offer_allocation(session, app)
+    structure = _structure(session, app, structure_id)
+    existing = session.query(D.ApplicantFeeAssignment).filter_by(application_id=app.id).count()
+    if existing:
+        raise HTTPException(409, "Fees have already been resolved")
+    app = transition_application(session, ctx, app.id, "start_fee_resolution", app.status_version, "Admission fees resolved", skip_capability=True)
+    components = session.query(D.FeeStructureComponent).filter_by(structure_id=structure.id).order_by(D.FeeStructureComponent.sort_order).all()
+    if not components:
+        raise HTTPException(409, "Fee structure has no components")
+    for item in components:
+        component = session.get(D.FeeComponent, item.component_id)
+        amount = float(item.amount or 0)
+        resolution = D.AdmissionFeeResolution(id=uid(), tenant_id=app.tenant_id, application_id=app.id,
+            resolution_type=component.code if component else "component", approved_amount=amount,
+            due_at=due_at, status="resolved", decided_by_user_id=ctx["sub"], notes=component.name if component else "")
+        session.add(resolution); session.flush()
+        session.add(D.ApplicantFeeAssignment(id=uid(), tenant_id=app.tenant_id, application_id=app.id,
+            component_id=item.component_id, component_name=component.name if component else "Fee component",
+            amount=max(amount, 0), waived_amount=max(-amount, 0), status="resolved", resolution_id=resolution.id))
+    session.commit()
+    write_audit(session, ctx["sub"], ctx["sub"], ctx["office_n"], "admission.fee.resolve", f"application:{app.id}", "", "FEE_RESOLUTION_PENDING", structure.id)
+    return app
+
+
+def issue_applicant_invoice(session, ctx, application_id, expected_version, due_date=None):
+    _office(ctx, {22, 23})
+    app = _app(session, ctx, application_id, expected_version=expected_version)
+    existing = session.query(D.FeeInvoice).filter_by(application_id=app.id, invoice_type="admission_fee").first()
+    if existing:
+        return app, existing, session.query(D.AdmissionChallan).filter_by(invoice_id=existing.id).first()
+    if app.current_status != "FEE_RESOLUTION_PENDING":
+        raise HTTPException(409, "Application is not at the required Phase 5 stage")
+    assignments = session.query(D.ApplicantFeeAssignment).filter_by(application_id=app.id).all()
+    if not assignments:
+        raise HTTPException(409, "Fee resolution is required before invoicing")
+    total = round(sum(float(x.amount or 0) - float(x.waived_amount or 0) for x in assignments), 2)
+    due_at = due_date or (datetime.utcnow() + timedelta(days=14))
+    conversion = session.query(D.AdmissionConversion).filter_by(application_id=app.id).first()
+    invoice = D.FeeInvoice(id=uid(), tenant_id=app.tenant_id, student_id=conversion.student_id if conversion else None, application_id=app.id,
+        term=(session.get(D.AdmissionCycle, app.cycle_id).academic_year if session.get(D.AdmissionCycle, app.cycle_id) else "Admission"),
+        invoice_type="admission_fee", issued_at=datetime.utcnow(), issued_by_user_id=ctx["sub"], amount=total, paid=0, status="due", due_date=due_at.date())
+    session.add(invoice); session.flush()
+    challan = D.AdmissionChallan(id=uid(), tenant_id=app.tenant_id, application_id=app.id, invoice_id=invoice.id,
+        challan_no=f"CH-{datetime.utcnow().year}-{uid().upper()}", amount=total, due_at=due_at, status="GENERATED")
+    invoice.challan_no = challan.challan_no
+    for assignment in assignments: assignment.invoice_id = invoice.id
+    session.add(challan); session.commit()
+    app = transition_application(session, ctx, app.id, "issue_invoice", app.status_version, "Applicant invoice issued", skip_capability=True)
+    app = transition_application(session, ctx, app.id, "await_payment", app.status_version, "Awaiting verified payment", skip_capability=True)
+    write_audit(session, ctx["sub"], ctx["sub"], ctx["office_n"], "admission.invoice.issue", f"invoice:{invoice.id}", "", "PAYMENT_PENDING", challan.challan_no)
+    return app, invoice, challan
+
+
+def record_applicant_payment(session, ctx, application_id, expected_version, amount, reference, method="challan", challan_id=None):
+    _office(ctx, {23})
+    app = _app(session, ctx, application_id, {"PAYMENT_PENDING"}, expected_version)
+    invoice = session.query(D.FeeInvoice).filter_by(application_id=app.id, invoice_type="admission_fee").first()
+    if not invoice or amount <= 0 or amount > max(0, invoice.amount - invoice.paid):
+        raise HTTPException(422, "Payment amount is invalid for this invoice")
+    if session.query(D.Payment).filter_by(tenant_id=app.tenant_id, reference=reference).first():
+        raise HTTPException(409, "Payment reference already exists")
+    challan = session.get(D.AdmissionChallan, challan_id) if challan_id else session.query(D.AdmissionChallan).filter_by(invoice_id=invoice.id).first()
+    if challan and (challan.application_id != app.id or challan.status not in {"GENERATED", "PENDING"}):
+        raise HTTPException(409, "Challan cannot receive this payment")
+    payment = D.Payment(id=uid(), tenant_id=app.tenant_id, invoice_id=invoice.id, student_id=invoice.student_id or "", amount=amount,
+        method=method, reference=reference, status="RECORDED", recorded_by_user_id=ctx["sub"])
+    session.add(payment)
+    if challan: challan.status="PENDING"; challan.payment_reference=reference
+    session.commit()
+    app = transition_application(session, ctx, app.id, "record_payment", app.status_version, "Payment recorded pending Accounts verification", skip_capability=True)
+    write_audit(session, ctx["sub"], ctx["sub"], ctx["office_n"], "admission.payment.record", f"payment:{payment.id}", "", "PAYMENT_RECORDED", reference)
+    return app, payment
+
+
+def verify_payment(session, ctx, application_id, payment_id, expected_version, status="VERIFIED", note=""):
+    _office(ctx, {23})
+    app = _app(session, ctx, application_id, {"PAYMENT_RECORDED"}, expected_version)
+    invoice = session.query(D.FeeInvoice).filter_by(application_id=app.id, invoice_type="admission_fee").first()
+    payment = session.get(D.Payment, payment_id)
+    if not invoice or not payment or payment.invoice_id != invoice.id:
+        raise HTTPException(404, "Payment not found for this application")
+    if payment.status == "VERIFIED":
+        return app, payment
+    if status not in {"VERIFIED", "BOUNCED"}:
+        raise HTTPException(422, "Unsupported verification status")
+    payment.status=status; payment.verified_by_user_id=ctx["sub"]; payment.verified_at=datetime.utcnow(); payment.verification_note=note
+    challan=session.query(D.AdmissionChallan).filter_by(invoice_id=invoice.id, payment_reference=payment.reference).first()
+    if challan: challan.status="PAID" if status == "VERIFIED" else "BOUNCED"; challan.verified_by_user_id=ctx["sub"]; challan.verified_at=datetime.utcnow()
+    if status != "VERIFIED": session.commit(); raise HTTPException(409, "Bounced payments cannot clear an admission")
+    invoice.paid=round(sum(float(p.amount or 0) for p in session.query(D.Payment).filter_by(invoice_id=invoice.id,status="VERIFIED").all()),2)
+    invoice.status="paid" if invoice.paid >= invoice.amount else "partial"
+    if invoice.paid < invoice.amount:
+        session.commit(); raise HTTPException(409, "Verified payments do not settle the invoice")
+    clearance=session.query(D.AdmissionFinanceClearance).filter_by(application_id=app.id).first() or D.AdmissionFinanceClearance(id=uid(),tenant_id=app.tenant_id,application_id=app.id,invoice_id=invoice.id)
+    clearance.accounts_status="VERIFIED"; clearance.accounts_user_id=ctx["sub"]; clearance.updated_at=datetime.utcnow(); session.add(clearance); session.commit()
+    app=transition_application(session,ctx,app.id,"verify_accounts",app.status_version,"Accounts verified settled payment",skip_capability=True)
+    write_audit(session,ctx["sub"],ctx["sub"],ctx["office_n"],"admission.payment.verify",f"payment:{payment.id}","RECORDED","VERIFIED",note)
+    return app,payment
+
+
+def clear_finance(session, ctx, application_id, expected_version):
+    _office(ctx,{22})
+    app=_app(session,ctx,application_id,expected_version=expected_version)
+    existing=session.query(D.AdmissionFinanceClearance).filter_by(application_id=app.id,finance_status="CLEARED").first()
+    if existing: return app,existing
+    if app.current_status != "ACCOUNTS_VERIFIED": raise HTTPException(409,"Application is not at the required Phase 5 stage")
+    invoice=session.query(D.FeeInvoice).filter_by(application_id=app.id,invoice_type="admission_fee").first()
+    if not invoice: raise HTTPException(409,"Applicant invoice is required")
+    verified=sum(float(p.amount or 0) for p in session.query(D.Payment).filter_by(invoice_id=invoice.id,status="VERIFIED").all())
+    assignments=session.query(D.ApplicantFeeAssignment).filter_by(application_id=app.id).all()
+    waived=sum(float(x.waived_amount or 0) for x in assignments); payable=round(sum(float(x.amount or 0)-float(x.waived_amount or 0) for x in assignments),2); balance=round(payable-verified,2)
+    if balance > 0: raise HTTPException(409,"Verified payment does not settle the calculated balance")
+    row=session.query(D.AdmissionFinanceClearance).filter_by(application_id=app.id).first() or D.AdmissionFinanceClearance(id=uid(),tenant_id=app.tenant_id,application_id=app.id,invoice_id=invoice.id)
+    row.accounts_status="VERIFIED";row.finance_status="CLEARED";row.finance_user_id=ctx["sub"];row.total_payable=payable;row.total_paid=verified;row.total_waived=waived;row.balance=balance;row.cleared_at=datetime.utcnow();row.updated_at=datetime.utcnow();session.add(row);session.commit()
+    app=transition_application(session,ctx,app.id,"clear_finance",app.status_version,"Finance clearance calculated server-side",skip_capability=True)
+    write_audit(session,ctx["sub"],ctx["sub"],ctx["office_n"],"admission.finance.clear",f"application:{app.id}","ACCOUNTS_VERIFIED","FINANCE_CLEARED",str(payable))
+    return app,row
+
+
+def request_final_approval(session,ctx,application_id,expected_version):
+    _office(ctx,{15})
+    app=_app(session,ctx,application_id,{"FINANCE_CLEARED"},expected_version)
+    if not session.query(D.AdmissionFinanceClearance).filter_by(application_id=app.id,finance_status="CLEARED").first(): raise HTTPException(409,"Finance clearance is required")
+    app=transition_application(session,ctx,app.id,"request_final_approval",app.status_version,"Final admission approval requested",skip_capability=True)
+    workflow=WorkflowInstance(id=uid(),tenant_id=app.tenant_id,process_key="student_admission",label="Final admission",office_n=15,title=f"Final admission {app.application_no}",state="submitted",initiator_id=ctx["sub"],initiator_name=ctx["sub"],current_stage=1,scope_level=ctx.get("scope_level","campus"))
+    session.add(workflow);session.add(D.AdmissionWorkflowLink(id=uid(),tenant_id=app.tenant_id,application_id=app.id,workflow_id=workflow.id,purpose="final_admission",status="active"));session.commit()
+    write_audit(session,ctx["sub"],ctx["sub"],ctx["office_n"],"admission.final.request",f"application:{app.id}","FINANCE_CLEARED","FINAL_APPROVAL_PENDING",workflow.id)
+    return app,workflow
+
+
+def complete_final_approval(session,ctx,application_id,expected_version):
+    _office(ctx,{4})
+    app=_app(session,ctx,application_id,{"FINAL_APPROVAL_PENDING"},expected_version)
+    link=session.query(D.AdmissionWorkflowLink).filter_by(application_id=app.id,purpose="final_admission",status="active").first(); workflow=session.get(WorkflowInstance,link.workflow_id) if link else None
+    approved=workflow and workflow.state in {"approved","executed"}
+    approved=approved or bool(workflow and session.query(Approval).filter_by(workflow_id=workflow.id,decision="ALLOW").first())
+    if not approved: raise HTTPException(409,"Final admission workflow is not approved")
+    app=transition_application(session,ctx,app.id,"approve_final",app.status_version,"Final admission workflow approved",skip_capability=True)
+    app=transition_application(session,ctx,app.id,"ready_to_admit",app.status_version,"Ready-to-Admit checklist completed",skip_capability=True)
+    write_audit(session,ctx["sub"],ctx["sub"],ctx["office_n"],"admission.final.approve",f"application:{app.id}","FINAL_APPROVAL_PENDING","READY_TO_ADMIT",workflow.id)
+    return app
+
+
+def checklist(session,ctx,application_id):
+    app=_app(session,ctx,application_id)
+    offer=session.query(D.AdmissionOffer).filter_by(application_id=app.id,status="ACCEPTED").first()
+    allocation=session.query(D.AdmissionSeatAllocation).filter(D.AdmissionSeatAllocation.application_id==app.id,D.AdmissionSeatAllocation.status.in_(ACTIVE_ALLOCATIONS)).first()
+    docs=session.query(D.ApplicationDocument).filter_by(application_id=app.id,verification_status="verified").count() if hasattr(D,"ApplicationDocument") else 1
+    eligibility=app.current_status not in {"INELIGIBLE","WAITLISTED","OFFERED","OFFER_DECLINED","OFFER_EXPIRED"}
+    finance=bool(session.query(D.AdmissionFinanceClearance).filter_by(application_id=app.id,finance_status="CLEARED").first())
+    link=session.query(D.AdmissionWorkflowLink).filter_by(application_id=app.id,purpose="final_admission",status="active").first()
+    workflow=session.get(WorkflowInstance,link.workflow_id) if link else None
+    final=bool(workflow and (workflow.state in {"approved","executed"} or session.query(Approval).filter_by(workflow_id=workflow.id,decision="ALLOW").first()))
+    conversion=session.query(D.AdmissionConversion).filter_by(application_id=app.id,status="completed").first()
+    return {"documents_verified":bool(docs),"eligibility_passed":eligibility,"active_allocation":bool(allocation),"offer_accepted":bool(offer),"finance_cleared":finance,"final_approval_complete":final,"no_existing_conversion":not bool(conversion),"ready":app.current_status=="READY_TO_ADMIT" and bool(finance) and not bool(conversion)}
+
+
+def convert_to_student(session,ctx,application_id,expected_version):
+    _office(ctx,{15})
+    app=_app(session,ctx,application_id,expected_version=expected_version,lock=True)
+    existing=session.query(D.AdmissionConversion).filter_by(application_id=application_id).first()
+    if existing and existing.status == "completed": return existing,session.get(D.Student,existing.student_id)
+    if app.current_status != "READY_TO_ADMIT": raise HTTPException(409,"Application is not at the required Phase 5 stage")
+    checks=checklist(session,ctx,app.id)
+    if not checks["ready"]: raise HTTPException(409,"Ready-to-Admit checklist is incomplete")
+    try:
+        if existing and existing.status == "provisional":
+            student = session.get(D.Student, existing.student_id)
+            if not student:
+                raise HTTPException(409, "The provisional student record is unavailable")
+            student.status = "active"
+            enrollment = session.query(D.Enrollment).filter_by(student_id=student.id).first()
+            if enrollment:
+                enrollment.status = "enrolled"
+            else:
+                section = session.query(D.Section).filter_by(tenant_id=app.tenant_id, dept_id=student.dept_id).first()
+                if not section:
+                    raise HTTPException(409, "An academic section is required before student activation")
+                session.add(D.Enrollment(id=uid(), tenant_id=app.tenant_id, student_id=student.id, section_id=section.id, status="enrolled"))
+            profile = json.loads(app.profile_json or "{}")
+            joining = profile.get("joining_preferences", {})
+            if joining.get("hostel_required") and not session.query(D.HostelAllocation).filter_by(student_id=student.id).first():
+                session.add(D.HostelAllocation(id=uid(), tenant_id=app.tenant_id, room_id=None, student_id=student.id, student_name=student.name, status="requested"))
+            if joining.get("transport_required") and not session.query(D.TransportRequest).filter_by(student_id=student.id).first():
+                session.add(D.TransportRequest(id=uid(), tenant_id=app.tenant_id, student_id=student.id, student_name=student.name, pickup_point=str(joining.get("pickup_point") or ""), status="requested"))
+            existing.status = "completed"; existing.converted_by_user_id = ctx["sub"]; existing.converted_at = datetime.utcnow()
+            app = transition_application(session, ctx, app.id, "enroll", app.status_version, "Provisional student activated after approval", skip_capability=True, commit=False)
+            write_audit(session, ctx["sub"], ctx["sub"], ctx["office_n"], "admission.activate_student", f"application:{app.id}", "PROVISIONAL", "ENROLLED", student.roll_no, commit=False)
+            session.commit()
+            return existing, student
+        program=session.get(D.Program,app.selected_program_id); cycle=session.get(D.AdmissionCycle,app.cycle_id)
+        prefix=f"{(cycle.academic_year if cycle else str(datetime.utcnow().year))[-2:]}{(program.code if program else 'STU').replace('-','')[:6]}"
+        roll=f"{prefix}{app.id.upper()[-8:]}"
+        person=Person(id=uid(),tenant_id=app.tenant_id,name=app.applicant_name,email=app.email,contact=app.phone or "");session.add(person)
+        username = f"student-{app.application_no or app.id}"
+        temporary_password = secrets.token_urlsafe(10)
+        user=User(id=uid(),tenant_id=app.tenant_id,person_id=person.id,username=username,password_hash=pwhash(temporary_password),office_n=36,role="Student",scope_level="individual",scope_ref="")
+        session.add(user);session.flush()
+        role=session.query(Role).filter_by(tenant_id=app.tenant_id,office_n=36).first()
+        if not role: role=Role(id=uid(),tenant_id=app.tenant_id,office_n=36,name="Student",category="individual");session.add(role);session.flush()
+        session.add(UserRole(id=uid(),user_id=user.id,role_id=role.id,org_scope_id=app.tenant_id))
+        student=D.Student(id=uid(),tenant_id=app.tenant_id,roll_no=roll,name=app.applicant_name,email=app.email,program_id=app.selected_program_id,dept_id=program.dept_id if program else None,campus=app.campus,batch=cycle.academic_year if cycle else str(datetime.utcnow().year),semester=1,user_id=user.id);session.add(student);session.flush()
+        section=session.query(D.Section).filter_by(tenant_id=app.tenant_id,dept_id=student.dept_id).first()
+        if not section:
+            raise HTTPException(409,"An academic section is required before student conversion")
+        session.add(D.Enrollment(id=uid(),tenant_id=app.tenant_id,student_id=student.id,section_id=section.id,status="enrolled"))
+        profile = json.loads(app.profile_json or "{}")
+        joining = profile.get("joining_preferences", {})
+        hostel_requested = bool(joining.get("hostel_required"))
+        transport_requested = bool(joining.get("transport_required"))
+        if hostel_requested and not session.query(D.HostelAllocation).filter_by(student_id=student.id).first():
+            session.add(D.HostelAllocation(id=uid(), tenant_id=app.tenant_id, room_id=None,
+                        student_id=student.id, student_name=student.name, status="requested"))
+        if transport_requested and not session.query(D.TransportRequest).filter_by(student_id=student.id).first():
+            session.add(D.TransportRequest(id=uid(), tenant_id=app.tenant_id, student_id=student.id,
+                        student_name=student.name, pickup_point=str(joining.get("pickup_point") or ""), status="requested"))
+        for link in session.query(D.ApplicationGuardian).filter_by(application_id=app.id).all(): session.add(D.StudentGuardian(id=uid(),tenant_id=app.tenant_id,student_id=student.id,guardian_id=link.guardian_id,relationship=link.relationship,is_primary=link.is_primary))
+        for invoice in session.query(D.FeeInvoice).filter_by(application_id=app.id).all(): invoice.student_id=student.id
+        allocation=session.query(D.AdmissionSeatAllocation).filter(D.AdmissionSeatAllocation.application_id==app.id,D.AdmissionSeatAllocation.status.in_(ACTIVE_ALLOCATIONS)).first()
+        if allocation: allocation.status="ALLOCATED"
+        conversion=D.AdmissionConversion(id=uid(),tenant_id=app.tenant_id,application_id=app.id,student_id=student.id,user_id=user.id,status="completed",student_identifier=roll,converted_by_user_id=ctx["sub"],converted_at=datetime.utcnow());session.add(conversion)
+        app=transition_application(session,ctx,app.id,"enroll",app.status_version,"Atomically converted to student",skip_capability=True,commit=False)
+        session.add(Notification(id=uid(),tenant_id=app.tenant_id,user_id=user.id,severity="info",title="Enrollment confirmed",body=f"Your student identifier is {roll}"))
+        write_audit(session,ctx["sub"],ctx["sub"],ctx["office_n"],"admission.convert",f"application:{app.id}","READY_TO_ADMIT","ENROLLED",roll,commit=False)
+        session.commit()
+        invoice = session.query(D.FeeInvoice).filter_by(application_id=app.id, invoice_type="admission_fee").first()
+        fee_components = session.query(D.ApplicantFeeAssignment).filter_by(application_id=app.id).all()
+        component_summary = "; ".join(
+            f"{item.component_name}: Rs. {float(item.amount or 0) - float(item.waived_amount or 0):,.2f}"
+            for item in fee_components
+        )
+        if invoice:
+            fee_summary = (
+                f"Invoice {invoice.challan_no or invoice.id}: Rs. {float(invoice.amount or 0):,.2f} paid; "
+                f"balance Rs. {max(0, float(invoice.amount or 0) - float(invoice.paid or 0)):,.2f}. "
+                f"Components: {component_summary or 'Not itemized'}"
+            )
+        else:
+            fee_summary = "No admission fee invoice is linked to this enrollment."
+        try:
+            delivered, delivery_note = _send_student_credentials(
+                app.email, app.applicant_name, roll, username, temporary_password,
+                program.name if program else app.program_name, app.campus, section.section_code,
+                fee_summary, hostel_requested, transport_requested,
+            )
+        except Exception as exc:
+            delivered, delivery_note = False, f"Credential email failed: {exc}"
+        write_audit(session, ctx["sub"], ctx["sub"], ctx["office_n"], "admission.credentials.email",
+                    f"application:{app.id}", "", "DELIVERED" if delivered else "PENDING", delivery_note)
+        return conversion,student
+    except IntegrityError:
+        session.rollback()
+        existing=session.query(D.AdmissionConversion).filter_by(application_id=application_id,status="completed").first()
+        if existing:
+            return existing,session.get(D.Student,existing.student_id)
+        raise HTTPException(409,"Conversion conflicted; retry safely")
+    except Exception:
+        session.rollback(); raise

@@ -25,14 +25,14 @@ export default function Delegations({ user }: { user: any }) {
   }
 
   return (
-    <div className="fade-in delegation-workspace">
-      <header className="campus-workspace-header">
+    <div className="fade-in">
+      <div className="page-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
         <div>
           <h1>Delegation</h1>
           <p>Authority you grant is time-bound, scoped, revocable and audited. Delegations assigned to your login also appear here for review.</p>
         </div>
-        <button className="btn btn-brass" type="button" onClick={() => setShow(true)}>+ Delegate authority</button>
-      </header>
+        <button className="btn btn-brass" onClick={() => setShow(true)}>+ Delegate authority</button>
+      </div>
 
       {loading ? <Spinner /> : (
         <div className="card">
@@ -42,7 +42,7 @@ export default function Delegations({ user }: { user: any }) {
                 <thead><tr><th>From</th><th>To</th><th>Delegated Access</th><th>Limit</th><th>Window</th><th>Status</th><th></th></tr></thead>
                 <tbody>
                   {rows.map(d => (
-                    <tr key={d.id} onClick={() => setSelected(d)} className="delegation-row">
+                    <tr key={d.id}>
                       <td>{d.from_name || d.from}</td>
                       <td style={{ fontWeight: 600 }}>{d.to_name || d.to}</td>
                       <td><span className="tag" style={{ background: '#f3ecfa', color: '#7a4bb0' }}>{humanizeAccess(d.authority_label || d.authority)}</span></td>
@@ -147,7 +147,7 @@ function DelegationViewModal({ row, user, onClose }: { row: any; user: any; onCl
 function DelegateModal({ onClose, onDone }: any) {
   const [offices, setOffices] = useState<any[]>([])
   const [to, setTo] = useState('')
-  const [authority, setAuthority] = useState('review')
+  const [authority, setAuthority] = useState('*')
   const [days, setDays] = useState('7')
   const [limit, setLimit] = useState('')
   const [reason, setReason] = useState('')
@@ -182,7 +182,7 @@ function DelegateModal({ onClose, onDone }: any) {
   return (
     <div className="modal-bg" onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
-        <div className="modal-h"><div><span className="eyebrow">Authority management</span><h3>Delegate authority</h3><p>Grant time-bound access within the permissions enforced by the server.</p></div><button className="close-x" type="button" onClick={onClose}>x</button></div>
+        <div className="modal-h"><h3>Delegate authority</h3><button className="close-x" onClick={onClose}>x</button></div>
         <div className="modal-b">
           {err && <div className="err-box">{err}</div>}
           <div className="form-row">
@@ -195,6 +195,7 @@ function DelegateModal({ onClose, onDone }: any) {
           <div className="form-row">
             <label>Authority</label>
             <select className="select" value={authority} onChange={e => setAuthority(e.target.value)}>
+              <option value="*">All actions</option>
               <option value="approve">Approve only</option>
               <option value="review">Review only</option>
             </select>
@@ -206,7 +207,7 @@ function DelegateModal({ onClose, onDone }: any) {
             </div>
             <div className="form-row" style={{ flex: 1 }}>
               <label>Amount limit (optional)</label>
-              <input className="inp mono" value={limit} onChange={e => setLimit(e.target.value)} placeholder={authority === 'approve' ? 'Required for approval' : 'none'} />
+              <input className="inp mono" value={limit} onChange={e => setLimit(e.target.value)} placeholder="none" />
             </div>
           </div>
           <div className="form-row">
