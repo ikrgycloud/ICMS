@@ -616,37 +616,24 @@ function WorkflowDetailModal({ workflowId, onClose, onDone }: { workflowId: stri
             </div>
           )}
 
-          {(() => {
-            const available: string[] = Array.isArray(data?.available_actions)
-              ? data.available_actions
-              : []
-            const terminal = ['approved', 'executed', 'rejected'].includes(data.state)
-            if (terminal) {
-              return (
-                <div className="chair-approval-terminal">
-                  This request is now in a terminal state: <strong>{String(data.state).replace(/_/g, ' ')}</strong>.
-                </div>
-              )
-            }
-            if (available.length === 0) {
-              return <div className="chair-approval-terminal">{data.action_message || 'No action is currently available.'}</div>
-            }
-            return (
-              <div className="chair-approval-action-box">
-                <Field label="Decision note">
-                  <input className="inp" value={reason} onChange={event => setReason(event.target.value)} placeholder="Optional note for the audit trail" />
-                </Field>
+          {!['approved', 'executed', 'rejected'].includes(data.state) ? (
+            <div className="chair-approval-action-box">
+              <Field label="Decision note">
+                <input className="inp" value={reason} onChange={event => setReason(event.target.value)} placeholder="Optional note for the audit trail" />
+              </Field>
 
-                <div className="chair-approval-action-row">
-                  {available.includes('review') && <button className="btn btn-teal" disabled={busy} onClick={() => decide('review')} type="button">Review</button>}
-                  {available.includes('approve') && <button className="btn btn-crimson" disabled={busy} onClick={() => decide('approve')} type="button">Approve</button>}
-                  {available.includes('reject') && <button className="btn btn-rose" disabled={busy} onClick={() => decide('reject')} type="button">Reject</button>}
-                  {available.includes('escalate') && <button className="btn btn-out" disabled={busy} onClick={() => decide('escalate')} type="button">Escalate</button>}
-                  {available.includes('return') && <button className="btn btn-out" disabled={busy} onClick={() => decide('return')} type="button">Return</button>}
-                </div>
+              <div className="chair-approval-action-row">
+                <button className="btn btn-teal" disabled={busy} onClick={() => decide('review')} type="button">Review</button>
+                <button className="btn btn-crimson" disabled={busy} onClick={() => decide('approve')} type="button">Approve</button>
+                <button className="btn btn-rose" disabled={busy} onClick={() => decide('reject')} type="button">Reject</button>
+                <button className="btn btn-out" disabled={busy} onClick={() => decide('escalate')} type="button">Escalate</button>
               </div>
-            )
-          })()}
+            </div>
+          ) : (
+            <div className="chair-approval-terminal">
+              This request is now in a terminal state: <strong>{String(data.state).replace(/_/g, ' ')}</strong>.
+            </div>
+          )}
         </div>
       ) : null}
     </Modal>

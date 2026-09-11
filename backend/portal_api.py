@@ -6,27 +6,433 @@ Where domain_api.py serves administrative module data, this router serves the
 signed-in person's own world.
 """
 from datetime import date, timedelta
+import base64
+import hashlib
+import hmac
+from html import escape
+from io import BytesIO
+import json
+import os
+from urllib import request as urlrequest
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from sqlalchemy import func
 from datetime import date, datetime, timedelta
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, desc, or_
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_LEFT, TA_RIGHT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from core import auth, db
-from database import office
+from core import auth, db, uid, write_audit
+from database import TENANT, office
 import domain_models as D
-from models import User, Notification
+from models import User, Person, Notification
 
 router = APIRouter(prefix="/api/portal")
 
 PORTAL_TODAY = date(2026, 8, 25)
 PORTAL_NOW = datetime(2026, 8, 25, 16, 15)
+GST_RATE = 0.18
+
+
+def _razorpay_configured():
+    key = os.environ.get("RAZORPAY_KEY_ID", "")
+    secret = os.environ.get("RAZORPAY_KEY_SECRET", "")
+    if not key or not secret:
+        raise HTTPException(503, "Online payments are not configured")
+    return key, secret
+
+
+def _razorpay_request(path, payload):
+    key, secret = _razorpay_configured()
+    token = base64.b64encode(f"{key}:{secret}".encode()).decode()
+    req = urlrequest.Request(f"https://api.razorpay.com/v1{path}", data=json.dumps(payload).encode(), method="POST",
+                             headers={"Authorization": f"Basic {token}", "Content-Type": "application/json"})
+    try:
+        with urlrequest.urlopen(req, timeout=20) as response:
+            return json.loads(response.read().decode())
+    except Exception:
+        raise HTTPException(502, "Could not create the Razorpay payment order")
+
+
+def _gst(amount):
+    return round(float(amount or 0) * GST_RATE, 2)
+
+
+def _invoice_display_amounts(invoice, payment_total=None):
+    """Return the authoritative fee-ledger values shown in student/parent portals.
+
+    ``invoice.paid`` is updated by every confirmed Finance Manager payment.  Do
+    not derive this from payment-history amounts: gateway rows can include GST
+    while the invoice ledger is stored as the fee amount, causing a valid cash
+    payment to appear not to reduce the student's balance.
+    """
+    base = round(float(invoice.amount or 0), 2)
+    paid = round(min(float(invoice.paid or 0), base), 2)
+    gst_amount = 0.0
+    total = base
+    balance = round(max(total - paid, 0), 2)
+    return {"base_amount": base, "gst_rate": int(GST_RATE * 100), "gst_amount": gst_amount,
+            "amount": total, "paid": paid, "balance": balance}
+
+
+def _format_fee_category(value: str | None):
+    if not value:
+        return "Uncategorised"
+    return value.replace("_", " ").strip().title()
+
+
+def _invoice_fee_category_details(s, invoice):
+    lines = []
+    if invoice and invoice.fee_structure_id:
+        lines = s.query(D.FeeStructureLine).filter(D.FeeStructureLine.fee_structure_id == invoice.fee_structure_id).all()
+
+    categories = {}
+    for line in lines:
+        head = s.get(D.FeeHead, line.fee_head_id)
+        if not head:
+            continue
+        category = _format_fee_category(head.category)
+        if category not in categories:
+            categories[category] = {"fee_category_id": None, "fee_category": category,
+                                    "assigned": 0.0, "paid": 0.0, "balance": 0.0}
+        categories[category]["assigned"] += float(line.amount or 0)
+
+    if not categories:
+        summary = [{"fee_category_id": None, "fee_category": "Uncategorised",
+                    "assigned": float(invoice.amount or 0), "paid": float(invoice.paid or 0),
+                    "balance": float((invoice.amount or 0) - (invoice.paid or 0))}]
+        return {"fee_category_id": None, "fee_category": "Uncategorised", "categories": summary}
+
+    summaries = []
+    for category in categories:
+        assigned = round(categories[category]["assigned"], 2)
+        paid = round(min(float(invoice.paid or 0), assigned), 2)
+        balance = round(max(assigned - paid, 0), 2)
+        summaries.append({"fee_category_id": None, "fee_category": category,
+                          "assigned": assigned, "paid": paid, "balance": balance})
+
+    summaries.sort(key=lambda x: x["fee_category"])
+    primary = summaries[0]["fee_category"] if len(summaries) == 1 else "Mixed"
+    return {"fee_category_id": None, "fee_category": primary, "categories": summaries}
+
+
+def _settle_payment(s, payment, actor=""):
+    """Idempotently allocate a confirmed payment and create its official receipt."""
+    if payment.status not in {"success", "cleared"}:
+        raise HTTPException(409, "Only successful or cleared payments can be allocated")
+    existing = s.query(D.PaymentAllocation).filter(D.PaymentAllocation.payment_id == payment.id).first()
+    invoice = s.get(D.FeeInvoice, payment.invoice_id)
+    if not invoice or invoice.student_id != payment.student_id:
+        raise HTTPException(409, "Payment and invoice relationship is invalid")
+    if not existing:
+        available = round(max(float(invoice.amount or 0) - float(invoice.paid or 0), 0), 2)
+        allocation = min(round(float(payment.amount or 0), 2), available)
+        if allocation <= 0:
+            raise HTTPException(409, "There is no outstanding balance to allocate")
+        s.add(D.PaymentAllocation(id=uid(), tenant_id=TENANT, payment_id=payment.id,
+                                  invoice_id=invoice.id, student_id=invoice.student_id, amount=allocation))
+        invoice.paid = round(float(invoice.paid or 0) + allocation, 2)
+        invoice.status = "paid" if invoice.paid >= invoice.amount else "partial"
+        if payment.challan_id:
+            challan = s.get(D.FeeChallan, payment.challan_id)
+            if challan:
+                challan.status = "PAID" if invoice.paid >= invoice.amount else "PARTIALLY_PAID"
+                challan.updated_at = datetime.utcnow()
+    receipt = s.query(D.PaymentReceipt).filter(D.PaymentReceipt.payment_id == payment.id).first()
+    if not receipt:
+        receipt = D.PaymentReceipt(id=uid(), tenant_id=TENANT,
+            receipt_number=f"RCP-{datetime.utcnow():%Y}-{payment.id[:8].upper()}", payment_id=payment.id,
+            invoice_id=payment.invoice_id, student_id=payment.student_id, challan_id=payment.challan_id)
+        s.add(receipt)
+    return invoice
+
+
+def _receipt_pdf(student, invoice, s, payment_id=None):
+    """Render a flow-based A4 receipt; tables calculate wrapping, row height and page splits."""
+    dark_blue = colors.HexColor("#0f3564")
+    muted = colors.HexColor("#526273")
+    border = colors.HexColor("#d5dce6")
+    pale_blue = colors.HexColor("#eef5fc")
+    page_width, _ = A4
+    content_width = page_width - (36 * mm)
+    styles = getSampleStyleSheet()
+    label = ParagraphStyle("receipt-label", parent=styles["Normal"], fontName="Helvetica", fontSize=8, leading=10, textColor=muted, spaceAfter=3)
+    value = ParagraphStyle("receipt-value", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=9.5, leading=12, textColor=colors.black, splitLongWords=True)
+    amount = ParagraphStyle("receipt-amount", parent=value, alignment=TA_RIGHT)
+    section = ParagraphStyle("receipt-section", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=11, leading=14, textColor=dark_blue, spaceBefore=2, spaceAfter=7)
+    header_left = ParagraphStyle("receipt-header-left", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=20, leading=23, textColor=colors.white)
+    header_subtitle = ParagraphStyle("receipt-header-subtitle", parent=styles["Normal"], fontName="Helvetica", fontSize=12, leading=15, textColor=colors.white)
+    header_right = ParagraphStyle("receipt-header-right", parent=styles["Normal"], fontName="Helvetica", fontSize=10, leading=14, alignment=TA_RIGHT, textColor=colors.white)
+    footer = ParagraphStyle("receipt-footer", parent=styles["Normal"], fontSize=8, leading=10, textColor=muted, alignment=TA_LEFT)
+
+    def p(text, style=value):
+        return Paragraph(escape(str(text if text not in (None, "") else "-")), style)
+
+    def field(field_label, field_value):
+        return [p(field_label, label), p(field_value, value)]
+
+    def money(number):
+        return f"INR {float(number or 0):,.2f}"
+
+    program = s.get(D.Program, student.program_id)
+    department = s.get(D.Department, student.dept_id)
+    structure = s.get(D.FeeStructure, invoice.fee_structure_id) if invoice.fee_structure_id else None
+    academic_year = s.get(D.AcademicYear, structure.academic_year_id) if structure else None
+    semester = s.get(D.Semester, structure.semester_id) if structure else None
+    invoice_payments = s.query(D.Payment).filter(D.Payment.invoice_id == invoice.id).order_by(desc(D.Payment.at)).all()
+    payment = next((row for row in invoice_payments if row.id == payment_id), None) if payment_id else (invoice_payments[0] if invoice_payments else None)
+    # A receipt represents one transaction.  Older receipt links without a
+    # payment ID use the latest successful transaction instead of invoice total.
+    received_amount = float(payment.amount or 0) if payment else float(invoice.paid or 0)
+    # Keep a receipt transaction-specific.  The invoice can have earlier payments,
+    # but this document must only acknowledge the payment selected above.
+    outstanding_balance = max(float(invoice.amount or 0) - float(invoice.paid or 0), 0)
+    payment_id = payment.reference if payment else "Not available"
+    payment_date = payment.at.strftime("%d %b %Y, %I:%M %p") if payment and payment.at else "Not available"
+
+    # A receipt acknowledges what was received, not the full original fee demand.
+    # This makes partial-payment receipts unambiguous.
+    fee_rows = [(f"Payment received against {invoice.term or 'fee invoice'}", received_amount)]
+
+    output = BytesIO()
+    document = SimpleDocTemplate(output, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=15 * mm, bottomMargin=18 * mm, title="ICMS Fee Payment Receipt")
+    story = []
+    header = Table([[Paragraph("ICMS", header_left), Paragraph("Official Receipt<br/><b>Status: " + escape((invoice.status or "paid").upper()) + "</b>", header_right)], [Paragraph("FEE PAYMENT RECEIPT", header_subtitle), ""]], colWidths=[content_width * .62, content_width * .38])
+    header.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), dark_blue), ("BOX", (0, 0), (-1, -1), 1, dark_blue), ("LEFTPADDING", (0, 0), (-1, -1), 14), ("RIGHTPADDING", (0, 0), (-1, -1), 14), ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8), ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+    story.extend([header, Spacer(1, 16)])
+
+    story.append(Paragraph("PAYMENT DETAILS", section))
+    payment_details = Table([[field("Receipt / Invoice No.", invoice.id), field("Payment ID", payment_id), field("Payment Date", payment_date)]], colWidths=[content_width * .34, content_width * .33, content_width * .33])
+    payment_details.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 8), ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 9), ("LINEBELOW", (0, 0), (-1, -1), .7, border)]))
+    story.extend([payment_details, Spacer(1, 16)])
+
+    story.append(Paragraph("STUDENT &amp; ACADEMIC DETAILS", section))
+    programme = f"{program.code} - {program.name}" if program else "-"
+    detail_rows = [
+        [field("Student Name", student.name), field("Roll Number", student.roll_no), field("Programme / Branch", programme)],
+        [field("Department", department.name if department else "-"), field("Academic Year", academic_year.name if academic_year else "-"), field("Semester", semester.name if semester else invoice.term)],
+        [field("Batch", student.batch), field("Section", student.section), field("Payment Method", payment.method.upper() if payment else "ONLINE")],
+    ]
+    details_table = Table(detail_rows, colWidths=[content_width * .32, content_width * .32, content_width * .36])
+    details_table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("GRID", (0, 0), (-1, -1), .6, border), ("BACKGROUND", (0, 0), (-1, -1), colors.white), ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 8), ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 9)]))
+    story.extend([details_table, Spacer(1, 16)])
+
+    story.append(Paragraph("PAYMENT RECEIVED", section))
+    fee_data = [[p("Payment description", ParagraphStyle("fee-header", parent=value, textColor=colors.white)), p("Received amount", ParagraphStyle("fee-header-right", parent=amount, textColor=colors.white))]]
+    for component, fee_amount in fee_rows:
+        fee_data.append([p(component, ParagraphStyle("fee-cell", parent=value, fontName="Helvetica", fontSize=9, leading=12)), p(money(fee_amount), amount)])
+    fee_table = Table(fee_data, colWidths=[content_width * .72, content_width * .28], repeatRows=1)
+    fee_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), dark_blue), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("GRID", (0, 0), (-1, -1), .6, border), ("LEFTPADDING", (0, 0), (-1, -1), 9), ("RIGHTPADDING", (0, 0), (-1, -1), 9), ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7), ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f9fc")])]))
+    story.extend([fee_table, Spacer(1, 14)])
+
+    summary_rows = [[p("Amount received", ParagraphStyle("paid-label", parent=value, textColor=dark_blue)), p(money(received_amount), ParagraphStyle("paid-amount", parent=amount, textColor=dark_blue))], [p("Outstanding balance", value), p(money(outstanding_balance), amount)]]
+    summary = Table(summary_rows, colWidths=[content_width * .68, content_width * .32], hAlign="RIGHT")
+    summary.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), pale_blue), ("BOX", (0, 0), (-1, -1), .7, border), ("INNERGRID", (0, 0), (-1, -1), .5, border), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LEFTPADDING", (0, 0), (-1, -1), 9), ("RIGHTPADDING", (0, 0), (-1, -1), 9), ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7)]))
+    story.extend([summary, Spacer(1, 20), Paragraph("Generated by ICMS<br/>Computer generated receipt", footer)])
+
+    def draw_footer(canvas, doc):
+        canvas.saveState()
+        canvas.setStrokeColor(border)
+        canvas.line(doc.leftMargin, 13 * mm, page_width - doc.rightMargin, 13 * mm)
+        canvas.setFillColor(muted)
+        canvas.setFont("Helvetica", 7.5)
+        canvas.drawRightString(page_width - doc.rightMargin, 8 * mm, f"Page {doc.page}")
+        canvas.restoreState()
+
+    document.build(story, onFirstPage=draw_footer, onLaterPages=draw_footer)
+    return output.getvalue()
+
+
+def _receipt_response(student, invoice_id, s, payment_id=None):
+    invoice = s.get(D.FeeInvoice, invoice_id)
+    if not invoice or invoice.student_id != student.id:
+        raise HTTPException(404, "Fee invoice not found")
+    if payment_id:
+        payment = s.get(D.Payment, payment_id)
+        if not payment or payment.invoice_id != invoice.id or payment.student_id != student.id:
+            raise HTTPException(404, "Payment receipt not found")
+    return Response(_receipt_pdf(student, invoice, s, payment_id), media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="ICMS-receipt-{student.roll_no}-{invoice.id}.pdf"'})
+
+
+def _generate_challan_number(s):
+    year = date.today().year
+    prefix = f"CH-{year}"
+    last = s.query(D.FeeChallan).filter(D.FeeChallan.challan_number.like(f"{prefix}-%")).order_by(desc(D.FeeChallan.created_at)).first()
+    next_no = 1
+    if last and last.challan_number:
+        try:
+            next_no = int(last.challan_number.rsplit("-", 1)[-1]) + 1
+        except ValueError:
+            next_no = 1
+    return f"{prefix}-{next_no:06d}"
+
+
+def _challan_pdf(student, invoice, challan, s):
+    dark_blue = colors.HexColor("#0f3564")
+    muted = colors.HexColor("#526273")
+    border = colors.HexColor("#d5dce6")
+    pale_blue = colors.HexColor("#eef5fc")
+    page_width, _ = A4
+    content_width = page_width - (36 * mm)
+    styles = getSampleStyleSheet()
+    label = ParagraphStyle("challan-label", parent=styles["Normal"], fontName="Helvetica", fontSize=8, leading=10, textColor=muted, spaceAfter=3)
+    value = ParagraphStyle("challan-value", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=9.5, leading=12, textColor=colors.black, splitLongWords=True)
+    amount = ParagraphStyle("challan-amount", parent=value, alignment=TA_RIGHT)
+    section = ParagraphStyle("challan-section", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=11, leading=14, textColor=dark_blue, spaceBefore=2, spaceAfter=7)
+    header_left = ParagraphStyle("challan-header-left", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=20, leading=23, textColor=colors.white)
+    header_subtitle = ParagraphStyle("challan-header-subtitle", parent=styles["Normal"], fontName="Helvetica", fontSize=12, leading=15, textColor=colors.white)
+    header_right = ParagraphStyle("challan-header-right", parent=styles["Normal"], fontName="Helvetica", fontSize=10, leading=14, alignment=TA_RIGHT, textColor=colors.white)
+    footer = ParagraphStyle("challan-footer", parent=styles["Normal"], fontSize=8, leading=10, textColor=muted, alignment=TA_LEFT)
+    program = s.get(D.Program, student.program_id)
+    department = s.get(D.Department, student.dept_id)
+    structure = s.get(D.FeeStructure, invoice.fee_structure_id) if invoice.fee_structure_id else None
+    academic_year = s.get(D.AcademicYear, structure.academic_year_id) if structure else None
+    semester = s.get(D.Semester, structure.semester_id) if structure else None
+
+    def p(text, style=value):
+        return Paragraph(escape(str(text if text not in (None, "") else "-")), style)
+    def field(label_text, field_value):
+        return [p(label_text, label), p(field_value, value)]
+    def money(number):
+        return f"INR {float(number or 0):,.2f}"
+
+    output = BytesIO()
+    doc = SimpleDocTemplate(output, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=15 * mm, bottomMargin=18 * mm, title="ICMS Fee Payment Challan")
+    story = []
+    header = Table([[Paragraph("ICMS", header_left), Paragraph("FEE PAYMENT CHALLAN<br/><b>Status: " + escape((challan.status or "GENERATED").upper()) + "</b>", header_right)], [Paragraph("Institutional Fee Collection", header_subtitle), ""]], colWidths=[content_width * .62, content_width * .38])
+    header.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), dark_blue), ("BOX", (0, 0), (-1, -1), 1, dark_blue), ("LEFTPADDING", (0, 0), (-1, -1), 14), ("RIGHTPADDING", (0, 0), (-1, -1), 14), ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8), ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+    story.extend([header, Spacer(1, 14)])
+    story.append(Paragraph("STUDENT DETAILS", section))
+    programme = f"{program.code} - {program.name}" if program else "-"
+    detail_rows = [
+        [field("Challan Number", challan.challan_number), field("Invoice Number", invoice.invoice_number or invoice.id), field("Generated Date", challan.issue_date.isoformat() if challan.issue_date else date.today().isoformat())],
+        [field("Student Name", student.name), field("Roll Number", student.roll_no), field("Student ID", student.id)],
+        [field("Programme", programme), field("Department", department.name if department else "-"), field("Academic Year", academic_year.name if academic_year else "-")],
+        [field("Semester", semester.name if semester else str(student.semester or "-")), field("Batch", student.batch or "-"), field("Section", student.section or "-")],
+    ]
+    details_table = Table(detail_rows, colWidths=[content_width * .33, content_width * .33, content_width * .34])
+    details_table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("GRID", (0, 0), (-1, -1), .6, border), ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 8), ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 9)]))
+    story.extend([details_table, Spacer(1, 12)])
+    story.append(Paragraph("FEE BREAKDOWN", section))
+    fee_data = [[p("Fee component", ParagraphStyle("fee-header", parent=value, textColor=colors.white)), p("Amount", ParagraphStyle("fee-header-right", parent=amount, textColor=colors.white))], [p("Outstanding amount", value), p(money(float(challan.amount or 0)), amount)]]
+    fee_table = Table(fee_data, colWidths=[content_width * .72, content_width * .28], repeatRows=1)
+    fee_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), dark_blue), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("GRID", (0, 0), (-1, -1), .6, border), ("LEFTPADDING", (0, 0), (-1, -1), 9), ("RIGHTPADDING", (0, 0), (-1, -1), 9), ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7)]))
+    story.extend([fee_table, Spacer(1, 12)])
+    summary_rows = [[p("Gross Amount", value), p(money(float(invoice.gross_amount or invoice.amount or 0)), amount)], [p("Scholarship", value), p(money(float(invoice.scholarship_amount or 0)), amount)], [p("Waiver", value), p(money(float(invoice.waiver_amount or 0)), amount)], [p("Paid Amount", value), p(money(float(invoice.paid or 0)), amount)], [p("Outstanding", value), p(money(max(float(invoice.amount or 0) - float(invoice.paid or 0), 0)), amount)], [p("Challan Amount", ParagraphStyle("challan-total", parent=value, textColor=dark_blue)), p(money(float(challan.amount or 0)), ParagraphStyle("challan-total-amount", parent=amount, textColor=dark_blue))]]
+    summary = Table(summary_rows, colWidths=[content_width * .68, content_width * .32], hAlign="RIGHT")
+    summary.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), pale_blue), ("BOX", (0, 0), (-1, -1), .7, border), ("INNERGRID", (0, 0), (-1, -1), .5, border), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LEFTPADDING", (0, 0), (-1, -1), 9), ("RIGHTPADDING", (0, 0), (-1, -1), 9), ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7)]))
+    story.extend([summary, Spacer(1, 14)])
+    story.append(Paragraph("PAYMENT INFORMATION", section))
+    note = Paragraph("THIS CHALLAN IS NOT A PAYMENT RECEIPT.<br/>An official receipt will be generated only after successful payment verification.", footer)
+    story.extend([note, Spacer(1, 8)])
+    story.append(Paragraph("Status: " + (challan.status or "GENERATED"), value))
+    def draw_footer(canvas, doc):
+        canvas.saveState(); canvas.setStrokeColor(border); canvas.line(doc.leftMargin, 13 * mm, page_width - doc.rightMargin, 13 * mm); canvas.setFillColor(muted); canvas.setFont("Helvetica", 7.5); canvas.drawRightString(page_width - doc.rightMargin, 8 * mm, f"Page {doc.page}"); canvas.restoreState()
+    doc.build(story, onFirstPage=draw_footer, onLaterPages=draw_footer)
+    return output.getvalue()
+
+
+@router.post("/student/fees/challans")
+def create_student_challan(body: dict, ctx=Depends(auth), s=Depends(db)):
+    student = _student_or_404(s, ctx)
+    invoice_id = str(body.get("invoice_id") or "")
+    invoice = s.get(D.FeeInvoice, invoice_id)
+    if not invoice or invoice.student_id != student.id:
+        raise HTTPException(404, "Fee invoice not found")
+    balance = max(float(invoice.amount or 0) - float(invoice.paid or 0), 0)
+    if balance <= 0:
+        raise HTTPException(409, "This invoice is already fully paid")
+    amount = float(body.get("amount") or balance)
+    if amount <= 0 or amount > balance:
+        raise HTTPException(422, "Challan amount must be greater than zero and not exceed the outstanding balance")
+    existing = s.query(D.FeeChallan).filter(D.FeeChallan.invoice_id == invoice_id, D.FeeChallan.status.in_("GENERATED,PENDING,PARTIALLY_PAID".split(","))).first()
+    if existing:
+        existing.amount = amount
+        existing.issue_date = date.today()
+        existing.due_date = existing.due_date or (date.today() + timedelta(days=7))
+        existing.updated_at = datetime.utcnow()
+        s.commit()
+        return {"status": "ok", "challan": {"id": existing.id, "challan_number": existing.challan_number, "invoice_id": existing.invoice_id, "amount": existing.amount, "issue_date": existing.issue_date.isoformat() if existing.issue_date else "", "due_date": existing.due_date.isoformat() if existing.due_date else "", "status": existing.status}}
+    challan_number = _generate_challan_number(s)
+    challan = D.FeeChallan(id=uid(), tenant_id=TENANT, challan_number=challan_number, student_id=student.id, invoice_id=invoice.id,
+                          amount=amount, issue_date=date.today(), due_date=date.today() + timedelta(days=7), status="GENERATED",
+                          created_by=ctx["sub"], payment_reference=f"{invoice.id}:{challan_number}")
+    s.add(challan)
+    s.commit()
+    write_audit(s, ctx["sub"], student.name, ctx["office_n"], "fee.challan.generated", f"challan:{challan.id}", "", "GENERATED", f"Generated challan {challan_number}")
+    return {"status": "ok", "challan": {"id": challan.id, "challan_number": challan.challan_number, "invoice_id": challan.invoice_id, "amount": challan.amount, "issue_date": challan.issue_date.isoformat() if challan.issue_date else "", "due_date": challan.due_date.isoformat() if challan.due_date else "", "status": challan.status}}
+
+
+@router.get("/student/fees/challans/{challan_id}/pdf")
+def student_challan_pdf(challan_id: str, ctx=Depends(auth), s=Depends(db)):
+    student = _student_or_404(s, ctx)
+    challan = s.get(D.FeeChallan, challan_id)
+    if not challan or challan.student_id != student.id:
+        raise HTTPException(404, "Challan not found")
+    invoice = s.get(D.FeeInvoice, challan.invoice_id)
+    if not invoice:
+        raise HTTPException(404, "Invoice not found")
+    return Response(_challan_pdf(student, invoice, challan, s), media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="ICMS-challan-{challan.challan_number}.pdf"'})
+
+
+@router.get("/student/fees/challans")
+def student_challans(ctx=Depends(auth), s=Depends(db)):
+    student = _student_or_404(s, ctx)
+    rows = s.query(D.FeeChallan).filter(D.FeeChallan.student_id == student.id).order_by(desc(D.FeeChallan.created_at)).all()
+    return {"challans": [{"id": row.id, "challan_number": row.challan_number, "invoice_id": row.invoice_id, "amount": row.amount, "issue_date": row.issue_date.isoformat() if row.issue_date else "", "due_date": row.due_date.isoformat() if row.due_date else "", "status": row.status} for row in rows]}
+
+
+class OfflineProofIn(BaseModel):
+    challan_id: str
+    method: str
+    amount: float
+    reference_number: str
+    transaction_date: date
+    bank_name: str = ""
+    remarks: str = ""
+    file_name: str = ""
+    file_type: str = ""
+    file_data: str = ""  # base64; deployments should replace this with configured object storage.
+
+
+@router.post("/student/fees/offline-proofs")
+def submit_offline_proof(body: OfflineProofIn, ctx=Depends(auth), s=Depends(db)):
+    student = _student_or_404(s, ctx)
+    challan = s.get(D.FeeChallan, body.challan_id)
+    allowed = {"bank_transfer", "neft", "rtgs", "imps", "cheque", "dd"}
+    method = (body.method or "").lower()
+    if not challan or challan.student_id != student.id or method not in allowed:
+        raise HTTPException(404, "Eligible challan not found")
+    invoice = s.get(D.FeeInvoice, challan.invoice_id)
+    balance = max(float(invoice.amount or 0) - float(invoice.paid or 0), 0) if invoice else 0
+    if body.amount <= 0 or body.amount > min(balance, float(challan.amount or 0)):
+        raise HTTPException(422, "Payment amount must not exceed the challan or outstanding balance")
+    if len(body.file_data or "") > 7_000_000 or body.file_type.lower() not in {"", "application/pdf", "image/jpeg", "image/png"}:
+        raise HTTPException(422, "Proof must be a PDF, JPEG, or PNG under 5 MB")
+    status = "pending_clearance" if method in {"cheque", "dd"} else "pending_verification"
+    payment = D.Payment(id=uid(), tenant_id=TENANT, invoice_id=invoice.id, challan_id=challan.id,
+                        student_id=student.id, amount=body.amount, method=method,
+                        reference=body.reference_number.strip(), status=status, remarks=body.remarks.strip())
+    s.add(payment); s.flush()
+    s.add(D.PaymentProof(id=uid(), tenant_id=TENANT, payment_id=payment.id,
+          reference_number=payment.reference, transaction_date=body.transaction_date, bank_name=body.bank_name.strip(),
+          remarks=body.remarks.strip(), file_name=body.file_name[:255], file_type=body.file_type, file_data=body.file_data))
+    challan.status = "PENDING"
+    s.commit()
+    write_audit(s, ctx["sub"], student.name, ctx["office_n"], "fee.payment.proof_submitted", f"payment:{payment.id}", "", status, payment.reference)
+    return {"payment_id": payment.id, "status": status}
 
 
 def persona(s, ctx):
+    """Resolve the signed-in persona used by all portal endpoints."""
     uid = ctx["sub"]
     office_n = ctx["office_n"]
     student = s.query(D.Student).filter(D.Student.user_id == uid).first()
@@ -38,8 +444,8 @@ def persona(s, ctx):
     if office_n == 36:
         return {"kind": "student"}
     if office_n == 37:
-        sid = ctx["scope_ref"]
-        return {"kind": "parent", "student": s.get(D.Student, sid) if sid else None}
+        sid = ctx.get("scope_ref", "")
+        return {"kind": "parent", "student": s.query(D.Student).get(sid) if sid else None}
     return {"kind": "staff", "office_n": office_n}
 
 
@@ -68,6 +474,8 @@ def whoami(ctx=Depends(auth), s=Depends(db)):
 
 def _student_or_404(s, ctx):
     st = s.query(D.Student).filter(D.Student.user_id == ctx["sub"]).first()
+    if not st and ctx.get("scope_ref"):
+        st = s.query(D.Student).get(ctx["scope_ref"])
     if not st:
         raise HTTPException(404, "No student linked to this login")
     return st
@@ -87,8 +495,8 @@ def _study_year(semester: int | None) -> int | None:
 
 
 def _student_program_and_department(s, st):
-    program = s.get(D.Program, st.program_id) if st.program_id else None
-    dept = s.get(D.Department, st.dept_id) if st.dept_id else None
+    program = s.query(D.Program).get(st.program_id) if st.program_id else None
+    dept = s.query(D.Department).get(st.dept_id) if st.dept_id else None
     return program, dept
 
 
@@ -358,7 +766,7 @@ def _student_card(s, st):
     valid_until = date(date.today().year + 2, date.today().month, min(date.today().day, 28))
     row = D.StudentIdentityCard(
         id=f"idc_{st.id}",
-        tenant_id=st.tenant_id,
+        tenant_id=TENANT,
         student_id=st.id,
         card_number=f"ICMS-{st.roll_no}",
         blood_group=st.blood_group or "O+",
@@ -418,14 +826,21 @@ def _source_label(created_by: str = "", owner_office_n: int | None = None, fallb
 
 def _section_schedule_string(s, section_id: str, fallback: str = ""):
     rows = (
-        s.query(D.TimetableEntry)
+        s.query(D.TimetableEntry).join(D.TimetablePlanWorkflow, D.TimetablePlanWorkflow.timetable_entry_id == D.TimetableEntry.id)
         .filter(D.TimetableEntry.section_id == section_id, D.TimetableEntry.status == "active")
+        .filter(D.TimetablePlanWorkflow.status == "Published")
         .order_by(D.TimetableEntry.day_of_week, D.TimetableEntry.start_time)
         .all()
     )
     if not rows:
         return fallback
     return ", ".join(f"{_day_name(row.day_of_week)} {row.start_time}-{row.end_time}" for row in rows[:3])
+
+
+def _published_section_ids(s, sections):
+    ids = [x.id for x in sections]
+    if not ids: return set()
+    return {x.section_id for x in s.query(D.TimetableEntry.section_id).join(D.TimetablePlanWorkflow, D.TimetablePlanWorkflow.timetable_entry_id == D.TimetableEntry.id).filter(D.TimetableEntry.section_id.in_(ids), D.TimetableEntry.status == "active", D.TimetablePlanWorkflow.status == "Published").distinct().all()}
 
 
 def _student_course_view_row(s, st, enrollment, sections, course_map, faculty_names, pref_map):
@@ -485,11 +900,12 @@ def _student_today_classes_payload(s, st):
     section_ids = list(sections.keys())
     today = PORTAL_TODAY
     rows = (
-        s.query(D.TimetableEntry)
+        s.query(D.TimetableEntry).join(D.TimetablePlanWorkflow, D.TimetablePlanWorkflow.timetable_entry_id == D.TimetableEntry.id)
         .filter(
             D.TimetableEntry.section_id.in_(section_ids) if section_ids else False,
             D.TimetableEntry.day_of_week == today.weekday(),
             D.TimetableEntry.status == "active",
+            D.TimetablePlanWorkflow.status == "Published",
             or_(D.TimetableEntry.effective_from == None, D.TimetableEntry.effective_from <= today),
             or_(D.TimetableEntry.effective_to == None, D.TimetableEntry.effective_to >= today),
         )
@@ -2019,7 +2435,7 @@ def update_student_course_view(section_id: str, body: StudentCourseViewUpdateIn,
         raise HTTPException(404, "Course section not found in this student academics view")
 
     pref_id = _student_course_pref_id(st.id, section_id)
-    row = s.get(D.StudentCourseViewPreference, pref_id)
+    row = s.query(D.StudentCourseViewPreference).get(pref_id)
     faculty = (body.faculty or "").strip()
     schedule = (body.schedule or "").strip()
 
@@ -2032,7 +2448,7 @@ def update_student_course_view(section_id: str, body: StudentCourseViewUpdateIn,
     if row is None:
         row = D.StudentCourseViewPreference(
             id=pref_id,
-            tenant_id=st.tenant_id,
+            tenant_id=TENANT,
             student_id=st.id,
             section_id=section_id,
             created_by=ctx["sub"],
@@ -2279,38 +2695,128 @@ def student_scores(
     )
 
 
+class RazorpayOrderIn(BaseModel):
+    invoice_id: str
+    # Fee amount before GST.  Omit it to pay the complete outstanding balance.
+    amount: float | None = None
+
+
+class RazorpayVerifyIn(BaseModel):
+    invoice_id: str
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
+@router.post("/student/fees/razorpay/order")
+def create_razorpay_order(body: RazorpayOrderIn, ctx=Depends(auth), s=Depends(db)):
+    student = _student_or_404(s, ctx)
+    invoice = s.get(D.FeeInvoice, body.invoice_id)
+    if not invoice or invoice.student_id != student.id:
+        raise HTTPException(404, "Fee invoice not found")
+    base_balance = round(max((invoice.amount or 0) - (invoice.paid or 0), 0), 2)
+    if base_balance <= 0:
+        raise HTTPException(409, "This invoice is already paid")
+    base_amount = round(float(body.amount), 2) if body.amount is not None else base_balance
+    if base_amount <= 0:
+        raise HTTPException(422, "Payment amount must be greater than zero")
+    if base_amount > base_balance:
+        raise HTTPException(422, f"Payment amount cannot exceed the outstanding fee of ₹{base_balance:,.2f}")
+    gst_amount = _gst(base_amount)
+    charge_amount = round(base_amount + gst_amount, 2)
+    key, _ = _razorpay_configured()
+    remote = _razorpay_request("/orders", {"amount": int(charge_amount * 100), "currency": "INR", "receipt": f"ICMS-{invoice.id}", "notes": {"invoice_id": invoice.id, "student_id": student.id, "base_amount": str(base_amount), "gst_rate": "18", "gst_amount": str(gst_amount)}})
+    order = D.RazorpayOrder(id=uid(), tenant_id=TENANT, invoice_id=invoice.id, student_id=student.id,
+                            razorpay_order_id=remote["id"], amount=charge_amount)
+    s.add(order); s.commit()
+    return {"key_id": key, "order_id": order.razorpay_order_id, "amount": int(charge_amount * 100),
+            "currency": "INR", "student": {"name": student.name, "email": student.email}, "description": f"{invoice.term} (includes 18% GST)", "base_amount": base_amount, "gst_amount": gst_amount, "total_amount": charge_amount}
+
+
+@router.post("/student/fees/razorpay/verify")
+def verify_razorpay_payment(body: RazorpayVerifyIn, ctx=Depends(auth), s=Depends(db)):
+    student = _student_or_404(s, ctx)
+    order = s.query(D.RazorpayOrder).filter(D.RazorpayOrder.razorpay_order_id == body.razorpay_order_id,
+                                             D.RazorpayOrder.invoice_id == body.invoice_id,
+                                             D.RazorpayOrder.student_id == student.id).first()
+    if not order:
+        raise HTTPException(404, "Payment order not found")
+    if order.status == "paid":
+        return {"status": "paid", "message": "Payment was already recorded"}
+    _, secret = _razorpay_configured()
+    expected = hmac.new(secret.encode(), f"{body.razorpay_order_id}|{body.razorpay_payment_id}".encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, body.razorpay_signature):
+        raise HTTPException(400, "Payment signature verification failed")
+    invoice = s.get(D.FeeInvoice, order.invoice_id)
+    if not invoice:
+        raise HTTPException(404, "Fee invoice not found")
+    order.status, order.razorpay_payment_id, order.paid_at = "paid", body.razorpay_payment_id, datetime.utcnow()
+    base_paid_amount = min(round(float(order.amount or 0) / (1 + GST_RATE), 2), max((invoice.amount or 0) - (invoice.paid or 0), 0))
+    payment = D.Payment(id=uid(), tenant_id=TENANT, invoice_id=invoice.id, student_id=student.id,
+                    amount=base_paid_amount, method="razorpay", reference=body.razorpay_payment_id, status="success")
+    s.add(payment); s.flush()
+    _settle_payment(s, payment, ctx["sub"])
+    s.commit()
+    write_audit(s, ctx["sub"], student.name, ctx["office_n"], "fee.payment.razorpay", f"invoice:{invoice.id}", "due", invoice.status, f"Razorpay payment {body.razorpay_payment_id}")
+    return {"status": invoice.status, **_invoice_display_amounts(invoice, order.amount)}
+
+
+@router.get("/student/fees/invoices/{invoice_id}/receipt.pdf")
+def student_fee_receipt(invoice_id: str, payment_id: str = "", ctx=Depends(auth), s=Depends(db)):
+    return _receipt_response(_student_or_404(s, ctx), invoice_id, s, payment_id or None)
+
+
 @router.get("/student/fees")
 def student_fees(ctx=Depends(auth), s=Depends(db)):
     st = _student_or_404(s, ctx)
     invoices, balance = _student_fee_summary(s, st.id)
+    structures = {row.id: row for row in s.query(D.FeeStructure).all()}
+    semesters = {row.id: row.name for row in s.query(D.Semester).all()}
     payments = (
         s.query(D.Payment)
         .filter(D.Payment.student_id == st.id)
         .order_by(desc(D.Payment.at))
         .all()
     )
+    invoice_data = []
+    category_buckets = {}
+    for row in invoices:
+        amounts = _invoice_display_amounts(row)
+        invoice_details = _invoice_fee_category_details(s, row)
+        invoice_entry = {"id": row.id, "term": row.term,
+                         "semester": semesters.get(structures[row.fee_structure_id].semester_id, row.term) if row.fee_structure_id in structures else row.term,
+                         **amounts, "status": row.status, "due_date": row.due_date.isoformat() if row.due_date else "",
+                         "fee_category_id": invoice_details["fee_category_id"],
+                         "fee_category": invoice_details["fee_category"],
+                         "categories": invoice_details["categories"]}
+        invoice_data.append(invoice_entry)
+        for category in invoice_details["categories"]:
+            bucket = category_buckets.setdefault(category["fee_category"], {"fee_category_id": None,
+                                                                           "fee_category": category["fee_category"],
+                                                                           "assigned": 0.0, "paid": 0.0,
+                                                                           "balance": 0.0})
+            bucket["assigned"] += category["assigned"]
+            bucket["paid"] += category["paid"]
+            bucket["balance"] += category["balance"]
+    payment_rows = []
+    for row in payments:
+        invoice = s.get(D.FeeInvoice, row.invoice_id)
+        invoice_details = _invoice_fee_category_details(s, invoice) if invoice else {"fee_category_id": None, "fee_category": "Uncategorised", "categories": []}
+        payment_rows.append({
+            "id": row.id,
+            "invoice_id": row.invoice_id,
+            "amount": row.amount,
+            "method": row.method,
+            "reference": row.reference,
+            "fee_category_id": invoice_details["fee_category_id"],
+            "fee_category": invoice_details["fee_category"],
+            "at": row.at.isoformat() if row.at else "",
+        })
     return {
-        "summary": {"balance": balance},
-        "invoices": [
-            {
-                "term": row.term,
-                "amount": row.amount,
-                "paid": row.paid,
-                "balance": row.amount - row.paid,
-                "status": row.status,
-                "due_date": row.due_date.isoformat() if row.due_date else "",
-            }
-            for row in invoices
-        ],
-        "payments": [
-            {
-                "amount": row.amount,
-                "method": row.method,
-                "reference": row.reference,
-                "at": row.at.isoformat() if row.at else "",
-            }
-            for row in payments
-        ],
+        "summary": {"balance": round(sum(item["balance"] for item in invoice_data), 2)},
+        "invoices": invoice_data,
+        "payments": payment_rows,
+        "categories": sorted(category_buckets.values(), key=lambda x: x["fee_category"]),
     }
 
 
@@ -2701,7 +3207,7 @@ def create_student_calendar_personal_event(body: StudentCalendarEventIn, ctx=Dep
 
     row = D.StudentCalendarEvent(
         id=_portal_uid(),
-        tenant_id=st.tenant_id,
+        tenant_id=TENANT,
         student_id=st.id,
         title=title,
         note=(body.note or "").strip(),
@@ -2791,10 +3297,386 @@ def student_library_loans(ctx=Depends(auth), s=Depends(db)):
     }
 
 
+@router.get("/payroll/runs")
+def payroll_runs(ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") not in (23, 24, 25):
+        raise HTTPException(403, "Not allowed")
+
+    runs = s.query(D.PayrollRun).order_by(desc(D.PayrollRun.created_at)).all()
+    return {
+        "runs": [
+            {
+                "id": row.id,
+                "payroll_month": row.payroll_month,
+                "run_name": row.run_name,
+                "status": row.status,
+                "payment_date": row.payment_date.isoformat() if row.payment_date else None,
+            }
+            for row in runs
+        ]
+    }
+
+
+def _ensure_payroll_run_entries(s, run):
+    staff_rows = s.query(D.StaffMember).filter(D.StaffMember.status == "active").order_by(D.StaffMember.name).all()
+    for index, staff in enumerate(staff_rows, start=1):
+        payroll_emp = (
+            s.query(D.PayrollEmployee)
+            .filter(D.PayrollEmployee.staff_member_id == staff.id)
+            .first()
+        )
+        if not payroll_emp:
+            payroll_emp = D.PayrollEmployee(
+                id=f"payroll_emp_{staff.id}",
+                tenant_id=TENANT,
+                staff_member_id=staff.id,
+                employee_code=staff.emp_id or f"EMP-{index:03d}",
+                bank_account_no=f"100{index:05d}",
+                bank_ifsc="ICMS0001",
+                pan_no=f"PAN{index:05d}",
+                pay_mode="bank_transfer",
+                status="active",
+            )
+            s.add(payroll_emp)
+            s.flush()
+
+        structure = (
+            s.query(D.PayrollSalaryStructure)
+            .filter(D.PayrollSalaryStructure.employee_id == payroll_emp.id)
+            .first()
+        )
+        if not structure:
+            base_salary = 22000 + (index * 2400)
+            s.add(D.PayrollSalaryStructure(
+                id=f"payroll_struct_{payroll_emp.id}",
+                tenant_id=TENANT,
+                employee_id=payroll_emp.id,
+                basic_pay=base_salary,
+                hra=base_salary * 0.18,
+                special_allowance=base_salary * 0.08,
+                conveyance_allowance=1800,
+                medical_allowance=1200,
+                other_earnings=0,
+                pf_employee_share=base_salary * 0.12,
+                professional_tax=200,
+                income_tax=base_salary * 0.02,
+                loan_deduction=0,
+                advance_deduction=0,
+                other_deductions=0,
+                effective_from=datetime.utcnow(),
+            ))
+
+    s.flush()
+    existing_employee_ids = {
+        row.employee_id
+        for row in s.query(D.PayrollEntry.employee_id).filter(D.PayrollEntry.run_id == run.id).all()
+    }
+    employees = s.query(D.PayrollEmployee).filter(D.PayrollEmployee.status == "active").all()
+    added = 0
+    for emp in employees:
+        if emp.id in existing_employee_ids:
+            continue
+        structure = (
+            s.query(D.PayrollSalaryStructure)
+            .filter(D.PayrollSalaryStructure.employee_id == emp.id)
+            .order_by(D.PayrollSalaryStructure.effective_from.desc())
+            .first()
+        )
+        if not structure:
+            continue
+
+        gross_salary = sum((
+            structure.basic_pay,
+            structure.hra,
+            structure.special_allowance,
+            structure.conveyance_allowance,
+            structure.medical_allowance,
+            structure.other_earnings,
+        ))
+        total_deductions = sum((
+            structure.pf_employee_share,
+            structure.professional_tax,
+            structure.income_tax,
+            structure.loan_deduction,
+            structure.advance_deduction,
+            structure.other_deductions,
+        ))
+        s.add(D.PayrollEntry(
+            id=uid(),
+            tenant_id=TENANT,
+            run_id=run.id,
+            employee_id=emp.id,
+            gross_salary=gross_salary,
+            total_earnings=gross_salary,
+            total_deductions=total_deductions,
+            net_salary=gross_salary - total_deductions,
+            payment_status="pending",
+        ))
+        added += 1
+    return added
+
+
+@router.post("/payroll/runs")
+def create_payroll_run(body: dict, ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") not in (24, 25):
+        raise HTTPException(403, "Not allowed")
+
+    payroll_month = body.get("payroll_month")
+    run_name = body.get("run_name", f"{payroll_month} Payroll Run")
+    if not payroll_month:
+        raise HTTPException(400, "payroll_month is required")
+
+    existing = s.query(D.PayrollRun).filter(D.PayrollRun.payroll_month == payroll_month).first()
+    if existing:
+        added = _ensure_payroll_run_entries(s, existing)
+        s.commit()
+        return {"run_id": existing.id, "status": existing.status, "entries_added": added}
+
+    run = D.PayrollRun(
+        id=uid(),
+        tenant_id=TENANT,
+        payroll_month=payroll_month,
+        run_name=run_name,
+        status="generated",
+        generated_by=ctx["sub"],
+    )
+    s.add(run)
+    s.flush()
+
+    _ensure_payroll_run_entries(s, run)
+
+    s.commit()
+    return {"run_id": run.id, "status": "generated"}
+
+
+@router.get("/payroll/runs/{run_id}")
+def payroll_run_details(run_id: str, ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") not in (23, 24, 25):
+        raise HTTPException(403, "Not allowed")
+
+    run = s.query(D.PayrollRun).get(run_id)
+    if not run:
+        raise HTTPException(404, "Run not found")
+
+    entries = s.query(D.PayrollEntry).filter(D.PayrollEntry.run_id == run_id).all()
+    out_entries = []
+    for item in entries:
+        emp = s.query(D.PayrollEmployee).get(item.employee_id)
+        staff = s.query(D.StaffMember).get(emp.staff_member_id) if emp else None
+        out_entries.append(
+            {
+                "id": item.id,
+                "employee_id": item.employee_id,
+                "employee_name": staff.name if staff else emp.employee_code if emp else item.employee_id,
+                "employee_code": emp.employee_code if emp else "",
+                "designation": staff.designation if staff else "",
+                "gross_salary": item.gross_salary,
+                "total_deductions": item.total_deductions,
+                "net_salary": item.net_salary,
+                "payment_status": item.payment_status,
+            }
+        )
+
+    return {
+        "run": {
+            "id": run.id,
+            "payroll_month": run.payroll_month,
+            "run_name": run.run_name,
+            "status": run.status,
+        },
+        "entries": out_entries,
+    }
+
+
+@router.post("/payroll/entries/{entry_id}/status")
+def update_payroll_entry_status(entry_id: str, body: dict, ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") != 23:
+        raise HTTPException(403, "Only Accounts Office can post payroll payments")
+
+    entry = s.query(D.PayrollEntry).get(entry_id)
+    if not entry:
+        raise HTTPException(404, "Payroll entry not found")
+
+    new_status = (body or {}).get("status", "paid")
+    allowed = {"pending", "approved", "paid", "failed"}
+    if new_status not in allowed:
+        raise HTTPException(400, "Invalid payroll status")
+
+    entry.payment_status = new_status
+    entry.updated_at = datetime.utcnow()
+
+    if new_status == "paid":
+        posting = (
+            s.query(D.PayrollPaymentPosting)
+            .filter(D.PayrollPaymentPosting.entry_id == entry.id)
+            .first()
+        )
+        if not posting:
+            posting = D.PayrollPaymentPosting(
+                id=uid(),
+                tenant_id=TENANT,
+                entry_id=entry.id,
+                payment_method="bank_transfer",
+                bank_ref_no=f"PAY-{entry.id[:8]}",
+                posted_by=ctx["sub"],
+                posted_at=datetime.utcnow(),
+                status="posted",
+                remarks="Posted from payroll UI",
+            )
+            s.add(posting)
+
+    s.commit()
+    return {"status": entry.payment_status, "entry_id": entry.id}
+
+
+@router.get("/payroll/me")
+def my_payroll(month: str = None, ctx=Depends(auth), s=Depends(db)):
+    stf = _staff_or_404(s, ctx)
+
+    payroll_emp = (
+        s.query(D.PayrollEmployee)
+        .filter(D.PayrollEmployee.staff_member_id == stf.id, D.PayrollEmployee.status == "active")
+        .order_by(desc(D.PayrollEmployee.created_at))
+        .first()
+    )
+    if not payroll_emp:
+        raise HTTPException(404, "Payroll profile not found")
+
+    structure = (
+        s.query(D.PayrollSalaryStructure)
+        .filter(D.PayrollSalaryStructure.employee_id == payroll_emp.id)
+        .order_by(desc(D.PayrollSalaryStructure.effective_from))
+        .first()
+    )
+
+    payroll_entries = (
+        s.query(D.PayrollEntry)
+        .filter(D.PayrollEntry.employee_id == payroll_emp.id)
+        .order_by(desc(D.PayrollEntry.created_at))
+        .all()
+    )
+    runs = {run.id: run for run in s.query(D.PayrollRun).all()}
+    available_months = sorted(
+        {runs[item.run_id].payroll_month for item in payroll_entries if item.run_id in runs},
+        reverse=True,
+    )
+    entry = next(
+        (item for item in payroll_entries if not month or (runs.get(item.run_id) and runs[item.run_id].payroll_month == month)),
+        None,
+    )
+
+    paid_entry = (
+        s.query(D.PayrollEntry)
+        .filter(
+            D.PayrollEntry.employee_id == payroll_emp.id,
+            D.PayrollEntry.payment_status == "paid",
+        )
+        .order_by(desc(D.PayrollEntry.created_at))
+        .first()
+    )
+
+    run = s.query(D.PayrollRun).get(entry.run_id) if entry else None
+    paid_run = s.query(D.PayrollRun).get(paid_entry.run_id) if paid_entry else None
+    posting = None
+    if entry:
+        posting = (
+            s.query(D.PayrollPaymentPosting)
+            .filter(D.PayrollPaymentPosting.entry_id == entry.id)
+            .order_by(desc(D.PayrollPaymentPosting.posted_at))
+            .first()
+        )
+    paid_posting = None
+    if paid_entry:
+        paid_posting = (
+            s.query(D.PayrollPaymentPosting)
+            .filter(D.PayrollPaymentPosting.entry_id == paid_entry.id)
+            .order_by(desc(D.PayrollPaymentPosting.posted_at))
+            .first()
+        )
+
+    dept = s.query(D.Department).get(stf.dept_id) if stf.dept_id else None
+
+    earnings = []
+    deductions = []
+    if structure:
+        earnings = [
+            {"label": "Basic pay", "amount": structure.basic_pay or 0},
+            {"label": "House rent allowance", "amount": structure.hra or 0},
+            {"label": "Special allowance", "amount": structure.special_allowance or 0},
+            {"label": "Conveyance allowance", "amount": structure.conveyance_allowance or 0},
+            {"label": "Medical allowance", "amount": structure.medical_allowance or 0},
+            {"label": "Other earnings", "amount": structure.other_earnings or 0},
+        ]
+        deductions = [
+            {"label": "Provident fund", "amount": structure.pf_employee_share or 0},
+            {"label": "Professional tax", "amount": structure.professional_tax or 0},
+            {"label": "Income tax", "amount": structure.income_tax or 0},
+            {"label": "Loan deduction", "amount": structure.loan_deduction or 0},
+            {"label": "Advance deduction", "amount": structure.advance_deduction or 0},
+            {"label": "Other deductions", "amount": structure.other_deductions or 0},
+        ]
+
+    return {
+        "profile": {
+            "name": stf.name,
+            "emp_id": stf.emp_id,
+            "designation": stf.designation,
+            "department": dept.name if dept else "",
+            "email": stf.email,
+            "phone": stf.phone or None,
+            "employee_code": payroll_emp.employee_code,
+            "bank_account_no": payroll_emp.bank_account_no,
+            "bank_ifsc": payroll_emp.bank_ifsc,
+            "pay_mode": payroll_emp.pay_mode,
+        },
+        "run": {
+            "id": run.id if run else None,
+            "payroll_month": run.payroll_month if run else None,
+            "run_name": run.run_name if run else None,
+            "payment_date": run.payment_date.isoformat() if run and run.payment_date else None,
+            "status": run.status if run else None,
+        },
+        "entry": {
+            "id": entry.id if entry else None,
+            "gross_salary": entry.gross_salary if entry else 0,
+            "total_earnings": entry.total_earnings if entry else 0,
+            "total_deductions": entry.total_deductions if entry else 0,
+            "net_salary": entry.net_salary if entry else 0,
+            "payment_status": entry.payment_status if entry else "pending",
+            "payslip_status": entry.payslip_status if entry else "not_generated",
+            "present_days": entry.present_days if entry else 0,
+            "paid_days": entry.paid_days if entry else 0,
+            "leave_days": entry.leave_days if entry else 0,
+        } if entry else None,
+        "payment": {
+            "payment_method": posting.payment_method if posting else payroll_emp.pay_mode,
+            "bank_ref_no": posting.bank_ref_no if posting else "",
+            "posted_at": posting.posted_at.isoformat() if posting and posting.posted_at else None,
+            "status": posting.status if posting else "pending",
+        },
+        "available_months": available_months,
+        "last_paid_receipt": {
+            "receipt_no": paid_posting.bank_ref_no if paid_posting else paid_entry.id if paid_entry else None,
+            "payroll_month": paid_run.payroll_month if paid_run else None,
+            "run_name": paid_run.run_name if paid_run else None,
+            "gross_salary": paid_entry.gross_salary if paid_entry else 0,
+            "total_deductions": paid_entry.total_deductions if paid_entry else 0,
+            "net_salary": paid_entry.net_salary if paid_entry else 0,
+            "payment_date": paid_posting.posted_at.isoformat() if paid_posting and paid_posting.posted_at else paid_run.payment_date.isoformat() if paid_run and paid_run.payment_date else None,
+            "payment_method": paid_posting.payment_method if paid_posting else payroll_emp.pay_mode,
+            "bank_ref_no": paid_posting.bank_ref_no if paid_posting else "",
+            "status": paid_entry.payment_status if paid_entry else None,
+        } if paid_entry else None,
+        "earnings": earnings,
+        "deductions": deductions,
+    }
+
+
 @router.get("/faculty/home")
 def faculty_home(ctx=Depends(auth), s=Depends(db)):
     stf = _staff_or_404(s, ctx)
     sections = s.query(D.Section).filter(D.Section.faculty_person_id == stf.id).all()
+    published_ids = _published_section_ids(s, sections)
     section_ids = [row.id for row in sections]
     enrolled_count = 0
     if section_ids:
@@ -2803,7 +3685,7 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
             .filter(D.Enrollment.section_id.in_(section_ids), D.Enrollment.status == "enrolled")
             .count()
         )
-    dept = s.get(D.Department, stf.dept_id) if stf.dept_id else None
+    dept = s.query(D.Department).get(stf.dept_id) if stf.dept_id else None
 
     course_map = {course.id: course for course in s.query(D.Course).all()}
     enrollments = (
@@ -2883,6 +3765,10 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
     week_start = today - timedelta(days=today.weekday())
     teaching_schedule = []
     for section in sections:
+        # An allocation is already actionable for the professor.  A timetable
+        # plan only controls whether a concrete class time is shown.
+        if section.id not in published_ids:
+            continue
         parts = (section.schedule or "").split(maxsplit=1)
         days, class_time = (parts[0], parts[1] if len(parts) > 1 else "Time pending") if parts else ("", "Time pending")
         course = course_map.get(section.course_id)
@@ -2917,14 +3803,46 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
         elif score_pct >= 60: distribution["60% – 79%"] += 1
         elif score_pct >= 40: distribution["40% – 59%"] += 1
         else: distribution["Below 40%"] += 1
+    active_assignments = (s.query(D.Assignment)
+                          .filter(D.Assignment.section_id.in_(section_ids), D.Assignment.status == "published")
+                          .count() if section_ids else 0)
+    mentor_assignments = s.query(D.MentorAssignment).filter(
+        D.MentorAssignment.faculty_id == stf.id, D.MentorAssignment.status == "active"
+    ).count()
+    mentoring_cases = s.query(D.MentoringCase).filter(
+        D.MentoringCase.mentor_id == stf.id, D.MentoringCase.status.notin_(("closed", "resolved"))
+    ).all()
+    at_risk_advisees = len({case.student_id for case in mentoring_cases if case.risk_level.lower() in {"high", "critical"}})
+    active_projects = s.query(D.ResearchProject).filter(
+        D.ResearchProject.owner_id == stf.id, D.ResearchProject.status.in_(("proposed", "ongoing", "active"))
+    ).count()
+    publications = s.query(D.ResearchPublication).filter(D.ResearchPublication.owner_id == stf.id).count()
+    active_requests = s.query(D.LeaveRequest).filter(
+        D.LeaveRequest.staff_id == stf.id, D.LeaveRequest.status.in_(("pending", "returned"))
+    ).count()
+    total_requests = s.query(D.LeaveRequest).filter(D.LeaveRequest.staff_id == stf.id).count()
+    marks_reviews = sum(1 for assessment in assessments if assessment.marks_state in {"submitted", "under_review", "hod_review", "evaluation_review"})
+    returned_marks = sum(1 for assessment in assessments if assessment.marks_state == "returned")
+    upcoming = []
+    for assignment in (s.query(D.Assignment).filter(D.Assignment.section_id.in_(section_ids), D.Assignment.status == "published").all() if section_ids else []):
+        if assignment.due_at and assignment.due_at.date() >= today:
+            upcoming.append({"kind": "assignment", "title": assignment.title, "due_at": assignment.due_at.isoformat(), "route": "assignments"})
+    for assessment in assessments:
+        if assessment.scheduled_at and assessment.scheduled_at.date() >= today:
+            upcoming.append({"kind": "assessment", "title": assessment.name, "due_at": assessment.scheduled_at.isoformat(), "route": "assessments"})
+    upcoming.sort(key=lambda item: item["due_at"])
     return {
         "profile": {"name": stf.name, "emp_id": stf.emp_id,
                     "designation": stf.designation,
                     "department": dept.name if dept else "", "email": stf.email,
                     "phone": stf.phone or None, "office_hours": stf.office_hours or None},
-        "kpis": {"sections": len(sections), "students": enrolled_count, "classes_this_week": classes_this_week,
-                 "pending_tasks": len(pending), "marks_entry_pending": marks_pending,
-                 "average_attendance": average_attendance, "average_grade": average_score},
+        "kpis": {"sections": len(sections), "assigned_courses": len({section.course_id for section in sections}),
+                 "students": enrolled_count, "classes_this_week": classes_this_week,
+                 "pending_tasks": len(pending), "pending_attendance": len([item for item in pending if item["kind"] == "attendance"]),
+                 "marks_entry_pending": marks_pending, "marks_reviews": marks_reviews,
+                 "returned_marks": returned_marks, "active_assignments": active_assignments,
+                 "at_risk_advisees": at_risk_advisees, "average_attendance": average_attendance,
+                 "average_grade": average_score},
         "sections": section_rows, "pending_tasks": pending[:4],
         "announcements": [{"id": item.id, "title": item.title, "detail": item.detail, "date": item.created_at.date().isoformat()} for item in notes],
         "teaching_schedule": teaching_schedule,
@@ -2932,6 +3850,9 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
         "marks_distribution": [{"label": label, "value": value} for label, value in distribution.items()],
         "performance": {"assessments": len(assessments), "average_score": round(average_score * 10, 1) if average_score is not None else None,
                         "marks_entered": len(marks), "expected_marks": sum(enrollment_by_section.get(item.section_id, 0) for item in assessments)},
+        "dashboard": {"mentoring": {"advisees": mentor_assignments, "active_cases": len(mentoring_cases), "at_risk_advisees": at_risk_advisees},
+                      "research": {"active_projects": active_projects, "publications": publications},
+                      "requests": {"active": active_requests, "total": total_requests}, "upcoming": upcoming[:6]},
         "role_context": {"active_role": ctx.get("role"), "available_roles": office(ctx["office_n"])["internal_roles"]},
     }
     leave_rows = s.query(D.LeaveRequest).filter(D.LeaveRequest.staff_id == stf.id).all()
@@ -2980,35 +3901,139 @@ def faculty_sections(ctx=Depends(auth), s=Depends(db)):
     return {"sections": out}
 
 
+def _faculty_profile_payload(s, ctx, staff):
+    user = s.query(User).get(ctx["sub"])
+    department = s.query(D.Department).get(staff.dept_id) if staff.dept_id else None
+    assignments = []
+    for item in (s.query(D.FacultyFunctionalAssignment)
+                 .filter(D.FacultyFunctionalAssignment.faculty_id == staff.id,
+                         D.FacultyFunctionalAssignment.status == "active").all()):
+        scope = ""
+        if item.scope_type == "section":
+            section = s.query(D.Section).get(item.scope_ref)
+            course = s.query(D.Course).get(section.course_id) if section else None
+            scope = f"{course.code if course else ''}-{section.section_code if section else ''}".strip("-")
+        elif item.scope_type == "department":
+            scoped_department = s.query(D.Department).get(item.scope_ref)
+            scope = scoped_department.name if scoped_department else ""
+        assignments.append({"role": item.role_key.replace("_", " ").title(), "scope": scope or "Assigned scope"})
+    return {"profile": {"name": staff.name, "employee_id": staff.emp_id, "email": staff.email,
+                         "phone": staff.phone, "office_hours": staff.office_hours, "designation": staff.designation,
+                         "department": department.name if department else "—", "campus": staff.campus or "—",
+                         "date_joined": staff.date_joined.isoformat() if staff.date_joined else "", "employment_status": staff.status,
+                         "username": user.username if user else "", "base_role": user.role if user else ""},
+            "assignments": assignments,
+            "editable_fields": ["email", "phone", "office_hours"]}
+
+
+class FacultyProfileUpdateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    email: str | None = Field(default=None, max_length=255)
+    phone: str | None = Field(default=None, max_length=50)
+    office_hours: str | None = Field(default=None, max_length=255)
+
+
+@router.get("/faculty/profile")
+def faculty_self_profile(ctx=Depends(auth), s=Depends(db)):
+    """Return only the authenticated faculty member's safe self-service profile."""
+    staff = _staff_or_404(s, ctx)
+    return _faculty_profile_payload(s, ctx, staff)
+
+
+@router.put("/faculty/profile")
+def update_faculty_self_profile(body: FacultyProfileUpdateIn, ctx=Depends(auth), s=Depends(db)):
+    """Update an explicit, small self-service field whitelist for the token owner."""
+    staff = _staff_or_404(s, ctx)
+    changed = body.model_dump(exclude_unset=True)
+    for key, value in changed.items():
+        setattr(staff, key, (value or "").strip())
+    person = s.query(Person).get(s.query(User).get(ctx["sub"]).person_id)
+    if person:
+        if "email" in changed:
+            person.email = staff.email
+        if "phone" in changed:
+            person.contact = staff.phone
+    s.commit()
+    write_audit(s, ctx["sub"], staff.name, ctx["office_n"], "faculty.profile.update",
+                f"staff:{staff.id}", "profile", "profile", f"Updated: {', '.join(sorted(changed))}")
+    return _faculty_profile_payload(s, ctx, staff)
+
+
 @router.get("/faculty/schedule")
-def faculty_schedule(ctx=Depends(auth), s=Depends(db)):
-    """Weekly schedule built from the faculty member's assigned sections and staff events."""
+def faculty_schedule(week_start: str = "", ctx=Depends(auth), s=Depends(db)):
+    """Read-only faculty schedule from active allocations, timetable entries and sessions."""
     stf = _staff_or_404(s, ctx)
-    today = date.today(); week_start = today - timedelta(days=today.weekday()); week_end = week_start + timedelta(days=6)
-    courses = {row.id: row for row in s.query(D.Course).all()}
-    days = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
-    events = []
-    sections = s.query(D.Section).filter(D.Section.faculty_person_id == stf.id).all()
-    for section in sections:
-        parts = (section.schedule or "").split(maxsplit=1); names = parts[0] if parts else ""; class_time = parts[1] if len(parts) > 1 else "Time pending"
+    try:
+        anchor = date.fromisoformat(week_start) if week_start else date.today()
+    except ValueError:
+        raise HTTPException(422, "week_start must be an ISO date")
+    start = anchor - timedelta(days=anchor.weekday()); end = start + timedelta(days=6)
+    allocations = (s.query(D.TeachingAllocation)
+                   .filter(D.TeachingAllocation.tenant_id == ctx["tenant_id"],
+                           D.TeachingAllocation.faculty_id == stf.id,
+                           D.TeachingAllocation.status == "active",
+                           (D.TeachingAllocation.effective_from == None) | (D.TeachingAllocation.effective_from <= end),
+                           (D.TeachingAllocation.effective_to == None) | (D.TeachingAllocation.effective_to >= start))
+                   .all())
+    section_ids = {row.section_id for row in allocations}
+    sections = {row.id: row for row in s.query(D.Section).filter(D.Section.id.in_(section_ids) if section_ids else False).all()}
+    courses = {row.id: row for row in s.query(D.Course).filter(D.Course.id.in_({row.course_id for row in sections.values()}) if sections else False).all()}
+    leaves = (s.query(D.LeaveRequest)
+              .filter(D.LeaveRequest.staff_id == stf.id,
+                      D.LeaveRequest.status.in_(["pending", "approved"]),
+                      D.LeaveRequest.from_date <= end, D.LeaveRequest.to_date >= start).all())
+    approved_leave_dates = {start + timedelta(days=offset) for leave in leaves if leave.status == "approved"
+                            for offset in range((min(end, leave.to_date) - max(start, leave.from_date)).days + 1)}
+
+    def payload(event_id, when, starts, ends, section, room, status, session_id=""):
         course = courses.get(section.course_id)
-        for name in names.split("/"):
-            index = days.get(name[:3].title())
-            if index is not None:
-                events.append({"id": f"class-{section.id}-{index}", "date": (week_start + timedelta(days=index)).isoformat(), "time": class_time, "title": f"{course.code if course else 'Course'} ({section.section_code})", "detail": course.title if course else "Assigned section", "location": section.room or "Room pending", "type": "class", "route": "attendance"})
-    for event in s.query(D.CalendarEvent).filter(D.CalendarEvent.status == "published").all():
-        if not event.start_at or not (week_start <= event.start_at.date() <= week_end) or event.audience not in ("all", "staff", "leadership"):
+        return {"id": event_id, "date": when.isoformat(), "time": starts, "end_time": ends,
+                "title": f"{course.code if course else 'Course'} ({section.section_code})",
+                "course_code": course.code if course else "", "course_title": course.title if course else "",
+                "section": section.section_code, "section_id": section.id, "class_session_id": session_id,
+                "detail": course.title if course else "Assigned section", "location": room or section.room or "Room not configured",
+                "status": "unavailable" if when in approved_leave_dates else status,
+                "leave_state": "Approved leave" if when in approved_leave_dates else "", "type": "class", "route": "attendance"}
+
+    events, covered_slots = [], set()
+    sessions = (s.query(D.ClassSession)
+                .filter(D.ClassSession.tenant_id == ctx["tenant_id"], D.ClassSession.faculty_id == stf.id,
+                        D.ClassSession.section_id.in_(section_ids) if section_ids else False,
+                        D.ClassSession.session_date >= start, D.ClassSession.session_date <= end)
+                .order_by(D.ClassSession.session_date, D.ClassSession.scheduled_start).all())
+    for session in sessions:
+        section = sections.get(session.section_id)
+        if not section:
             continue
-        events.append({"id": f"event-{event.id}", "date": event.start_at.date().isoformat(), "time": "All day" if event.all_day else event.start_at.strftime("%H:%M"), "title": event.title, "detail": event.category, "location": event.location or "Campus", "type": "meeting", "route": "calendar"})
-    events.sort(key=lambda item: (item["date"], item["time"], item["title"]))
-    leaves = s.query(D.LeaveRequest).filter(D.LeaveRequest.staff_id == stf.id, D.LeaveRequest.status.in_(["pending", "approved"])).count()
-    return {"profile": {"name": stf.name, "email": stf.email, "phone": stf.phone, "office_hours": stf.office_hours}, "role": ctx.get("role"), "week_start": week_start.isoformat(), "events": events, "summary": {"classes": sum(item["type"] == "class" for item in events), "meetings": sum(item["type"] == "meeting" for item in events), "sections": len(sections), "leave_requests": leaves}}
+        start_time = session.scheduled_start.strftime("%H:%M") if session.scheduled_start else "Time not configured"
+        end_time = session.scheduled_end.strftime("%H:%M") if session.scheduled_end else ""
+        events.append(payload(f"session-{session.id}", session.session_date, start_time, end_time, section, session.room, session.status, session.id))
+        covered_slots.add((session.timetable_entry_id, session.session_date))
+        covered_slots.add((session.section_id, session.session_date, start_time))
+    entries = (s.query(D.TimetableEntry)
+               .filter(D.TimetableEntry.tenant_id == ctx["tenant_id"],
+                       D.TimetableEntry.section_id.in_(section_ids) if section_ids else False,
+                       D.TimetableEntry.status == "active",
+                       (D.TimetableEntry.effective_from == None) | (D.TimetableEntry.effective_from <= end),
+                       (D.TimetableEntry.effective_to == None) | (D.TimetableEntry.effective_to >= start)).all())
+    for entry in entries:
+        when = start + timedelta(days=entry.day_of_week)
+        if (entry.id, when) in covered_slots or (entry.section_id, when, entry.start_time) in covered_slots:
+            continue
+        section = sections.get(entry.section_id)
+        if section:
+            events.append(payload(f"timetable-{entry.id}-{when.isoformat()}", when, entry.start_time, entry.end_time, section, entry.room, "scheduled"))
+    events.sort(key=lambda item: (item["date"], item["time"], item["id"]))
+    return {"profile": {"name": stf.name, "email": stf.email, "phone": stf.phone, "office_hours": stf.office_hours or ""},
+            "week_start": start.isoformat(), "week_end": end.isoformat(), "events": events, "meetings": [],
+            "leave": [{"id": row.id, "status": row.status, "from_date": row.from_date.isoformat(), "to_date": row.to_date.isoformat()} for row in leaves],
+            "summary": {"classes": len(events), "meetings": 0, "sections": len(section_ids), "leave_requests": len(leaves)}}
 
 
 @router.get("/faculty/section/{section_id}/students")
 def faculty_section_students(section_id: str, ctx=Depends(auth), s=Depends(db)):
     stf = _staff_or_404(s, ctx)
-    section = s.get(D.Section, section_id)
+    section = s.query(D.Section).get(section_id)
     if not section or section.faculty_person_id != stf.id:
         raise HTTPException(403, "Not your section")
     enrolls = (
@@ -3018,7 +4043,7 @@ def faculty_section_students(section_id: str, ctx=Depends(auth), s=Depends(db)):
     )
     out = []
     for row in enrolls:
-        st = s.get(D.Student, row.student_id)
+        st = s.query(D.Student).get(row.student_id)
         if not st:
             continue
         out.append(
@@ -3039,7 +4064,14 @@ def parent_home(ctx=Depends(auth), s=Depends(db)):
     if not st:
         raise HTTPException(404, "No ward linked to this login")
     _, dept = _student_program_and_department(s, st)
-    _, balance = _student_fee_summary(s, st.id)
+    invoices, balance = _student_fee_summary(s, st.id)
+    structures = {row.id: row for row in s.query(D.FeeStructure).all()}
+    semesters = {row.id: row.name for row in s.query(D.Semester).all()}
+    payments = s.query(D.Payment).filter(D.Payment.student_id == st.id).all()
+    invoice_data = []
+    for row in invoices:
+        amounts = _invoice_display_amounts(row)
+        invoice_data.append({"id": row.id, "term": row.term, "semester": semesters.get(structures[row.fee_structure_id].semester_id, row.term) if row.fee_structure_id in structures else row.term, **amounts, "status": row.status})
     return {
         "ward": {
             "name": st.name,
@@ -3049,5 +4081,41 @@ def parent_home(ctx=Depends(auth), s=Depends(db)):
             "department": dept.name if dept else "",
             "attendance_pct": _student_attendance_pct(s, st),
         },
-        "fee": {"balance": balance},
+        "fee": {"balance": round(sum(item["balance"] for item in invoice_data), 2), "invoices": invoice_data},
     }
+
+
+@router.get("/parent/fees/invoices/{invoice_id}/receipt.pdf")
+def parent_fee_receipt(invoice_id: str, ctx=Depends(auth), s=Depends(db)):
+    student = persona(s, ctx).get("student")
+    if not student:
+        raise HTTPException(404, "No ward linked to this login")
+    return _receipt_response(student, invoice_id, s)
+
+
+@router.post("/parent/fees/razorpay/order")
+def parent_create_razorpay_order(body: RazorpayOrderIn, ctx=Depends(auth), s=Depends(db)):
+    student = persona(s, ctx).get("student")
+    invoice = s.get(D.FeeInvoice, body.invoice_id)
+    if not student or not invoice or invoice.student_id != student.id:
+        raise HTTPException(404, "Ward fee invoice not found")
+    base_balance = round(max((invoice.amount or 0) - (invoice.paid or 0), 0), 2)
+    if base_balance <= 0: raise HTTPException(409, "This invoice is already paid")
+    base_amount = round(float(body.amount), 2) if body.amount is not None else base_balance
+    if base_amount <= 0 or base_amount > base_balance: raise HTTPException(422, f"Payment amount must be between ₹0.01 and ₹{base_balance:,.2f}")
+    gst_amount, charge_amount = _gst(base_amount), round(base_amount + _gst(base_amount), 2)
+    key, _ = _razorpay_configured(); remote = _razorpay_request("/orders", {"amount": int(charge_amount * 100), "currency": "INR", "receipt": f"ICMS-{invoice.id}", "notes": {"invoice_id": invoice.id, "student_id": student.id, "base_amount": str(base_amount), "gst_rate": "18", "gst_amount": str(gst_amount)}})
+    s.add(D.RazorpayOrder(id=uid(), tenant_id=TENANT, invoice_id=invoice.id, student_id=student.id, razorpay_order_id=remote["id"], amount=charge_amount)); s.commit()
+    return {"key_id": key, "order_id": remote["id"], "amount": int(charge_amount * 100), "currency": "INR", "student": {"name": student.name, "email": student.email}, "description": f"{invoice.term} (includes 18% GST)", "base_amount": base_amount, "gst_amount": gst_amount, "total_amount": charge_amount}
+
+
+@router.post("/parent/fees/razorpay/verify")
+def parent_verify_razorpay_payment(body: RazorpayVerifyIn, ctx=Depends(auth), s=Depends(db)):
+    student = persona(s, ctx).get("student")
+    order = s.query(D.RazorpayOrder).filter(D.RazorpayOrder.razorpay_order_id == body.razorpay_order_id, D.RazorpayOrder.invoice_id == body.invoice_id).first()
+    if not student or not order or order.student_id != student.id: raise HTTPException(404, "Payment order not found")
+    if order.status == "paid": return {"status": "paid"}
+    _, secret = _razorpay_configured(); expected = hmac.new(secret.encode(), f"{body.razorpay_order_id}|{body.razorpay_payment_id}".encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, body.razorpay_signature): raise HTTPException(400, "Payment signature verification failed")
+    invoice = s.get(D.FeeInvoice, order.invoice_id); base_amount = min(round(float(order.amount or 0) / (1 + GST_RATE), 2), max(invoice.amount-invoice.paid, 0)); order.status = "paid"; order.razorpay_payment_id = body.razorpay_payment_id; order.paid_at = datetime.utcnow(); payment = D.Payment(id=uid(), tenant_id=TENANT, invoice_id=invoice.id, student_id=student.id, amount=base_amount, method="razorpay", reference=body.razorpay_payment_id, status="success"); s.add(payment); s.flush(); _settle_payment(s, payment, ctx["sub"]); s.commit()
+    return {"status": invoice.status, **_invoice_display_amounts(invoice, order.amount)}

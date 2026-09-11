@@ -3,82 +3,30 @@ import { api } from '../api'
 import { Spinner } from './kit'
 
 export default function PrincipalDashboard({ user, go }: { user: any; go: (view: string) => void }) {
-  const [year, setYear] = useState('')
-  const [studentSemester, setStudentSemester] = useState('')
-  const [data, setData] = useState<any>(null)
-
-  useEffect(() => {
-    setData(null)
-    api.principalOverview(year, studentSemester)
-      .then(next => { setData(next); if (!year) setYear(next.filters.selected_year) })
-      .catch(() => setData({ error: true }))
-  }, [year, studentSemester])
-
+  const [year, setYear] = useState(''); const [studentSemester, setStudentSemester] = useState(''); const [data, setData] = useState<any>(null)
+  useEffect(() => { setData(null); api.principalOverview(year, studentSemester).then(next => { setData(next); if (!year) setYear(next.filters.selected_year) }).catch(() => setData({ error: true })) }, [year, studentSemester])
   if (!data) return <Spinner />
   if (data.error) return <div className="principal-empty">Dashboard data could not be loaded.</div>
-
-  const k = data.kpis
-  const p = data.performance
-  const attendanceRecorded = Number(data.attendance?.today_records || 0)
-  const cards = [
-    { label: 'Total Students', value: k.students, detail: 'Active students in this campus view', kind: 'students', target: 'students' },
-    { label: 'Faculty & Staff', value: k.faculty, detail: 'Active staff in this campus view', kind: 'staff', target: 'faculty_staff' },
-    { label: "Today's Attendance", value: k.attendance == null ? `${attendanceRecorded} records` : `${k.attendance}%`, detail: attendanceRecorded ? `Calculated from ${attendanceRecorded} attendance record${attendanceRecorded === 1 ? '' : 's'} today` : 'No attendance records submitted today; enter attendance to calculate a percentage', kind: 'attendance', target: 'attendance' },
-    { label: 'Needs My Decision', value: k.decisions, detail: 'Campus-scoped items awaiting your action', kind: 'decision', target: 'approvals' },
-    { label: 'At Risk Students', value: k.risk_students, detail: 'Based on recorded academic risk indicators', kind: 'risk', target: 'students' },
-    { label: 'Critical Alerts', value: k.critical_alerts, detail: 'Critical notifications for this account', kind: 'alert', target: 'workflows' },
-  ]
-
+  const k = data.kpis; const p = data.performance
+  const cards = [['Total Students', k.students, 'students', 'students'], ['Faculty & Staff', k.faculty, 'staff', 'faculty_staff'], ["Today's Attendance", k.attendance == null ? '—' : `${k.attendance}%`, 'attendance', 'attendance'], ['Needs My Decision', k.decisions, 'decision', 'approvals'], ['At Risk Students', k.risk_students, 'risk', 'students'], ['Critical Alerts', k.critical_alerts, 'alert', 'workflows']]
   return <div className="principal-dashboard fade-in">
-    <section className="principal-welcome">
-      <div>
-        <h1>Principal Dashboard</h1>
-        <p>{user.scope || 'Campus'} <b>•</b> {user.office}</p>
-        <small>All values are limited to your authorised campus. “Not recorded” means the source data has not been entered yet.</small>
-      </div>
-      <div className="principal-filters">
-        <label>ACADEMIC YEAR<select value={year} onChange={e => setYear(e.target.value)}>{data.filters.academic_years.map((x: string) => <option key={x}>{x}</option>)}</select></label>
-        <label>SEMESTER<select value={studentSemester} onChange={e => setStudentSemester(e.target.value)}><option value="">All Semesters</option>{data.filters.student_semesters.map((x: number) => <option key={x} value={x}>Semester {x}</option>)}</select></label>
-      </div>
-    </section>
-
-    <div className="principal-kpis">
-      {cards.map(card => <button key={card.label} className="principal-kpi" onClick={() => { if (card.label === 'At Risk Students') sessionStorage.setItem('principal-student-risk', 'at-risk'); go(card.target) }} type="button">
-        <span className={`principal-icon ${card.kind}`}><DashboardIcon kind={card.kind} /></span>
-        <div><span>{card.label}</span><b>{card.value}</b><small>{card.detail}</small></div>
-      </button>)}
-    </div>
-
-    <div className="principal-grid principal-top-grid">
-      <Panel title="Monthly Student Attendance Trend" icon="attendance" action="Open details" go={() => go('attendance')}><Trend rows={data.attendance?.trend || []} today={data.attendance?.today} todayRecords={attendanceRecorded} /></Panel>
-      <Panel title="Academic Performance (Overall)" icon="performance" action="Open analytics" go={() => go('analytics')}><div className="principal-performance"><div className="performance-ring"><b>{p.average_cgpa}</b><span>Avg. CGPA</span></div><div className="performance-copy"><p><i className="blue" />Distinction: {p.bands.distinction}</p><p><i className="green" />First Class: {p.bands.first}</p><p><i className="orange" />Second Class: {p.bands.second}</p><div className="performance-minis"><Mini value={p.pass_rate == null ? 'Not recorded' : `${p.pass_rate}%`} label="Pass Rate"/><Mini value={p.at_risk} label="At Risk"/><Mini value={p.backlogs} label="Backlogs"/></div></div></div></Panel>
-    </div>
-
-    <div className="principal-grid principal-middle-grid">
-      <Panel title="Examination Overview" icon="exam" action="Open Exams" go={() => go('examinations')}><Metrics values={[[data.examinations.assessments, 'Upcoming Exams', 'exam'], [data.examinations.marks_submitted, 'Marks Submitted', 'decision'], [data.examinations.pending_moderation, 'Pending Moderation', 'alert'], [0, 'Readiness Issues', 'risk']]}/></Panel>
-      <Panel title="Campus Operations" icon="operations" action="Open Operations" go={() => go('assets')}><Metrics values={[[data.operations.maintenance, 'Maintenance Alerts', 'operations'], [data.operations.procurement, 'Procurement Pending', 'decision'], [data.operations.asset_requests, 'Asset Requests', 'assets'], [data.operations.facilities, 'Facilities Alerts', 'alert']]}/></Panel>
-    </div>
-
-    <div className="principal-grid principal-bottom-grid">
-      <Panel title="Recent Notifications" icon="alert" action="View all" go={() => go('workflows')}><List rows={data.notifications} click={() => go('workflows')} empty="No notifications for this account." /></Panel>
-      <Panel title="Quick Access"><div className="principal-quick">{[['My Approvals', 'approvals', 'decision'], ['Escalations', 'workflows', 'alert'], ['Delegations', 'delegation', 'staff'], ['Reports', 'analytics', 'performance'], ['Campus Directory', 'directory', 'students'], ['Audit', 'audit', 'exam']].map(([label, target, icon]) => <button key={label} onClick={() => go(target)}><b><DashboardIcon kind={icon}/></b>{label}</button>)}</div></Panel>
-      <Panel title="Academic Calendar" icon="attendance" action="View calendar" go={() => go('academic_calendar')}><p className="principal-empty">Selected: {year} · {studentSemester ? `Semester ${studentSemester}` : 'All Semesters'}</p></Panel>
-    </div>
+    <section className="principal-welcome"><div><h1>Good morning, {user.office_n === 3 ? 'Campus Head' : 'Principal'} <span>👋</span></h1><p>{user.scope || 'Campus'} <b>•</b> {user.office}</p></div><div className="principal-filters"><label>ACADEMIC YEAR<select value={year} onChange={e => setYear(e.target.value)}>{data.filters.academic_years.map((x: string) => <option key={x}>{x}</option>)}</select></label><label>SEMESTER<select value={studentSemester} onChange={e => setStudentSemester(e.target.value)}><option value="">All Semesters</option>{data.filters.student_semesters.map((x: number) => <option key={x} value={x}>Semester {x}</option>)}</select></label></div></section>
+    <div className="principal-kpis">{cards.map(([label, value, kind, target]) => <button key={String(label)} className="principal-kpi" onClick={() => { if (label === 'At Risk Students') sessionStorage.setItem('principal-student-risk', 'at-risk'); go(String(target)) }} type="button"><span className={`principal-icon ${kind}`}><DashboardIcon kind={String(kind)} /></span><div><span>{label}</span><b>{value}</b><small>View details</small></div></button>)}</div>
+    <div className="principal-grid principal-top-grid"><Panel title="Needs My Decision" icon="decision" action="View all" go={() => go('approvals')}><List rows={data.workflows} click={() => go('approvals')} empty="No decisions are waiting for your office." /></Panel><Panel title="Monthly Student Attendance Trend" icon="attendance" action="Open details" go={() => go('attendance')}><Trend rows={data.attendance.trend} today={data.attendance.today} /></Panel><Panel title="Academic Performance (Overall)" icon="performance" action="Open analytics" go={() => go('analytics')}><div className="principal-performance"><div className="performance-ring"><b>{p.average_cgpa}</b><span>Avg. CGPA</span></div><div className="performance-copy"><p><i className="blue" />Distinction: {p.bands.distinction}</p><p><i className="green" />First Class: {p.bands.first}</p><p><i className="orange" />Second Class: {p.bands.second}</p><div className="performance-minis"><Mini value={`${p.pass_rate ?? '—'}%`} label="Pass Rate"/><Mini value={p.at_risk} label="At Risk"/><Mini value={p.backlogs} label="Backlogs"/></div></div></div></Panel></div>
+    <div className="principal-grid principal-middle-grid"><Panel title="Examination Overview" icon="exam" action="Open Exams" go={() => go('examinations')}><Metrics values={[[data.examinations.assessments, 'Upcoming Exams', 'exam'], [data.examinations.marks_submitted, 'Marks Submitted', 'decision'], [data.examinations.pending_moderation, 'Pending Moderation', 'alert']]}/></Panel><Panel title="Student Welfare" icon="welfare" action="Open Welfare" go={() => go('grievance')}><Metrics values={[[data.welfare.at_risk, 'At Risk Students', 'risk'], [data.welfare.grievances, 'Open Grievances', 'welfare'], [data.welfare.discipline, 'Discipline Cases', 'alert'], [data.welfare.critical, 'Critical Welfare Cases', 'risk']]}/></Panel><Panel title="Campus Operations" icon="operations" action="Open Operations" go={() => go('assets')}><Metrics values={[[data.operations.maintenance, 'Maintenance Alerts', 'operations'], [data.operations.procurement, 'Procurement Pending', 'decision'], [data.operations.asset_requests, 'Asset Requests', 'assets'], [data.operations.facilities, 'Facilities Alerts', 'alert']]}/></Panel></div>
+    <div className="principal-grid principal-bottom-grid"><Panel title="Recent Notifications" icon="alert" action="View all" go={() => go('workflows')}><List rows={data.notifications} click={() => go('workflows')} empty="No notifications for this account." /></Panel><Panel title="Quick Access"><div className="principal-quick">{[['My Approvals','approvals','decision'],['Escalations','workflows','alert'],['Delegations','delegation','staff'],['Reports','analytics','performance'],['Campus Directory','directory','students'],['Audit','audit','exam']].map(([label,target,icon]) => <button key={label} onClick={() => go(target)}><b><DashboardIcon kind={icon}/></b>{label}</button>)}</div></Panel><Panel title="Academic Calendar" icon="attendance" action="View calendar" go={() => go('academic_calendar')}><p className="principal-empty">Selected: {year} · {studentSemester ? `Semester ${studentSemester}` : 'All Semesters'}</p></Panel></div>
   </div>
 }
-
 function Panel({ title, icon, action, go, children }: any) { return <section className="principal-panel"><header><h2>{icon && <span className="panel-title-icon"><DashboardIcon kind={icon} /></span>}{title}</h2>{action && <button onClick={go}>{action}</button>}</header>{children}</section> }
-function Metrics({ values }: any) { return <div className="principal-metric-grid">{values.map(([v, l, icon]: any[]) => <div key={l}><span className="metric-icon"><DashboardIcon kind={icon || 'decision'} /></span><b>{v == null ? 'Not recorded' : v}</b><span>{l}</span></div>)}</div> }
+function Metrics({ values }: any) { return <div className="principal-metric-grid">{values.map(([v,l,icon]: any[]) => <div key={l}><span className="metric-icon"><DashboardIcon kind={icon || 'decision'} /></span><b>{v == null ? '—' : v}</b><span>{l}</span></div>)}</div> }
 function Mini({ value, label }: any) { return <div><b>{value}</b><small>{label}</small></div> }
-function List({ rows, click, empty }: any) { return <div className="principal-decision-list">{rows.length ? rows.slice(0, 5).map((r: any) => <button className="principal-decision" key={r.id} onClick={click}><span className="decision-mark"><DashboardIcon kind={r.state ? 'decision' : 'alert'} /></span><span><b>{r.title}</b><small>{r.label || r.severity || 'Notification'}</small></span><em>{r.state || 'new'}</em></button>) : <p className="principal-empty">{empty}</p>}</div> }
-
-function Trend({ rows, today, todayRecords }: any) {
+function List({ rows, click, empty }: any) { return <div className="principal-decision-list">{rows.length ? rows.slice(0,5).map((r: any) => <button className="principal-decision" key={r.id} onClick={click}><span className="decision-mark"><DashboardIcon kind={r.state ? 'decision' : 'alert'} /></span><span><b>{r.title}</b><small>{r.label || r.severity || 'Notification'}</small></span><em>{r.state || 'new'}</em></button>) : <p className="principal-empty">{empty}</p>}</div> }
+function Trend({ rows, today }: any) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
   const points = rows.map((row: any, index: number) => ({ ...row, index, x: 16 + index * 54, y: row.value === null ? null : 170 - (Number(row.value) / 100) * 135 }))
   const line = points.filter((point: any) => point.y !== null).map((point: any, index: number) => `${index ? 'L' : 'M'} ${point.x} ${point.y}`).join(' ')
   const active = activeIndex === null ? null : points[activeIndex]
-  const todayText = today == null ? `Today: ${todayRecords} records submitted` : `Today: ${today}% from ${todayRecords} record${todayRecords === 1 ? '' : 's'}`
-  return <div className="principal-chart"><div className="chart-grid"/>{line ? <><div className={`attendance-detail${active ? ' visible' : ''}`} role="status" aria-live="polite">{active && <><b>{active.label}</b><span>{active.value}% student attendance</span><small>Monthly average</small></>}</div><svg className="attendance-svg" viewBox="0 0 300 190" preserveAspectRatio="none"><path d={line} /><path d={line} className="attendance-area" />{points.filter((point: any) => point.y !== null).map((point: any) => <g key={point.label} className={`attendance-point${activeIndex === point.index ? ' active' : ''}`} role="button" tabIndex={0} aria-label={`${point.label}: ${point.value}% student attendance`} onMouseEnter={() => setActiveIndex(point.index)} onFocus={() => setActiveIndex(point.index)} onClick={() => setActiveIndex(point.index)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveIndex(point.index) } }}><circle cx={point.x} cy={point.y} r="4"/><text x={point.x} y="187">{point.label}</text><text x={point.x} y={point.y - 9}>{point.value}%</text></g>)}</svg></> : <div className="chart-empty">No attendance has been recorded for the selected students and period.</div>}<div className="chart-legend"><span><DashboardIcon kind="attendance" /> {todayText} · monthly averages</span></div></div>
+  return <div className="principal-chart"><div className="chart-grid"/>{line ? <><div className={`attendance-detail${active ? ' visible' : ''}`} role="status" aria-live="polite">{active && <><b>{active.label}</b><span>{active.value}% student attendance</span><small>Monthly average</small></>}</div><svg className="attendance-svg" viewBox="0 0 300 190" preserveAspectRatio="none"><path d={line} /><path d={line} className="attendance-area" />{points.filter((point: any) => point.y !== null).map((point: any) => <g key={point.label} className={`attendance-point${activeIndex === point.index ? ' active' : ''}`} role="button" tabIndex={0} aria-label={`${point.label}: ${point.value}% student attendance`} onMouseEnter={() => setActiveIndex(point.index)} onFocus={() => setActiveIndex(point.index)} onClick={() => setActiveIndex(point.index)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveIndex(point.index) } }}><circle cx={point.x} cy={point.y} r="4"/><text x={point.x} y="187">{point.label}</text><text x={point.x} y={point.y - 9}>{point.value}%</text></g>)}</svg></> : <div className="chart-empty">No attendance has been recorded for this selection.</div>}<div className="chart-legend"><span><DashboardIcon kind="attendance" /> Today: {today == null ? 'No records' : `${today}%`} · monthly averages</span></div></div>
 }
 
 function DashboardIcon({ kind }: { kind: string }) {
