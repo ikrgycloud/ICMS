@@ -1023,7 +1023,8 @@ def _workflow_stage_offices(proc, stage):
                ("hr", {24, 25}), ("purchase", {32}), ("procurement", {32}),
                ("maintenance", {29}), ("system admin", {28}), ("security admin", {28}),
                ("store", {33}), ("warden", {30}), ("transport", {31}),
-               ("admissions", {15}), ("exam", {16}), ("hod", {10}), ("chairman", {1}))
+               ("admissions", {15}), ("exam", {16}), ("hod", {10}),
+               ("academic coordinator", {17}), ("chairman", {1}))
     stage_offices = set()
     for alternative in label.split("/"):
         for token, offices in mapping:
@@ -1360,7 +1361,7 @@ def _wf_payload(s, wf, proc):
     return {
         "id": wf.id, "process_key": wf.process_key, "label": wf.label,
         "office_n": wf.office_n, "title": wf.title, "state": wf.state,
-        "amount": wf.amount, "initiator": wf.initiator_name,
+        "amount": wf.amount, "initiator_id": wf.initiator_id, "initiator": wf.initiator_name,
         "current_stage": wf.current_stage, "escalated": wf.escalated,
         "scope_level": wf.scope_level,
         "request_student": request_student, "correction_id": correction_id,
@@ -1465,37 +1466,24 @@ def _visible_page_numbers(page: int, total_pages: int):
 @app.get("/api/workflows")
 def list_workflows(scope: str = "all", ctx=Depends(non_front_office), s=Depends(db)):
     q = s.query(WorkflowInstance).filter(WorkflowInstance.tenant_id == ctx.get("tenant_id", TENANT))
-    pending_states = ["submitted", "under_review", "reviewed", "escalated"]
     if scope == "mine":
         q = q.filter(WorkflowInstance.initiator_id == ctx["sub"])
         rows = q.order_by(desc(WorkflowInstance.updated_at)).limit(100).all()
         rows = (q.filter(WorkflowInstance.initiator_id == ctx["sub"])
                 .order_by(desc(WorkflowInstance.updated_at)).limit(100).all())
     elif scope == "inbox":
-        own_rows = (q.filter(WorkflowInstance.office_n == ctx["office_n"],
-                             WorkflowInstance.state.in_(pending_states))
-                     .order_by(desc(WorkflowInstance.updated_at)).all())
-        if ctx["office_n"] in (3, 4):
-            fee_rows = (q.filter(WorkflowInstance.process_key == "fee_structure",
-                                 WorkflowInstance.state.in_(pending_states))
-                        .order_by(desc(WorkflowInstance.updated_at)).all())
-            own_rows = list({row.id: row for row in [*own_rows, *fee_rows]}.values())
+        candidates = q.order_by(desc(WorkflowInstance.updated_at)).limit(250).all()
+        rows = [row for row in candidates if _workflow_visible_to(row, _workflow_process(row.process_key), ctx)]
         delegated = active_delegations_for(s, ctx["sub"])
-        if not delegated:
-            rows = own_rows[:100]
-        else:
-            candidate_rows = (s.query(WorkflowInstance)
-                              .filter(WorkflowInstance.state.in_(pending_states))
-                              .order_by(desc(WorkflowInstance.updated_at)).limit(220).all())
-            seen = {row.id for row in own_rows}
-            rows = list(own_rows)
-            for wf in candidate_rows:
+        if delegated:
+            seen = {row.id for row in rows}
+            for wf in candidates:
                 if wf.id in seen:
                     continue
                 if _delegation_matches_workflow(delegated, wf, ctx.get("scope_level", "individual")):
                     rows.append(wf)
                     seen.add(wf.id)
-            rows = sorted(rows, key=lambda item: item.updated_at or item.created_at, reverse=True)[:100]
+        rows = sorted(rows, key=lambda item: item.updated_at or item.created_at, reverse=True)[:100]
     else:
         candidates = q.order_by(desc(WorkflowInstance.updated_at)).limit(250).all()
         rows = [row for row in candidates if _workflow_visible_to(row, _workflow_process(row.process_key), ctx)][:100]

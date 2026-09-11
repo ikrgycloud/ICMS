@@ -28,7 +28,7 @@ from capabilities import (modules_for_office, module_meta, MODULE_ACTIONS,
 import domain_models as D
 from academic_scope import authorize_object, dean_scope_assignments, hierarchy
 from governance_engine import validate_transition
-from teaching import faculty_owns_section
+from teaching import active_allocations_for_faculty, faculty_owns_section
 from models import User, Person, OrgScope, WorkflowInstance, Notification
 
 router = APIRouter(prefix="/api")
@@ -1181,10 +1181,7 @@ def chairman_outstanding_fees(start: str = "", ctx=Depends(auth), s=Depends(db))
 # --------------------------------------------------------------------------- #
 #  CALENDAR HUB
 # --------------------------------------------------------------------------- #
-CALENDAR_ACADEMIC_EDITORS = {1, 2, 4, 5, 17}
-# Calendar changes are governed by the Dean.  Operational staff submit proposals;
-# the legacy CRUD routes below remain readable for already-published milestones.
-CALENDAR_ACADEMIC_EDITORS = {6}
+CALENDAR_ACADEMIC_EDITORS = {4, 17}
 # Calendar changes are operational requests. The Dean independently reviews
 # them and must never originate work that reaches their own approval queue.
 CALENDAR_PROPOSERS = {42}
@@ -1363,7 +1360,7 @@ class CalendarEventIn(BaseModel):
 
 
 class AcademicCalendarIn(BaseModel):
-    term: str
+    term: str = ""
     academic_year: str = ""
     program_id: str | None = None
     department_id: str | None = None
@@ -1777,7 +1774,7 @@ def decide_academic_calendar_proposal(proposal_id: str, decision: str, body: Aca
 
 @router.get("/academic-calendar")
 def academic_calendar(term: str = "", academic_year: str = "", program_id: str = "", department_id: str = "", student_year: int | None = None, ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academic_calendar", "view", governance=True)[0])
+    require(gate(s, ctx, "academic_calendar", "view")[0])
     term_rows = (s.query(D.AcademicCalendarEntry.term)
                  .filter(D.AcademicCalendarEntry.status != "deleted")
                  .distinct().order_by(D.AcademicCalendarEntry.term.desc()).all())
@@ -1859,8 +1856,8 @@ def create_academic_calendar_entry(body: AcademicCalendarIn, ctx=Depends(auth), 
     require(dec)
     if ctx["office_n"] not in CALENDAR_ACADEMIC_EDITORS:
         raise HTTPException(403, "This office cannot manage the academic calendar")
-    if not body.title.strip() or not body.term.strip() or not body.academic_year.strip():
-        raise HTTPException(422, "Academic year, term, and title are required")
+    if not body.title.strip():
+        raise HTTPException(422, "Event title is required")
     start = date.fromisoformat(body.start_date)
     end = date.fromisoformat(body.end_date) if body.end_date else start
     if end < start:
@@ -3132,6 +3129,12 @@ def _course_offering_payload(s, row):
     allocations = s.query(D.FacultyAllocation).filter(
         D.FacultyAllocation.section_id.in_(section_ids) if section_ids else text("1=0")
     ).all()
+    offering_allocations = s.query(D.FacultyAllocation).filter(
+        D.FacultyAllocation.tenant_id == TENANT,
+        D.FacultyAllocation.section_id.is_(None),
+        D.FacultyAllocation.term == row.term,
+    ).all()
+    allocations = [a for a in allocations + offering_allocations if a.term == row.term]
     section_capacity = sum(x.capacity or 0 for x in sections)
     faculty_complete = bool(hod and len([a for a in allocations if str(a.status).upper() in {"ASSIGNED", "CONFIRMED", "APPROVED"}]) >= hod.required_faculty_count)
     sections_defined = bool(hod and len(sections) >= hod.required_sections and section_capacity >= hod.expected_capacity)
@@ -3230,6 +3233,30 @@ def create_faculty_allocation(offering_id: str, body: FacultyAllocationIn, ctx=D
     s.add(row); s.commit(); return {"id": row.id, "status": row.status, "decision": dec.as_dict()}
 
 
+@router.put("/academics/course-offerings/{offering_id}/faculty-allocations/{allocation_id}")
+def update_faculty_allocation(offering_id: str, allocation_id: str, body: FacultyAllocationIn, ctx=Depends(auth), s=Depends(db)):
+    dec, _ = gate(s, ctx, "academics", "assign_faculty"); require(dec)
+    offering = s.query(D.CourseOffering).filter_by(id=offering_id, tenant_id=TENANT).first()
+    faculty = s.get(D.StaffMember, body.faculty_id)
+    row = s.query(D.FacultyAllocation).filter_by(id=allocation_id, tenant_id=TENANT).first()
+    if not offering or not faculty or not row or row.term != offering.term:
+        raise HTTPException(404, "Offering, allocation, or faculty not found")
+    if body.section_id and not s.query(D.Section).filter_by(id=body.section_id, offering_id=offering_id, course_id=offering.course_id).first():
+        raise HTTPException(400, "Section does not belong to this offering")
+    duplicate = s.query(D.FacultyAllocation).filter(
+        D.FacultyAllocation.tenant_id == TENANT,
+        D.FacultyAllocation.id != allocation_id,
+        D.FacultyAllocation.section_id == (body.section_id or None),
+        D.FacultyAllocation.faculty_person_id == body.faculty_id,
+        D.FacultyAllocation.status.in_(["PROPOSED", "APPROVED"]),
+    ).first()
+    if duplicate:
+        raise HTTPException(409, "Faculty is already assigned to this section")
+    row.faculty_person_id, row.section_id, row.updated_by, row.updated_at = body.faculty_id, body.section_id or None, ctx["sub"], datetime.utcnow()
+    s.commit()
+    return {"id": row.id, "status": row.status, "decision": dec.as_dict()}
+
+
 @router.get("/academics/course-offerings/{offering_id}/readiness")
 def course_offering_readiness(offering_id: str, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view")[0]); offering = s.query(D.CourseOffering).filter_by(id=offering_id).first()
@@ -3310,6 +3337,20 @@ def curriculum_execution(academic_year: str = "", student_year: int | None = Non
     require(gate(s, ctx, "academics", "view")[0])
     rows = s.query(D.CourseOffering).filter_by(tenant_id=TENANT).order_by(desc(D.CourseOffering.updated_at)).all()
     items = [_execution_payload(s, row) for row in rows if _offering_in_academic_scope(s, row, ctx)]
+    if ctx["office_n"] in {11, 12, 13, 14}:
+        staff = s.query(D.StaffMember).filter_by(user_id=ctx["sub"], tenant_id=TENANT).first()
+        section_ids = {x.section_id for x in active_allocations_for_faculty(s, staff.id)} if staff else set()
+        items = [x for x in items if any(section.offering_id == x["id"] and section.id in section_ids for section in s.query(D.Section).filter(D.Section.offering_id == x["id"]).all())]
+    elif ctx["office_n"] == 36:
+        student = s.query(D.Student).filter(or_(D.Student.user_id == ctx["sub"], D.Student.id == ctx.get("scope_ref"))).first()
+        enrolled_offering_ids = set()
+        if student:
+            enrolled_sections = s.query(D.Section).join(D.Enrollment, D.Enrollment.section_id == D.Section.id).filter(
+                D.Enrollment.student_id == student.id,
+                D.Enrollment.status == "enrolled",
+            ).all()
+            enrolled_offering_ids = {section.offering_id for section in enrolled_sections if section.offering_id}
+        items = [x for x in items if x["id"] in enrolled_offering_ids and x.get("student_year") == ((int(student.semester) + 1) // 2 if student and student.semester else None)]
     items = [x for x in items if (not academic_year or x.get("academic_year") == academic_year) and (not student_year or x.get("student_year") == student_year) and (not program_id or x.get("program_id") == program_id) and (not department_id or x.get("department_id") == department_id) and (not term or x.get("term") == term) and (not faculty_id or any(str(a.get("faculty_id")) == str(faculty_id) for a in x.get("faculty_allocations", []))) and (not execution_status or x.get("execution_status") == execution_status)]
     return {"items": items, "can_manage": can(s, ctx, "academics", "edit"), "summary": {k: sum(1 for x in items if x["execution_status"] == v) for k,v in {"total":"__all__","not_started":"Not Started","in_progress":"In Progress","on_track":"On Track","delayed":"Delayed","completed":"Completed","gap":"Gap / Issue"}.items()}}
 
@@ -3380,6 +3421,12 @@ def list_course_offerings(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view")[0])
     rows = s.query(D.CourseOffering).filter_by(tenant_id=TENANT).order_by(D.CourseOffering.academic_year.desc(), D.CourseOffering.semester, D.CourseOffering.id).all()
     rows = [row for row in rows if _offering_in_academic_scope(s, row, ctx)]
+    if ctx["office_n"] in {11, 12, 13, 14}:
+        staff = s.query(D.StaffMember).filter_by(user_id=ctx["sub"], tenant_id=TENANT).first()
+        section_ids = {x.section_id for x in active_allocations_for_faculty(s, staff.id)} if staff else set()
+        rows = [row for row in rows if s.query(D.Section.id).filter(D.Section.offering_id == row.id, D.Section.id.in_(section_ids)).first()]
+    elif ctx["office_n"] == 36:
+        rows = []
     return {"offerings": [_course_offering_payload(s, row) for row in rows],
             "can_create": can(s, ctx, "academics", "create_course"), "can_edit": can(s, ctx, "academics", "edit"),
             "can_approve": False, "can_publish": False}
@@ -3452,6 +3499,14 @@ def list_sections(ctx=Depends(auth), s=Depends(db)):
     course_map = {c.id: (c.code, c.title, c.semester) for c in scoped_academic_query(s, D.Course, ctx).all()}
     fac_map = {f.id: f.name for f in s.query(D.StaffMember).filter(D.StaffMember.tenant_id == ctx["tenant_id"]).all()}
     section_query = scoped_academic_query(s, D.Section, ctx)
+    if ctx["office_n"] in {11, 12, 13, 14}:
+        staff = s.query(D.StaffMember).filter_by(user_id=ctx["sub"], tenant_id=TENANT).first()
+        section_ids = {x.section_id for x in active_allocations_for_faculty(s, staff.id)} if staff else set()
+        section_query = section_query.filter(D.Section.id.in_(section_ids)) if section_ids else section_query.filter(text("1=0"))
+    elif ctx["office_n"] == 36:
+        student = s.query(D.Student).filter(or_(D.Student.user_id == ctx["sub"], D.Student.id == ctx.get("scope_ref"))).first()
+        section_ids = [x.section_id for x in s.query(D.Enrollment).filter_by(student_id=student.id, status="enrolled").all()] if student else []
+        section_query = section_query.filter(D.Section.id.in_(section_ids)) if section_ids else section_query.filter(text("1=0"))
     rows = section_query.limit(200).all()
     out = []
     for r in rows:
@@ -3513,6 +3568,15 @@ def create_section(body: SectionIn, ctx=Depends(auth), s=Depends(db)):
 def section_timetable(section_id: str, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view")[0])
     section = require_academic_object(s, ctx, _section_or_404(s, section_id), "read", "Section")
+    if ctx["office_n"] in {11, 12, 13, 14}:
+        staff = s.query(D.StaffMember).filter_by(user_id=ctx["sub"], tenant_id=TENANT).first()
+        if not staff or not any(row.section_id == section.id for row in active_allocations_for_faculty(s, staff.id)):
+            raise HTTPException(403, "Not your section")
+    elif ctx["office_n"] == 36:
+        student = s.query(D.Student).filter(or_(D.Student.user_id == ctx["sub"], D.Student.id == ctx.get("scope_ref"))).first()
+        enrolled = s.query(D.Enrollment).filter_by(student_id=student.id, section_id=section.id, status="enrolled").first() if student else None
+        if not enrolled:
+            raise HTTPException(403, "Section is not assigned to this student")
     rows = (s.query(D.TimetableEntry)
             .filter(D.TimetableEntry.section_id == section.id)
             .order_by(D.TimetableEntry.day_of_week, D.TimetableEntry.start_time).all())
@@ -4005,7 +4069,6 @@ def _announcement_payload(s, row):
 
 @router.get("/academics/announcements")
 def list_academic_announcements(ctx=Depends(auth), s=Depends(db)):
-    require(gate(s, ctx, "academics", "view")[0])
     rows = s.query(D.Announcement).filter_by(tenant_id=TENANT).order_by(desc(D.Announcement.created_at)).all()
     return {"announcements": [_announcement_payload(s, row) for row in rows],
             "can_publish": can(s, ctx, "academics", "publish_announcement")}
@@ -6567,7 +6630,40 @@ def live_transport_location(vehicle_id: str, ctx=Depends(auth), s=Depends(db)):
 def my_transport_allocation(ctx=Depends(auth), s=Depends(db)):
     student=s.query(D.Student).filter(or_(D.Student.user_id==ctx["sub"],D.Student.id==ctx.get("scope_ref"))).first()
     a=s.query(D.TransportAllocation).filter(D.TransportAllocation.student_id==student.id,D.TransportAllocation.status=="active").first() if student else None
-    return {"allocation": {"id":a.id,"student_id":a.student_id,"route_id":a.route_id,"pickup_stop_id":a.stop_id,"vehicle_id":a.vehicle_id,"status":a.status} if a else None}
+    if not a:
+        return {"allocation": None}
+    vehicle = s.get(D.TransportVehicle, a.vehicle_id)
+    driver_id = a.driver_id or (vehicle.driver_id if vehicle else None)
+    driver = s.get(D.TransportDriver, driver_id) if driver_id else None
+    route = s.get(D.TransportRoute, a.route_id)
+    pickup = s.get(D.TransportStop, a.stop_id) if a.stop_id else None
+    route_stops = s.query(D.TransportStop).filter(
+        D.TransportStop.route_id == a.route_id
+    ).order_by(D.TransportStop.sequence).all()
+    return {"allocation": {
+        "id": a.id,
+        "student_id": a.student_id,
+        "route_id": a.route_id,
+        "route": route.name if route else a.route_id,
+        "pickup_stop_id": a.stop_id,
+        "pickup": pickup.name if pickup else "",
+        "pickup_time": pickup.pickup_time if pickup else "",
+        "vehicle_id": a.vehicle_id,
+        "vehicle": vehicle.number if vehicle else a.vehicle_id,
+        "vehicle_status": vehicle.status if vehicle else "",
+        "driver_id": driver_id,
+        "driver": driver.name if driver else "",
+        "driver_phone": driver.phone if driver else "",
+        "route_stops": [{
+            "id": stop.id,
+            "name": stop.name,
+            "sequence": stop.sequence,
+            "address": stop.address,
+            "pickup_time": stop.pickup_time,
+            "drop_time": stop.drop_time,
+        } for stop in route_stops],
+        "status": a.status,
+    }}
 
 @router.get("/transport/driver-dashboard")
 def transport_driver_dashboard(ctx=Depends(auth), s=Depends(db)):

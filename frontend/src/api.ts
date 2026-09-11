@@ -356,6 +356,7 @@ export const api = {
   submitHodInput: (id: string) => req(`/academics/course-offerings/${id}/hod-input/submit`, { method: 'POST' }),
   facultyAllocations: (id: string) => req(`/academics/course-offerings/${id}/faculty-allocations`),
   createFacultyAllocation: (id: string, body: any) => req(`/academics/course-offerings/${id}/faculty-allocations`, { method: 'POST', body: JSON.stringify(body) }),
+  updateFacultyAllocation: (offeringId: string, allocationId: string, body: any) => req(`/academics/course-offerings/${offeringId}/faculty-allocations/${allocationId}`, { method: 'PUT', body: JSON.stringify(body) }),
   hodInput: (id: string) => req(`/academics/course-offerings/${id}/hod-input`),
   courseOfferingReadiness: (id: string) => req(`/academics/course-offerings/${id}/readiness`),
   curriculumExecution: (filters: any = {}) => { const q = new URLSearchParams(); Object.entries(filters).forEach(([k, v]) => { if (v !== '' && v !== undefined && v !== null) q.set(k, String(v)); }); const qs = q.toString(); return req(`/academics/curriculum-execution${qs ? `?${qs}` : ''}`); },
@@ -637,6 +638,7 @@ export const api = {
   whoami: () => req('/portal/whoami'),
   studentHome: () => req('/portal/student/home'),
   studentCourses: () => req('/portal/student/courses'),
+  studentCurriculumExecution: () => req('/portal/student/curriculum-execution'),
   updateStudentCourseView: (sectionId: string, body: any) =>
     req(`/portal/student/courses/${sectionId}/view`, { method: 'PUT', body: JSON.stringify(body) }),
   studentAttendance: () => req('/portal/student/attendance'),

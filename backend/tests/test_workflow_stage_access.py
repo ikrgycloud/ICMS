@@ -50,6 +50,11 @@ class WorkflowStageAccessTests(unittest.TestCase):
         self.assertEqual(_workflow_stage_offices({"chain": ["Vice Principal"]}, 0), {5})
         self.assertEqual(_workflow_stage_offices({"chain": ["Unknown"]}, 0), set())
 
+    def test_academic_coordinator_request_routes_to_hod_only(self):
+        proc = {"chain": ["Academic Coordinator", "HOD"]}
+        self.assertEqual(_workflow_stage_offices(proc, 1), {10})
+        self.assertEqual(_workflow_stage_offices(proc, 2), set())
+
     def test_other_tenant_cannot_read(self):
         with self.assertRaises(HTTPException) as error:
             get_workflow("fee_request", {**self.ctx, "tenant_id": "other"}, self.session)

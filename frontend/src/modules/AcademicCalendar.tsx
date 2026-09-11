@@ -120,6 +120,7 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
   const canCreate = !!(data?.permissions?.create && (caps?.create || user?.office_n === 17)),
     canEdit = !!(data?.permissions?.edit && caps?.edit),
     canDelete = !!(data?.permissions?.delete && caps?.delete);
+  const showCreate = user?.office_n === 4 || user?.office_n === 17;
   const examConflicts = useMemo(() => {
     const exams = (data?.entries || []).filter((x: any) =>
       /exam/i.test(x.category),
@@ -259,7 +260,7 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
         sub="Institution-wide academic dates, examinations, teaching periods, holidays, and academic milestones."
         right={
           <div className="calendar-head-actions academic-filter-bar">
-            <button
+            {showCreate && <button
               className="btn btn-crimson"
               type="button"
               onClick={() => {
@@ -270,7 +271,7 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
               }}
             >
               Add academic event
-            </button>
+            </button>}
             <button className="btn btn-out" onClick={() => setFiltersOpen((open) => !open)}>
               {filtersOpen ? "Hide filters" : "Filters"}
             </button>

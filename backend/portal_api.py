@@ -34,6 +34,7 @@ from core import auth, db, uid, write_audit
 from database import TENANT, office
 import domain_models as D
 from models import User, Notification
+from teaching import faculty_active_sections
 
 router = APIRouter(prefix="/api/portal")
 
@@ -2426,6 +2427,37 @@ def student_courses(ctx=Depends(auth), s=Depends(db)):
     return _student_academics_payload(s, st)
 
 
+@router.get("/student/curriculum-execution")
+def student_curriculum_execution(ctx=Depends(auth), s=Depends(db)):
+    st = _student_or_404(s, ctx)
+    enrollments = _student_current_enrollments(s, st)
+    sections = _student_sections(s, enrollments)
+    current_year = (int(st.semester) + 1) // 2 if st.semester else None
+    items = []
+    for enrollment in enrollments:
+        section = sections.get(enrollment.section_id)
+        offering = s.get(D.CourseOffering, section.offering_id) if section and section.offering_id else None
+        course = s.get(D.Course, section.course_id) if section else None
+        if not offering or not course or (current_year and ((int(offering.semester) + 1) // 2) != current_year):
+            continue
+        items.append({
+            "id": offering.id,
+            "course_code": course.code,
+            "course_title": course.title,
+            "academic_year": offering.academic_year,
+            "term": offering.term,
+            "semester": offering.semester,
+            "course_start_date": offering.course_start_date.isoformat() if offering.course_start_date else "",
+            "expected_completion_date": offering.expected_completion_date.isoformat() if offering.expected_completion_date else "",
+            "execution_status": offering.execution_status or "Not Started",
+            "execution_remarks": offering.execution_remarks or "",
+            "section": section.section_code,
+            "schedule": section.schedule or "",
+            "room": section.room or "",
+        })
+    return {"student_year": current_year, "items": items}
+
+
 @router.put("/student/courses/{section_id}/view")
 def update_student_course_view(section_id: str, body: StudentCourseViewUpdateIn, ctx=Depends(auth), s=Depends(db)):
     st = _student_or_404(s, ctx)
@@ -3837,7 +3869,7 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
 @router.get("/faculty/sections")
 def faculty_sections(ctx=Depends(auth), s=Depends(db)):
     stf = _staff_or_404(s, ctx)
-    sections = s.query(D.Section).filter(D.Section.faculty_person_id == stf.id).all()
+    sections = [section for section in faculty_active_sections(s, stf.id) if not stf.dept_id or section.dept_id == stf.dept_id]
     course_map = {row.id: row for row in s.query(D.Course).all()}
     out = []
     for section in sections:
@@ -3871,7 +3903,7 @@ def faculty_schedule(ctx=Depends(auth), s=Depends(db)):
     courses = {row.id: row for row in s.query(D.Course).all()}
     days = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
     events = []
-    sections = s.query(D.Section).filter(D.Section.faculty_person_id == stf.id).all()
+    sections = [section for section in faculty_active_sections(s, stf.id) if not stf.dept_id or section.dept_id == stf.dept_id]
     for section in sections:
         parts = (section.schedule or "").split(maxsplit=1); names = parts[0] if parts else ""; class_time = parts[1] if len(parts) > 1 else "Time pending"
         course = courses.get(section.course_id)

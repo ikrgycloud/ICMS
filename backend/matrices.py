@@ -140,6 +140,9 @@ APPROVAL_MATRIX = [
     {"key": "branch_creation", "label": "Branch creation / closure", "office_n": 1,
      "chain": ["Chairman/VC", "VC", "Chairman", "Chairman"],
      "escalation": "—", "amount": False},
+    {"key": "academic_coordinator_message", "label": "Request to Academic Coordinator", "office_n": 17,
+     "chain": ["Academic Coordinator", "HOD"],
+     "escalation": "—", "amount": False},
 ]
 
 # Workflow states every request moves through (Document §7, office workflow images).

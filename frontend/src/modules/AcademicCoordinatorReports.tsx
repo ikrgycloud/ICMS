@@ -1,32 +1,71 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
-import { Empty, PageHead, Pill, Spinner } from "./kit";
+import { Empty, PageHead, Spinner } from "./kit";
 
-type Filters = { academicYear: string; term: string; semester: string; year: string; branch: string; program: string; department: string; course: string; status: string };
-const initialFilters: Filters = { academicYear: "", term: "", semester: "", year: "", branch: "", program: "", department: "", course: "", status: "" };
-const label = (year: string) => year === "1" ? "1st Year" : year === "2" ? "2nd Year" : year === "3" ? "3rd Year" : year === "4" ? "4th Year" : year;
-const pct = (value: any) => value == null || value === "" ? "—" : `${value}%`;
+type Filters = {
+  academicYear: string;
+  term: string;
+  semester: string;
+  year: string;
+  branch: string;
+  program: string;
+  department: string;
+  course: string;
+  status: string;
+};
 
-export default function AcademicCoordinatorReports({ onNavigate }: { onNavigate?: (view: string) => void }) {
+const initialFilters: Filters = {
+  academicYear: "",
+  term: "",
+  semester: "",
+  year: "",
+  branch: "",
+  program: "",
+  department: "",
+  course: "",
+  status: "",
+};
+
+export default function AcademicCoordinatorReports() {
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState("");
   const [filters, setFilters] = useState<Filters>(initialFilters);
   const [filtersOpen, setFiltersOpen] = useState(true);
+  const [previewReport, setPreviewReport] = useState<any>(null);
 
   useEffect(() => {
     Promise.allSettled([
-      api.academicPrograms(), api.courseOfferings(), api.sections(), api.timetablePlans(),
-      api.academicConflicts(), api.classSessions(), api.curriculumExecution(),
-      api.academicCalendar(), api.academicAnnouncements(),
-    ]).then((results: any[]) => {
-      const value = results.map((result) => result.status === "fulfilled" ? result.value : {});
-      setData({ programs: value[0]?.programs || [], offerings: value[1]?.offerings || [], sections: value[2]?.sections || [], plans: value[3]?.plans || [], conflicts: value[4]?.conflicts || [], sessions: value[5]?.sessions || [], execution: value[6]?.items || [], calendar: value[7]?.entries || [], notices: value[8]?.announcements || [] });
-    }).catch((e: any) => setError(e.message || "Unable to load reports"));
+      api.academicPrograms(),
+      api.courseOfferings(),
+      api.sections(),
+      api.timetablePlans(),
+      api.academicConflicts(),
+      api.classSessions(),
+      api.curriculumExecution(),
+      api.academicCalendar(),
+      api.academicAnnouncements(),
+    ])
+      .then((results: any[]) => {
+        const value = results.map((result) => (result.status === "fulfilled" ? result.value : {}));
+        setData({
+          programs: value[0]?.programs || [],
+          offerings: value[1]?.offerings || [],
+          sections: value[2]?.sections || [],
+          plans: value[3]?.plans || [],
+          conflicts: value[4]?.conflicts || [],
+          sessions: value[5]?.sessions || [],
+          execution: value[6]?.items || [],
+          calendar: value[7]?.entries || [],
+          notices: value[8]?.announcements || [],
+        });
+      })
+      .catch((e: any) => setError(e.message || "Unable to load reports"));
   }, []);
 
   const options = useMemo(() => {
-    if (!data) return {};
-    const execution = data.execution;
+    if (!data) return {} as any;
+    const execution = data.execution || [];
+
     return {
       academicYear: unique(execution.map((x: any) => x.academic_year)),
       term: unique(execution.map((x: any) => x.term)),
@@ -36,144 +75,1166 @@ export default function AcademicCoordinatorReports({ onNavigate }: { onNavigate?
       program: unique(execution.map((x: any) => x.program_code || x.program)),
       department: unique(execution.map((x: any) => x.department)),
       course: unique(execution.map((x: any) => x.course_code)),
-      status: unique([...execution.map((x: any) => x.execution_status), ...data.plans.map((x: any) => x.status)]),
+      status: unique([
+        ...execution.map((x: any) => x.execution_status),
+        ...data.plans.map((x: any) => x.status),
+      ]),
     };
   }, [data]);
 
   const filtered = useMemo(() => {
     if (!data) return null;
+
     const matches = (row: any) => {
       const year = String(row.student_year || Math.ceil(Number(row.semester || 1) / 2));
       const branch = row.program_code || row.program || "";
-      return (!filters.academicYear || row.academic_year === filters.academicYear) && (!filters.term || row.term === filters.term) && (!filters.semester || String(row.semester) === filters.semester) && (!filters.year || year === filters.year) && (!filters.branch || branch === filters.branch) && (!filters.program || branch === filters.program) && (!filters.department || row.department === filters.department) && (!filters.course || row.course_code === filters.course) && (!filters.status || row.execution_status === filters.status);
+      return (
+        (!filters.academicYear || row.academic_year === filters.academicYear) &&
+        (!filters.term || row.term === filters.term) &&
+        (!filters.semester || String(row.semester) === filters.semester) &&
+        (!filters.year || year === filters.year) &&
+        (!filters.branch || branch === filters.branch) &&
+        (!filters.program || branch === filters.program) &&
+        (!filters.department || row.department === filters.department) &&
+        (!filters.course || row.course_code === filters.course) &&
+        (!filters.status || row.execution_status === filters.status)
+      );
     };
+
     const execution = data.execution.filter(matches);
     const ids = new Set(execution.map((row: any) => row.id));
-    const sections = data.sections.filter((row: any) => !filters.course || row.course_code === filters.course).filter((row: any) => !filters.program || row.program_code === filters.program || row.program === filters.program);
+    const sections = data.sections
+      .filter((row: any) => !filters.course || row.course_code === filters.course)
+      .filter(
+        (row: any) => !filters.program || row.program_code === filters.program || row.program === filters.program,
+      );
+
     const offeringIds = new Set(execution.map((row: any) => row.id));
     const plans = data.plans.filter((plan: any) => offeringIds.has(plan.offering_id) || !filters.course);
     const conflicts = data.conflicts.filter((conflict: any) => !filters.status || conflict.status === filters.status);
     const sessions = data.sessions.filter((session: any) => ids.has(session.offering_id) || !filters.course);
-    const calendar = data.calendar.filter((row: any) => (!filters.academicYear || row.academic_year === filters.academicYear) && (!filters.term || row.term === filters.term) && (!filters.department || row.department_id === filters.department));
-    return { execution, sections, plans, conflicts, sessions, calendar, notices: data.notices };
+    const calendar = data.calendar.filter(
+      (row: any) =>
+        (!filters.academicYear || row.academic_year === filters.academicYear) &&
+        (!filters.term || row.term === filters.term) &&
+        (!filters.department || row.department_id === filters.department),
+    );
+
+    return { execution, sections, plans, conflicts, sessions, calendar };
   }, [data, filters]);
 
-  if (!data || !filtered) return error ? <div className="calendar-banner warn">{error}</div> : <Spinner />;
-  const activeConflicts = filtered.conflicts.filter((row: any) => !["Resolved", "resolved"].includes(row.status));
-  const readyOfferings = filtered.execution.filter((row: any) => row.readiness?.ready).length;
-  const scheduled = filtered.execution.filter((row: any) => row.timetable_readiness === "Ready").length;
-  const completed = filtered.execution.filter((row: any) => row.execution_status === "Completed").length;
-  const facultyReady = filtered.execution.filter((row: any) => row.faculty_readiness === "Ready").length;
-  const workflow = [
-    ["Course Offerings", filtered.execution.length, "coordinator_course_offerings"],
-    ["HOD Input", filtered.execution.filter((row: any) => row.hod_input?.status === "Submitted").length, "coordinator_course_offerings"],
-    ["Faculty Allocation", facultyReady, "coordinator_course_offerings"],
-    ["Sections", filtered.sections.length, "coordinator_sections"],
-    ["Timetable", scheduled, "coordinator_sections"],
-    ["HOD Review", filtered.plans.filter((row: any) => row.status === "HOD Review").length, "coordinator_requests"],
-    ["VP Review", filtered.plans.filter((row: any) => row.status === "VP Review").length, "coordinator_requests"],
-    ["Approved", filtered.plans.filter((row: any) => row.status === "Approved").length, "coordinator_requests"],
-    ["Published", filtered.plans.filter((row: any) => row.status === "Published").length, "coordinator_requests"],
+  if (!data || !filtered) {
+    return error ? <div className="calendar-banner warn">{error}</div> : <Spinner />;
+  }
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const totalReports = filtered.execution.length + filtered.plans.length + filtered.calendar.length + filtered.conflicts.length;
+  const readyToDownload = filtered.plans.filter((row: any) => ["Approved", "Published"].includes(row.status)).length;
+  const pendingInputs = filtered.plans.filter((row: any) => ["Draft", "HOD Returned", "VP Returned"].includes(row.status)).length;
+  const unresolvedConflicts = filtered.conflicts.filter(
+    (row: any) => !["Resolved", "resolved"].includes(row.status),
+  ).length;
+
+  const upcomingEvents = filtered.calendar.filter((row: any) => {
+    const date = row.start_date || row.date;
+    if (!date) return false;
+    return new Date(date) >= today;
+  }).length;
+
+  const completedThisYear = filtered.calendar.filter((row: any) => {
+    const date = row.start_date || row.date;
+    const status = String(row.status || "").toLowerCase();
+    if (!(status === "completed" || status === "complete") || !date) return false;
+    return new Date(date).getFullYear() === new Date().getFullYear();
+  }).length;
+
+  const totalOfferings = filtered.execution.length;
+  const facultyAllocated = filtered.execution.filter((row: any) => row.faculty && String(row.faculty).trim()).length;
+
+  const programRows = summaryRows(
+    filtered.execution,
+    (row: any) => row.program_code || row.program || "Unknown",
+  );
+
+  const timetableRows = summaryRows(
+    filtered.plans,
+    (row: any) => row.status || "Unknown",
+  );
+
+  const eventRows = summaryRows(
+    filtered.calendar,
+    (row: any) => row.category || "General",
+  );
+
+  const curriculumRows = summaryRows(
+    filtered.execution,
+    (row: any) => row.execution_status || "Unknown",
+  );
+
+  const conflictRows = summaryRows(
+    filtered.conflicts,
+    (row: any) => row.severity || "Unknown",
+  );
+
+  const requestRows = summaryRows(
+    filtered.plans,
+    (row: any) => row.status || "Unknown",
+  );
+
+  const reportRows = [
+    {
+      name: "Academic Calendar Report",
+      type: "academic-calendar",
+      category: "Calendar",
+      scope: "Academic Coordinator",
+      updated: latestDate(filtered.calendar),
+      status: filtered.calendar.length ? "Ready" : "No data",
+      formats: ["PDF", "Excel"],
+      icon: "🗓️",
+      colors: ["#dff0ff", "#edf7ff"],
+    },
+    {
+      name: "Course Offerings Report",
+      type: "course-offerings",
+      category: "Courses & Sections",
+      scope: "Academic Coordinator",
+      updated: latestDate(filtered.execution),
+      status: filtered.execution.length ? "Ready" : "No data",
+      formats: ["PDF", "Excel"],
+      icon: "📚",
+      colors: ["#ebf8f4", "#edf7ff"],
+    },
+    {
+      name: "Faculty Allocation Report",
+      type: "faculty-allocation",
+      category: "Faculty & Workload",
+      scope: "Academic Coordinator",
+      updated: latestDate(filtered.execution),
+      status: filtered.execution.length ? "Ready" : "No data",
+      formats: ["PDF", "Excel"],
+      icon: "👥",
+      colors: ["#fceae8", "#fff3ed"],
+    },
+    {
+      name: "Timetable Report",
+      type: "timetable-report",
+      category: "Timetable",
+      scope: "Academic Coordinator",
+      updated: latestDate(filtered.plans),
+      status: filtered.plans.length ? "Ready" : "No data",
+      formats: ["PDF", "Excel"],
+      icon: "🧭",
+      colors: ["#f5f0ff", "#eef7ff"],
+    },
+    {
+      name: "Curriculum Execution Report",
+      type: "curriculum-execution",
+      category: "Curriculum",
+      scope: "Academic Coordinator",
+      updated: latestDate(filtered.execution),
+      status: filtered.execution.length ? "Ready" : "No data",
+      formats: ["PDF", "Excel"],
+      icon: "📘",
+      colors: ["#ecfdf5", "#edf7ff"],
+    },
+    {
+      name: "Conflict Summary Report",
+      type: "conflict-summary",
+      category: "Readiness & Exceptions",
+      scope: "Academic Coordinator",
+      updated: latestDate(filtered.conflicts),
+      status: filtered.conflicts.length ? "Ready" : "No data",
+      formats: ["PDF", "Excel"],
+      icon: "⚠️",
+      colors: ["#fff3ee", "#fdf3ff"],
+    },
   ];
 
-  return <div className="fade-in reports-page">
-    <style>{styles}</style>
-    <PageHead title="Academic Operations Reports" sub="Read-only operational view of the academic delivery chain." right={<button className="btn btn-out" onClick={() => window.print()}>Print report</button>} />
+  const handleViewReport = (report: any) => {
+    const nextPreview = buildReportPreview(report, filtered);
+    setPreviewReport(nextPreview);
 
-    <div className="print-report">
-      <h1>Academic Coordinator Reports</h1>
-      <p className="print-meta">Generated {new Date().toLocaleDateString()} · Filtered academic operations summary</p>
-      <PrintSection title="Curriculum completion">
-        <PrintTable headers={["Course", "Title", "Expected completion", "Actual completion", "Progress", "Status"]}>
-          {filtered.execution.map((row: any) => <tr key={`print-execution-${row.id}`}><td>{row.course_code || "—"}</td><td>{row.course_title || "—"}</td><td>{row.expected_completion_date || "—"}</td><td>{row.actual_completion_date || "—"}</td><td>{row.progress || 0}%</td><td>{row.execution_status || "—"}</td></tr>)}
-        </PrintTable>
-      </PrintSection>
-      <PrintSection title="Section readiness">
-        <PrintTable headers={["Course", "Program", "Required sections", "Created sections", "Readiness"]}>
-          {filtered.execution.map((row: any) => <tr key={`print-section-${row.id}`}><td>{row.course_code || "—"}</td><td>{row.program_code || row.program || "—"}</td><td>{row.section_readiness?.required_sections || 0}</td><td>{row.section_readiness?.created_sections || 0}</td><td>{row.section_readiness?.status || (row.section_readiness?.created_sections >= row.section_readiness?.required_sections ? "Ready" : "In progress")}</td></tr>)}
-        </PrintTable>
-      </PrintSection>
-      <PrintSection title="Faculty allocation">
-        <PrintTable headers={["Course", "Faculty", "Allocation status"]}>
-          {filtered.execution.map((row: any) => <tr key={`print-faculty-${row.id}`}><td>{row.course_code || "—"}</td><td>{row.faculty || "No faculty assigned"}</td><td>{row.faculty_readiness || "Not Ready"}</td></tr>)}
-        </PrintTable>
-      </PrintSection>
-      <PrintSection title="Timetable operations">
-        <PrintTable headers={["Metric", "Count", "Details"]}>
-          <tr><td>Scheduled offerings</td><td>{scheduled}</td><td>Ready for timetable</td></tr>
-          <tr><td>Draft / returned plans</td><td>{filtered.plans.filter((row: any) => ["Draft", "HOD Returned", "VP Returned"].includes(row.status)).length}</td><td>Needs work</td></tr>
-          <tr><td>Published plans</td><td>{filtered.plans.filter((row: any) => row.status === "Published").length}</td><td>Live</td></tr>
-        </PrintTable>
-      </PrintSection>
-      <PrintSection title="Conflict summary">
-        <PrintTable headers={["Severity", "Active conflicts"]}>
-          {["Critical", "High", "Medium"].map((severity) => <tr key={`print-conflict-${severity}`}><td>{severity}</td><td>{filtered.conflicts.filter((row: any) => row.severity === severity && row.status !== "Resolved").length}</td></tr>)}
-        </PrintTable>
-      </PrintSection>
-      <PrintSection title="Academic calendar">
-        <PrintTable headers={["Date", "Title", "Category", "Status"]}>
-          {filtered.calendar.map((row: any, index: number) => <tr key={`print-calendar-${row.id || index}`}><td>{row.start_date || row.date || "—"}</td><td>{row.title || row.name || "—"}</td><td>{row.category || "—"}</td><td>{row.status || "—"}</td></tr>)}
-        </PrintTable>
-      </PrintSection>
+    setTimeout(() => {
+      document.getElementById("report-preview")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 50);
+  };
+
+  const handleDownloadReport = (report: any, format: "pdf" | "xlsx") => {
+    const preview = buildReportPreview(report, filtered);
+    downloadReport(preview, report.name, format);
+  };
+
+  return (
+    <div className="fade-in reports-page-shell">
+      <style>{styles}</style>
+      <PageHead
+        title="Reports"
+        sub="View and download academic reports for effective academic operations management."
+      />
+
+      <div className="reports-page">
+        <section className="report-toolbar">
+          <div className="report-filter-row">
+            <FilterSelect
+              label="Academic Year"
+              value={filters.academicYear}
+              options={options.academicYear || []}
+              onChange={(value) => setFilters({ ...filters, academicYear: value })}
+            />
+            <FilterSelect
+              label="Semester"
+              value={filters.semester}
+              options={options.semester || []}
+              onChange={(value) => setFilters({ ...filters, semester: value })}
+            />
+            <FilterSelect
+              label="Department"
+              value={filters.department}
+              options={options.department || []}
+              onChange={(value) => setFilters({ ...filters, department: value })}
+            />
+            <FilterSelect
+              label="Program"
+              value={filters.program}
+              options={options.program || []}
+              onChange={(value) => setFilters({ ...filters, program: value })}
+            />
+            <FilterSelect
+              label="Year"
+              value={filters.year}
+              options={options.year || []}
+              onChange={(value) => setFilters({ ...filters, year: value })}
+            />
+            <FilterSelect
+              label="Section"
+              value={filters.course}
+              options={options.course || []}
+              onChange={(value) => setFilters({ ...filters, course: value })}
+            />
+            <FilterSelect
+              label="Date Range"
+              value={filters.term}
+              options={options.term || []}
+              onChange={(value) => setFilters({ ...filters, term: value })}
+            />
+          </div>
+
+          <div className="toolbar-actions">
+            <button className="ghost-button" onClick={() => setFiltersOpen(!filtersOpen)}>
+              {filtersOpen ? "Hide filters" : "Show filters"}
+            </button>
+            <button className="primary-button" onClick={() => setFilters(initialFilters)}>
+              Search reports...
+            </button>
+          </div>
+        </section>
+
+        <section className="stat-grid">
+          <StatCard tone="blue" icon="📚" title="Total Reports" value={totalReports} subtitle={`${totalOfferings} offerings`} />
+          <StatCard tone="teal" icon="✅" title="Ready to Download" value={readyToDownload} subtitle={`${Math.round((readyToDownload / Math.max(totalReports, 1)) * 100)}% of total`} />
+          <StatCard tone="amber" icon="🕒" title="Pending Inputs" value={pendingInputs} subtitle={`${pendingInputs} requiring action`} />
+          <StatCard tone="rose" icon="⚠️" title="Unresolved Conflicts" value={unresolvedConflicts} subtitle={`${unresolvedConflicts} requiring review`} />
+        </section>
+
+        <section className="reports-table-section">
+          <div className="section-head">
+            <div>
+              <h3>Most Used Reports</h3>
+              <small>View and download frequently used academic reports.</small>
+            </div>
+            <button className="view-all">View All Reports →</button>
+          </div>
+
+          <div className="report-cards-grid">
+            {reportRows.map((report, index) => (
+              <article className="report-card" key={report.name}>
+                <div className="report-icon" style={{ background: index % 2 === 0 ? report.colors[0] : report.colors[1] }}>
+                  {report.icon}
+                </div>
+                <div className="report-card-body">
+                  <h4>{report.name}</h4>
+                  <p>{report.category}</p>
+                  <div className="report-card-footer">
+                    <span className={report.status === "Ready" ? "status ready" : "status pending"}>{report.status}</span>
+                    <small>Last updated: {report.updated}</small>
+                  </div>
+                  <div className="report-actions">
+                    <button className="small-button" onClick={() => handleViewReport(report)}>
+                      View
+                    </button>
+                    <button className="small-button subtle" onClick={() => handleDownloadReport(report, "pdf")}>
+                      Download PDF
+                    </button>
+                    <button className="small-button subtle" onClick={() => handleDownloadReport(report, "xlsx")}>
+                      Export Excel
+                    </button>
+                  </div>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="all-reports-section">
+          <div className="all-reports-head">
+            <div>
+              <h3>All Reports</h3>
+              <small>Complete list of academic reports.</small>
+            </div>
+            <div className="download-box">
+              <h4>Download Formats</h4>
+              <p>Reports are available in the following formats:</p>
+              <div className="format-pills">
+                <span>PDF</span>
+                <span>Excel</span>
+                <span>CSV</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="report-table-wrap">
+            <table className="report-table">
+              <thead>
+                <tr>
+                  <th>Report Name</th>
+                  <th>Category</th>
+                  <th>Scope</th>
+                  <th>Last Updated</th>
+                  <th>Format</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {reportRows.map((report) => (
+                  <tr key={report.name}>
+                    <td>{report.name}</td>
+                    <td>{report.category}</td>
+                    <td>{report.scope}</td>
+                    <td>{report.updated}</td>
+                    <td>
+                      <div className="format-list">
+                        {report.formats.map((format) => (
+                          <span key={format} className="format-chip">
+                            {format}
+                          </span>
+                        ))}
+                      </div>
+                    </td>
+                    <td>
+                      <span className={report.status === "Ready" ? "status ready" : "status pending"}>{report.status}</span>
+                    </td>
+                    <td>
+                      <div className="table-actions">
+                        <button className="small-button" onClick={() => handleViewReport(report)}>
+                          View
+                        </button>
+                        <button className="small-button subtle" onClick={() => handleDownloadReport(report, "pdf")}>
+                          PDF
+                        </button>
+                        <button className="small-button subtle" onClick={() => handleDownloadReport(report, "xlsx")}>
+                          Excel
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        {previewReport && (
+          <section id="report-preview" className="all-reports-section preview-section">
+            <div className="all-reports-head">
+              <div>
+                <h3>{previewReport.name}</h3>
+                <small>Live report preview generated from the current academic coordinator data.</small>
+              </div>
+              <button className="ghost-button" onClick={() => setPreviewReport(null)}>
+                Close preview
+              </button>
+            </div>
+
+            <div className="report-table-wrap">
+              {previewReport.rows.length ? (
+                <table className="report-table">
+                  <thead>
+                    <tr>
+                      {previewReport.headers.map((header: string) => (
+                        <th key={header}>{header}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {previewReport.rows.map((row: any, index: number) => (
+                      <tr key={`${previewReport.name}-${index}`}>
+                        {previewReport.headers.map((header: string) => (
+                          <td key={`${header}-${index}`}>{row[header] ?? "—"}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <Empty text="No data is available for this report with the current filters." />
+              )}
+            </div>
+          </section>
+        )}
+      </div>
     </div>
-
-    <div className="screen-report">
-    <section className="report-filter-bar">
-      <div className="report-filter-head"><div><span className="report-kicker">REPORT SCOPE</span><h2>Live filters</h2></div><button className="linkish" onClick={() => setFiltersOpen(!filtersOpen)}>{filtersOpen ? "Hide filters" : "Show filters"}</button></div>
-      {filtersOpen && <div className="report-filters">{Object.entries(options).map(([key, values]) => <label key={key}>{pretty(key)}<select className="select" value={(filters as any)[key]} onChange={(e) => setFilters({ ...filters, [key]: e.target.value })}><option value="">All</option>{(values as any[]).map((value) => <option key={String(value)} value={String(value)}>{key === "year" ? label(String(value)) : String(value)}</option>)}</select></label>)}<button className="btn btn-out report-clear" onClick={() => setFilters(initialFilters)}>Clear</button></div>}
-    </section>
-
-    <section className="report-kpis"><Kpi label="Offerings ready" value={`${readyOfferings}/${filtered.execution.length}`} hint="Readiness" /><Kpi label="Timetable coverage" value={`${scheduled}/${filtered.execution.length}`} hint="Scheduled" /><Kpi label="Sections" value={filtered.sections.length} hint="Created" /><Kpi label="Active conflicts" value={activeConflicts.length} hint="Needs attention" /><Kpi label="Completed courses" value={completed} hint="Execution" /><Kpi label="Class sessions" value={filtered.sessions.length} hint="Persisted" /></section>
-
-    <ReportSection title="Workflow status" subtitle="Course Offerings → HOD Input → Faculty Allocation → Sections → Timetable → HOD Review → VP Review → Approved → Published"><div className="workflow-strip">{workflow.map(([name, value], index) => <div className="workflow-step" key={name}><span>{index + 1}</span><b>{value}</b><small>{name}</small></div>)}</div></ReportSection>
-
-    <div className="report-grid">
-      <ReportSection title="Curriculum completion" subtitle="Expected and actual delivery progress."><div className="report-table-wrap"><table className="report-table"><thead><tr><th>Course</th><th>Expected</th><th>Actual</th><th>Progress</th><th>Status</th></tr></thead><tbody>{filtered.execution.slice(0, 12).map((row: any) => <tr key={row.id}><td><b>{row.course_code}</b><small>{row.course_title}</small></td><td>{row.expected_completion_date || "—"}</td><td>{row.actual_completion_date || "—"}</td><td>{row.progress || 0}%</td><td><Pill s={row.execution_status} /></td></tr>)}</tbody></table></div>{!filtered.execution.length && <Empty text="No curriculum records match the filters." />}</ReportSection>
-      <ReportSection title="Section readiness" subtitle="Created sections against HOD requirements."><SummaryRows rows={filtered.execution.slice(0, 8).map((row: any) => ({ label: row.course_code, value: `${row.section_readiness?.created_sections || 0}/${row.section_readiness?.required_sections || 0}`, meta: row.program_code || row.program }))} /><NavButton text="Open sections & timetable" onClick={() => onNavigate?.("coordinator_sections")} /></ReportSection>
-    </div>
-
-    <div className="report-grid">
-      <ReportSection title="Faculty allocation" subtitle="Allocation readiness by offering."><SummaryRows rows={filtered.execution.slice(0, 8).map((row: any) => ({ label: row.course_code, value: row.faculty_readiness || "Not Ready", meta: row.faculty || "No faculty" }))} /><NavButton text="Open course offerings" onClick={() => onNavigate?.("coordinator_course_offerings")} /></ReportSection>
-      <ReportSection title="Timetable operations" subtitle="Persisted plan states and scheduled coverage."><SummaryRows rows={[{ label: "Scheduled offerings", value: scheduled, meta: "Ready" }, { label: "Draft / returned plans", value: filtered.plans.filter((row: any) => ["Draft", "HOD Returned", "VP Returned"].includes(row.status)).length, meta: "Needs work" }, { label: "Published plans", value: filtered.plans.filter((row: any) => row.status === "Published").length, meta: "Live" }]} /><NavButton text="Open sections & timetable" onClick={() => onNavigate?.("coordinator_sections")} /></ReportSection>
-    </div>
-
-    <div className="report-grid">
-      <ReportSection title="Conflict summary" subtitle="Severity, type, and current status."><SummaryRows rows={["Critical", "High", "Medium"].map((severity) => ({ label: severity, value: filtered.conflicts.filter((row: any) => row.severity === severity && row.status !== "Resolved").length, meta: "Active" }))} /><div className="report-inline-stats"><span>Faculty {filtered.conflicts.filter((row: any) => row.type === "faculty_overlap").length}</span><span>Room {filtered.conflicts.filter((row: any) => ["room_conflict", "lab_conflict"].includes(row.type)).length}</span><span>Resolved {filtered.conflicts.filter((row: any) => row.status === "Resolved").length}</span></div><NavButton text="Open conflict center" onClick={() => onNavigate?.("coordinator_conflicts")} /></ReportSection>
-      <ReportSection title="Class session operations" subtitle="Persisted sessions generated for delivery."><SummaryRows rows={[{ label: "Total sessions", value: filtered.sessions.length, meta: "Generated" }, { label: "Completed", value: filtered.sessions.filter((row: any) => ["Completed", "Complete"].includes(row.status)).length, meta: "Delivered" }, { label: "Planned / open", value: filtered.sessions.filter((row: any) => !["Completed", "Complete"].includes(row.status)).length, meta: "Upcoming" }]} /><NavButton text="Open timetable workflow" onClick={() => onNavigate?.("coordinator_sections")} /></ReportSection>
-    </div>
-
-    <div className="report-grid">
-      <ReportSection title="Academic calendar" subtitle="Live milestones, exam windows, and breaks."><SummaryRows rows={[{ label: "Milestones", value: filtered.calendar.length, meta: "Visible" }, { label: "Exam windows", value: filtered.calendar.filter((row: any) => String(row.category).toLowerCase().includes("exam")).length, meta: "Calendar" }, { label: "Breaks", value: filtered.calendar.filter((row: any) => String(row.category).toLowerCase() === "break").length, meta: "Calendar" }]} /><NavButton text="Open academic calendar" onClick={() => onNavigate?.("academic_calendar")} /></ReportSection>
-      <ReportSection title="Academic notices" subtitle="Published communications in the current scope."><SummaryRows rows={filtered.notices.slice(0, 5).map((row: any) => ({ label: row.title, value: row.published_at ? new Date(row.published_at).toLocaleDateString() : "—", meta: row.audience || "Academic" }))} />{!filtered.notices.length && <Empty text="No academic notices available." />}<NavButton text="Open academic notices" onClick={() => onNavigate?.("coordinator_notices")} /></ReportSection>
-    </div>
-    </div>
-  </div>;
+  );
 }
 
-function unique(values: any[]) { return Array.from(new Set(values.filter((value) => value !== undefined && value !== null && value !== ""))).sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true })); }
-function pretty(value: string) { return value.replace(/([A-Z])/g, " $1").replace(/^./, (char) => char.toUpperCase()); }
-function Kpi({ label, value, hint }: { label: string; value: any; hint: string }) { return <article className="report-kpi"><span>{label}</span><b>{value}</b><small>{hint}</small></article>; }
-function ReportSection({ title, subtitle, children }: { title: string; subtitle: string; children: React.ReactNode }) {
-  const sectionRef = useRef<HTMLElement>(null);
-  return <section className="report-section" ref={sectionRef}>
-    <header><div><h2>{title}</h2><p>{subtitle}</p></div><button className="section-print-btn" onClick={() => printSection(title, sectionRef.current)}>Print / Save PDF</button></header>
-    {children}
-  </section>;
-}
-function SummaryRows({ rows }: { rows: { label: string; value: any; meta: any }[] }) { return <div className="summary-rows">{rows.map((row, index) => <div className="summary-row" key={`${row.label}-${index}`}><span>{row.label}</span><b>{row.value}</b><small>{row.meta}</small></div>)}</div>; }
-function NavButton(_: { text: string; onClick: () => void }) { return null; }
-function PrintSection({ title, children }: { title: string; children: React.ReactNode }) { return <section className="print-section"><h2>{title}</h2>{children}</section>; }
-function PrintTable({ headers, children }: { headers: string[]; children: React.ReactNode }) { return <table className="print-table"><thead><tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr></thead><tbody>{children}</tbody></table>; }
-function printSection(title: string, section: HTMLElement | null) {
-  if (!section) return;
-  const content = section.cloneNode(true) as HTMLElement;
-  content.querySelectorAll("button").forEach((button) => button.remove());
-  const printWindow = window.open("", "_blank", "width=1000,height=800");
-  if (!printWindow) return;
-  printWindow.document.write(`<!doctype html><html><head><title>${title}</title><style>body{font-family:Arial,sans-serif;color:#222;padding:32px}h2{font-size:22px;border-bottom:2px solid #222;padding-bottom:8px}header p{color:#666;font-size:13px}.report-table,.summary-rows{width:100%;border-collapse:collapse}.report-table th,.report-table td{border:1px solid #999;padding:8px;text-align:left;font-size:12px}.report-table th{background:#eee}.summary-row{display:grid;grid-template-columns:1fr auto 180px;border-bottom:1px solid #ccc;padding:10px 0}.summary-row small{color:#666;text-align:right}@media print{body{padding:0}}</style></head><body>${content.outerHTML}</body></html>`);
-  printWindow.document.close();
-  printWindow.focus();
-  printWindow.onload = () => { printWindow.print(); };
+function FilterSelect({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: any[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="filter-box">
+      <span>{label}</span>
+      <select value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">All</option>
+        {options.map((option) => (
+          <option key={String(option)} value={String(option)}>
+            {String(option)}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
 }
 
-const styles = `.reports-page{--report-border:#e8e2e4;--report-muted:#81777b;color:#2d2528}.print-report{display:none}.report-filter-bar,.report-section{background:#fff;border:1px solid var(--report-border);border-radius:12px}.report-filter-bar{padding:18px 20px;margin:22px 0}.report-filter-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.report-kicker{color:#8c737a;font-size:10px;font-weight:800;letter-spacing:.08em}.report-filter-head h2{margin:3px 0 0;font-size:17px}.report-filters{display:grid;grid-template-columns:repeat(5,minmax(130px,1fr));gap:12px;margin-top:16px}.report-filters label{display:flex;flex-direction:column;gap:6px;color:#72686c;font-size:11px;font-weight:700;text-transform:uppercase}.report-filters .select{width:100%;min-height:38px}.report-clear{align-self:end;min-height:38px}.report-kpis{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin-bottom:18px}.report-kpi{padding:16px;border:1px solid var(--report-border);border-radius:10px;background:#fff}.report-kpi span,.report-kpi small{display:block;color:var(--report-muted);font-size:11px}.report-kpi b{display:block;margin:9px 0 4px;font-size:24px;color:#35282d}.report-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin-bottom:18px}.report-section{padding:18px 20px;min-width:0}.report-section header{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;margin-bottom:14px}.report-section h2{margin:0;font-size:16px}.report-section header p{margin:5px 0 0;color:var(--report-muted);font-size:12px}.section-print-btn{border:1px solid #7a1f35;border-radius:6px;background:#fff;color:#7a1f35;padding:7px 10px;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap}.section-print-btn:hover{background:#7a1f35;color:#fff}.workflow-strip{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:5px}.workflow-step{border:0;border-top:3px solid #d8cdd0;background:#faf8f9;padding:12px 7px;text-align:left}.workflow-step span{display:block;color:#9b8e93;font-size:10px}.workflow-step b{display:block;margin:7px 0 3px;color:#7a1f35;font-size:19px}.workflow-step small{display:block;color:#62585c;font-size:10px;line-height:1.3}.report-table-wrap{overflow-x:auto}.report-table{width:100%;border-collapse:collapse;font-size:12px}.report-table th{padding:9px 8px;color:#8a7d82;font-size:10px;text-align:left;text-transform:uppercase;border-bottom:1px solid var(--report-border)}.report-table td{padding:11px 8px;border-bottom:1px solid #f0ecee;white-space:nowrap}.report-table td small{display:block;margin-top:3px;color:var(--report-muted);white-space:normal}.summary-rows{display:flex;flex-direction:column}.summary-row{display:grid;grid-template-columns:minmax(0,1fr) auto 100px;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid #f0ecee}.summary-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.summary-row b{font-size:15px}.summary-row small{color:var(--report-muted);font-size:11px;text-align:right}.report-link{border:0;background:transparent;color:#7a1f35;font-size:12px;font-weight:700;padding:14px 0 0;cursor:pointer}.report-link:hover{text-decoration:underline}.report-inline-stats{display:flex;gap:14px;flex-wrap:wrap;padding-top:14px;color:#766a6f;font-size:11px}.print-report h1{margin:0 0 4px;font-size:24px}.print-meta{margin:0 0 24px;color:#555;font-size:12px}.print-section{margin:0 0 24px;break-inside:avoid}.print-section h2{font-size:17px;border-bottom:2px solid #222;padding-bottom:6px;margin:0 0 10px}.print-table{width:100%;border-collapse:collapse;font-size:10px}.print-table th,.print-table td{border:1px solid #999;padding:6px;text-align:left;vertical-align:top}.print-table th{background:#eee;font-weight:700}@media(max-width:1050px){.report-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}.report-filters{grid-template-columns:repeat(3,minmax(130px,1fr))}.workflow-strip{grid-template-columns:repeat(5,minmax(0,1fr))}}@media(max-width:700px){.report-grid{grid-template-columns:1fr}.report-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.report-filters{grid-template-columns:1fr 1fr}.workflow-strip{grid-template-columns:repeat(3,minmax(0,1fr))}.report-section{padding:15px}.summary-row{grid-template-columns:minmax(0,1fr) auto}.summary-row small{grid-column:1/-1;text-align:left}.report-table td{white-space:normal}}@media print{.screen-report,.reports-page>.page-head{display:none!important}.print-report{display:block!important}.reports-page{background:#fff;color:#111}.print-section{page-break-inside:avoid}}`;
+function StatCard({
+  title,
+  value,
+  subtitle,
+  tone,
+  icon,
+}: {
+  title: string;
+  value: number;
+  subtitle: string;
+  tone: "blue" | "teal" | "amber" | "rose";
+  icon: string;
+}) {
+  return (
+    <article className={`stat-card ${tone}`}>
+      <div className="stat-icon">{icon}</div>
+      <div className="stat-content">
+        <h3>{title}</h3>
+        <div className="stat-value">{value}</div>
+        <small>{subtitle}</small>
+      </div>
+    </article>
+  );
+}
+
+function buildReportPreview(report: any, filtered: any) {
+  switch (report.type) {
+    case "academic-calendar":
+      return {
+        name: report.name,
+        headers: ["Event", "Category", "Department", "Start Date", "Status"],
+        rows: (filtered.calendar || []).map((row: any) => ({
+          Event: row.title || row.event_name || row.name || "Untitled event",
+          Category: row.category || "General",
+          Department: row.department || row.department_id || "All",
+          "Start Date": row.start_date || row.date || "—",
+          Status: row.status || "Scheduled",
+        })),
+      };
+    case "course-offerings":
+      return {
+        name: report.name,
+        headers: ["Branch", "Course", "Section", "Faculty", "Status"],
+        rows: (filtered.execution || []).map((row: any) => ({
+          Branch: row.program_code || row.program || "Unknown",
+          Course: row.course_code || row.course || "—",
+          Section: row.section_id || row.section || "—",
+          Faculty: row.faculty || row.faculty_name || "Unassigned",
+          Status: row.execution_status || "Not started",
+        })),
+      };
+    case "faculty-allocation":
+      return {
+        name: report.name,
+        headers: ["Branch", "Course", "Faculty", "Allocation Status"],
+        rows: (filtered.execution || []).map((row: any) => ({
+          Branch: row.program_code || row.program || "Unknown",
+          Course: row.course_code || row.course || "—",
+          Faculty: row.faculty || row.faculty_name || "Unassigned",
+          "Allocation Status": row.faculty ? "Allocated" : "Pending",
+        })),
+      };
+    case "timetable-report":
+      return {
+        name: report.name,
+        headers: ["Branch", "Course", "Section", "Faculty", "Status", "Updated"],
+        rows: (filtered.plans || []).map((row: any) => ({
+          Branch: row.program_code || row.program || row.department || "Unknown",
+          Course: row.course_code || row.course || row.section_id || "—",
+          Section: row.section_id || row.section || "—",
+          Faculty: row.faculty || row.faculty_name || row.instructor || "Unassigned",
+          Status: row.status || "Unknown",
+          Updated: row.updated_at || row.created_at || row.start_date || "—",
+        })),
+      };
+    case "curriculum-execution":
+      return {
+        name: report.name,
+        headers: ["Branch", "Course", "Student Year", "Curriculum Status"],
+        rows: (filtered.execution || []).map((row: any) => ({
+          Branch: row.program_code || row.program || "Unknown",
+          Course: row.course_code || row.course || "—",
+          "Student Year": row.student_year || row.year || "—",
+          "Curriculum Status": row.execution_status || "Not started",
+        })),
+      };
+    case "conflict-summary":
+      return {
+        name: report.name,
+        headers: ["Conflict", "Severity", "Status", "Program"],
+        rows: (filtered.conflicts || []).map((row: any) => ({
+          Conflict: row.title || row.name || row.id || "Conflict",
+          Severity: row.severity || "Unknown",
+          Status: row.status || "Open",
+          Program: row.program_code || row.program || row.department || "Unknown",
+        })),
+      };
+    default:
+      return {
+        name: report.name,
+        headers: ["Label", "Value"],
+        rows: [],
+      };
+  }
+}
+
+function downloadReport(preview: any, reportName: string, format: "pdf" | "xlsx") {
+  const headers = preview.headers || [];
+  const rows = preview.rows || [];
+  const slug = (reportName || "report").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+
+  if (format === "pdf") {
+    const html = `
+      <!doctype html>
+      <html>
+        <head>
+          <meta charset="utf-8" />
+          <title>${reportName}</title>
+          <style>
+            body { font-family: Arial, sans-serif; padding: 24px; color: #1f2937; }
+            h1 { font-size: 22px; margin-bottom: 12px; }
+            table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+            th, td { border: 1px solid #d1d5db; padding: 8px 10px; text-align: left; font-size: 12px; }
+            th { background: #f3f4f6; }
+          </style>
+        </head>
+        <body>
+          <h1>${reportName}</h1>
+          <table>
+            <thead>
+              <tr>${headers.map((header: string) => `<th>${header}</th>`).join("")}</tr>
+            </thead>
+            <tbody>
+              ${rows
+                .map(
+                  (row: any) =>
+                    `<tr>${headers
+                      .map((header: string) => `<td>${String(row[header] ?? "—")}</td>`)
+                      .join("")}</tr>`,
+                )
+                .join("") || "<tr><td colspan=\"${headers.length || 1}\">No data available</td></tr>"}
+            </tbody>
+          </table>
+        </body>
+      </html>
+    `;
+
+    const blob = new Blob([html], { type: "text/html;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${slug}.html`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    return;
+  }
+
+  const csvRows = [headers, ...rows.map((row: any) => headers.map((header) => row[header] ?? ""))]
+    .map((line) => line.map((value) => `"${String(value).replace(/"/g, '""')}"`).join(","))
+    .join("\n");
+
+  const blob = new Blob([csvRows], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${slug}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+function summaryRows(items: any[], getKey: (row: any) => string) {
+  const bucket = items.reduce((acc: Record<string, number>, row: any) => {
+    const key = getKey(row) || "Unknown";
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+
+  return Object.entries(bucket)
+    .map(([label, value]) => ({ label, value: Number(value) }))
+    .sort((a, b) => b.value - a.value);
+}
+
+function latestDate(items: any[]) {
+  const dates = items
+    .map((row: any) => row.updated_at || row.created_at || row.start_date || row.date || row.published_at)
+    .filter(Boolean)
+    .map((value: string) => new Date(value))
+    .filter((value: Date) => !Number.isNaN(value.getTime()));
+
+  if (!dates.length) return new Date().toLocaleDateString();
+
+  const latest = new Date(Math.max(...dates.map((date) => date.getTime())));
+  return latest.toLocaleDateString();
+}
+
+function unique(values: any[]) {
+  return Array.from(new Set(values.filter((value) => value !== undefined && value !== null && value !== ""))).sort(
+    (a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }),
+  );
+}
+
+const styles = `
+  .reports-page-shell {
+    font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #edf2f7;
+    color: #1f2a37;
+    min-height: 100%;
+  }
+
+  .reports-page {
+    padding: 18px 0 30px;
+  }
+
+  .report-toolbar {
+    background: #ffffff;
+    border: 1px solid #dfe7ee;
+    border-radius: 16px;
+    padding: 18px 20px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px;
+    box-shadow: 0 8px 18px rgba(85, 96, 116, 0.05);
+  }
+
+  .report-filter-row {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(120px, 1fr));
+    gap: 12px;
+    flex: 1;
+  }
+
+  .filter-box {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+
+  .filter-box select {
+    border: 1px solid #d7e2eb;
+    border-radius: 10px;
+    background: #f8fafc;
+    min-height: 38px;
+    padding: 0 10px;
+    color: #27364a;
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .toolbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .ghost-button,
+  .primary-button,
+  .view-all,
+  .small-button {
+    border: none;
+    border-radius: 10px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+
+  .ghost-button {
+    background: #eef5ff;
+    color: #3c6fc7;
+    min-height: 38px;
+    padding: 0 14px;
+  }
+
+  .primary-button {
+    background: linear-gradient(135deg, #2c6bed 0%, #2558c9 100%);
+    color: #fff;
+    min-height: 38px;
+    padding: 0 18px;
+    box-shadow: 0 10px 18px rgba(44, 107, 237, 0.22);
+  }
+
+  .primary-button:hover,
+  .ghost-button:hover,
+  .small-button:hover,
+  .view-all:hover {
+    transform: translateY(-1px);
+  }
+
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 16px;
+    margin-top: 20px;
+  }
+
+  .stat-card {
+    background: #fff;
+    border: 1px solid #dfe7ee;
+    border-radius: 16px;
+    padding: 18px 18px 16px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    box-shadow: 0 8px 18px rgba(85, 96, 116, 0.04);
+  }
+
+  .stat-card.blue { background: linear-gradient(135deg, #eaf4ff 0%, #edf7ff 100%); }
+  .stat-card.teal { background: linear-gradient(135deg, #eefaf3 0%, #eff8f0 100%); }
+  .stat-card.amber { background: linear-gradient(135deg, #fff8ea 0%, #fff6df 100%); }
+  .stat-card.rose { background: linear-gradient(135deg, #fff0f4 0%, #fff3f7 100%); }
+
+  .stat-icon {
+    width: 52px;
+    height: 52px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    background: rgba(255, 255, 255, 0.76);
+    border: 1px solid rgba(255, 255, 255, 0.8);
+  }
+
+  .stat-content {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .stat-content h3 {
+    margin: 0;
+    font-size: 13px;
+    color: #64748b;
+    font-weight: 700;
+  }
+
+  .stat-value {
+    margin-top: 8px;
+    font-size: 26px;
+    font-weight: 800;
+    color: #1e293b;
+    line-height: 1.1;
+  }
+
+  .stat-content small {
+    display: block;
+    margin-top: 7px;
+    font-size: 12px;
+    color: #6b7280;
+  }
+
+  .tabs-row {
+    margin-top: 22px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 8px;
+    background: #fff;
+    border: 1px solid #dfe7ee;
+    border-radius: 14px;
+    box-shadow: 0 8px 18px rgba(85, 96, 116, 0.04);
+  }
+
+  .tab {
+    border: 0;
+    background: transparent;
+    padding: 10px 14px;
+    border-radius: 10px;
+    color: #64748b;
+    font-weight: 700;
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .tab.active {
+    background: #eef4ff;
+    color: #2d6cdf;
+  }
+
+  .overview-grid {
+    margin-top: 22px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+  }
+
+  .overview-panel {
+    background: #fff;
+    border: 1px solid #dfe7ee;
+    border-radius: 16px;
+    padding: 18px 18px 14px;
+    box-shadow: 0 8px 18px rgba(85, 96, 116, 0.04);
+  }
+
+  .overview-panel header {
+    margin-bottom: 14px;
+  }
+
+  .overview-panel h3 {
+    margin: 0;
+    font-size: 17px;
+    color: #1f2a37;
+  }
+
+  .overview-panel small {
+    display: block;
+    margin-top: 4px;
+    color: #64748b;
+    font-size: 12px;
+  }
+
+  .bar-chart {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .bar-row {
+    display: grid;
+    grid-template-columns: 130px minmax(0, 1fr) 36px;
+    align-items: center;
+    gap: 12px;
+    min-height: 24px;
+  }
+
+  .bar-label {
+    font-size: 12px;
+    color: #4b5563;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .bar-track {
+    width: 100%;
+    height: 10px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: #edf2f7;
+  }
+
+  .bar-fill {
+    height: 100%;
+    border-radius: inherit;
+  }
+
+  .bar-row b {
+    font-size: 12px;
+    color: #1f2a37;
+    text-align: right;
+  }
+
+  .reports-table-section {
+    margin-top: 22px;
+    background: #fff;
+    border: 1px solid #dfe7ee;
+    border-radius: 16px;
+    padding: 18px;
+    box-shadow: 0 8px 18px rgba(85, 96, 116, 0.04);
+  }
+
+  .section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .section-head h3,
+  .all-reports-head h3 {
+    margin: 0;
+    font-size: 17px;
+    color: #1f2a37;
+  }
+
+  .section-head small,
+  .all-reports-head small {
+    display: block;
+    margin-top: 4px;
+    color: #64748b;
+    font-size: 12px;
+  }
+
+  .view-all {
+    background: #f2f6ff;
+    color: #2d6cdf;
+    padding: 10px 14px;
+    font-size: 13px;
+  }
+
+  .report-cards-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+  }
+
+  .report-card {
+    border: 1px solid #dfe7ee;
+    border-radius: 14px;
+    background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+    padding: 14px;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+
+  .report-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    flex-shrink: 0;
+  }
+
+  .report-card-body {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .report-card-body h4 {
+    margin: 0;
+    font-size: 14px;
+    color: #1f2a37;
+  }
+
+  .report-card-body p {
+    margin: 6px 0 10px;
+    color: #64748b;
+    font-size: 12px;
+  }
+
+  .report-card-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+
+  .report-card-footer small {
+    color: #64748b;
+    font-size: 11px;
+  }
+
+  .status {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+  }
+
+  .status.ready {
+    background: #e7f9ef;
+    color: #216b4d;
+  }
+
+  .status.pending {
+    background: #fff5e8;
+    color: #a25a11;
+  }
+
+  .report-actions,
+  .table-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .small-button {
+    background: #edf4ff;
+    color: #2d6cdf;
+    padding: 6px 8px;
+    font-size: 11px;
+  }
+
+  .small-button.subtle {
+    background: #f8fafc;
+    color: #4b5563;
+  }
+
+  .all-reports-section {
+    margin-top: 22px;
+    background: #fff;
+    border: 1px solid #dfe7ee;
+    border-radius: 16px;
+    padding: 18px;
+    box-shadow: 0 8px 18px rgba(85, 96, 116, 0.04);
+  }
+
+  .all-reports-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 20px;
+    margin-bottom: 14px;
+  }
+
+  .download-box {
+    border: 1px solid #dfe7ee;
+    border-radius: 12px;
+    background: #f8fbff;
+    padding: 12px 14px;
+    min-width: 280px;
+  }
+
+  .download-box h4 {
+    margin: 0;
+    font-size: 13px;
+    color: #1f2a37;
+  }
+
+  .download-box p {
+    margin: 6px 0 10px;
+    color: #64748b;
+    font-size: 12px;
+  }
+
+  .format-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .format-pills span,
+  .format-chip {
+    border-radius: 999px;
+    background: #eaf3ff;
+    color: #2d6cdf;
+    font-size: 11px;
+    padding: 4px 8px;
+    font-weight: 700;
+  }
+
+  .report-table-wrap {
+    overflow-x: auto;
+  }
+
+  .report-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+
+  .report-table th,
+  .report-table td {
+    border-bottom: 1px solid #edf2f7;
+    text-align: left;
+    padding: 12px 10px;
+    vertical-align: middle;
+  }
+
+  .report-table th {
+    background: #f8fafc;
+    color: #4b5563;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 800;
+  }
+
+  .report-table td {
+    color: #1f2a37;
+  }
+
+  .format-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  @media (max-width: 1180px) {
+    .report-filter-row {
+      grid-template-columns: repeat(3, minmax(120px, 1fr));
+    }
+
+    .report-cards-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 900px) {
+    .report-toolbar {
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    .toolbar-actions {
+      justify-content: space-between;
+    }
+
+    .stat-grid,
+    .overview-grid,
+    .report-cards-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .bar-row {
+      grid-template-columns: 100px minmax(0, 1fr) 28px;
+    }
+
+    .all-reports-head {
+      flex-direction: column;
+    }
+  }
+`;

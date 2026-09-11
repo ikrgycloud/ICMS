@@ -83,7 +83,7 @@ export default function Workflows({ user, onChange, initialTab = 'inbox' }: { us
       )}
 
       {showStart && <StartModal user={user} onClose={() => setShowStart(false)} onDone={() => { setShowStart(false); load(); onChange() }} />}
-      {selected && <DetailModal wf={selected} user={user} onClose={() => setSelected(null)} onDone={() => { load(); onChange() }} />}
+      {selected && <DetailModal wf={selected} user={user} onClose={() => setSelected(null)} onDone={() => { setSelected(null); load(); onChange() }} />}
     </div>
   )
 }
@@ -187,7 +187,18 @@ function DetailModal({ wf, user, onClose, onDone }: any) {
   }
 
   const terminal = ['approved', 'executed', 'rejected'].includes(data.state)
-  const canAct = !terminal
+  const stageLabel = String(data.chain?.[data.current_stage] || '').toLowerCase()
+  const stageOffices = stageLabel.includes('hod')
+    ? [10]
+    : stageLabel.includes('vice principal')
+      ? [5]
+      : stageLabel.includes('principal')
+        ? [3, 4]
+        : stageLabel.includes('dean')
+          ? [6, 7, 8, 9]
+          : []
+  const canAct = !terminal && data.initiator_id !== user.id && stageOffices.includes(Number(user.office_n))
+  const showReviewAction = Number(user.office_n) !== 17
   const outcomeColor = (o: string) => o === 'ALLOW' ? 'var(--teal)' : o === 'DENY' ? 'var(--rose)' : o === 'ESCALATE' ? 'var(--amber)' : '#6f7fd4'
 
   return (
@@ -204,22 +215,8 @@ function DetailModal({ wf, user, onClose, onDone }: any) {
           <div style={{ display: 'flex', gap: 20, marginBottom: 18, flexWrap: 'wrap' }}>
             <Meta label="State"><StatePill s={data.state} /></Meta>
             <Meta label="Initiator">{data.initiator}</Meta>
-            <Meta label="Amount"><span className="mono">{money(data.amount)}</span></Meta>
-            <Meta label="Scope"><span className="mono">{data.scope_level}</span></Meta>
-            <Meta label="Escalates to"><span className="mono">{data.escalation}</span></Meta>
-          </div>
-
-          <div style={{ fontFamily: 'var(--ff-mono)', fontSize: 8, color: 'var(--txt-mute)', textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 10 }}>Approval chain</div>
-          <div className="chain" style={{ marginBottom: 22 }}>
-            {data.chain.map((c: string, i: number) => (
-              <>
-                <div className={`chain-node ${i < data.current_stage ? 'done' : i === data.current_stage ? 'current' : ''}`} key={i}>
-                  <div className="cn-stage">Stage {i}{i < data.current_stage ? ' ✓' : ''}</div>
-                  <div className="cn-role">{c}</div>
-                </div>
-                {i < data.chain.length - 1 && <span className="chain-arrow">→</span>}
-              </>
-            ))}
+            {data.amount != null && <Meta label="Amount"><span className="mono">{money(data.amount)}</span></Meta>}
+            <Meta label="Current stage"><span className="mono">{data.chain?.[data.current_stage] || 'Processing'}</span></Meta>
           </div>
 
           {lastDecision && (
@@ -232,23 +229,6 @@ function DetailModal({ wf, user, onClose, onDone }: any) {
             </div>
           )}
 
-          {data.history.length > 0 && (
-            <>
-              <div style={{ fontFamily: 'var(--ff-mono)', fontSize: 8, color: 'var(--txt-mute)', textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 10 }}>Decision history</div>
-              <div style={{ marginBottom: 16 }}>
-                {data.history.map((h: any, i: number) => (
-                  <div key={i} style={{ display: 'flex', gap: 12, padding: '9px 0', borderBottom: '1px solid #f2efe8', fontSize: 9 }}>
-                    <span className="mono" style={{ fontWeight: 700, color: outcomeColor(h.decision), minWidth: 80 }}>{h.decision}</span>
-                    <div style={{ flex: 1 }}>
-                      <div><b>{h.actor}</b> · <span style={{ color: 'var(--txt-soft)' }}>{h.stage_label}</span></div>
-                      <div style={{ color: 'var(--txt-mute)', fontSize: 8.5 }}>{h.reason}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-
           {canAct && (
             <div style={{ background: 'var(--mist)', borderRadius: 12, padding: 16 }}>
               <div className="form-row" style={{ marginBottom: 12 }}>
@@ -256,7 +236,7 @@ function DetailModal({ wf, user, onClose, onDone }: any) {
                 <input className="inp" value={reason} onChange={e => setReason(e.target.value)} placeholder="Optional note for the decision" />
               </div>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <button className="btn btn-teal" disabled={busy} onClick={() => decide('review')}>Review</button>
+                {showReviewAction && <button className="btn btn-teal" disabled={busy} onClick={() => decide('review')}>Review</button>}
                 <button className="btn btn-brass" disabled={busy} onClick={() => decide('approve')}>Approve</button>
                 {data.state === 'approved' && <button className="btn btn-solid" disabled={busy} onClick={() => decide('execute')}>Execute</button>}
                 <button className="btn btn-rose" disabled={busy} onClick={() => decide('reject')}>Reject</button>
@@ -270,6 +250,11 @@ function DetailModal({ wf, user, onClose, onDone }: any) {
           {terminal && (
             <div style={{ textAlign: 'center', padding: 14, background: 'var(--mist)', borderRadius: 12, color: 'var(--txt-soft)', fontSize: 10 }}>
               This request has reached a terminal state: <b>{data.state}</b>.
+            </div>
+          )}
+          {!terminal && !canAct && (
+            <div style={{ textAlign: 'center', padding: 14, background: 'var(--mist)', borderRadius: 12, color: 'var(--txt-soft)', fontSize: 10 }}>
+              This request is waiting for the current approval office.
             </div>
           )}
         </div>
