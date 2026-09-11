@@ -1,196 +1,45 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { PageHead, Spinner, DecisionToast } from './kit'
 
-export default function HR({ caps }: { caps: any }) {
-  const [tab, setTab] = useState<'leave' | 'jobs' | 'payroll'>('leave')
-  const [leave, setLeave] = useState<any>(null)
-  const [jobs, setJobs] = useState<any>(null)
-  const [payrollRuns, setPayrollRuns] = useState<any>(null)
-  const [payrollDetail, setPayrollDetail] = useState<any>(null)
-  const [decision, setDecision] = useState<any>(null)
-
+export default function HR({ caps = {}, principalView }: { caps?: any; principalView?: 'leave' | 'recruitment' }) {
+  const [tab, setTab] = useState<'leave' | 'jobs'>(principalView === 'recruitment' ? 'jobs' : 'leave')
+  const [leave, setLeave] = useState<any>(null), [jobs, setJobs] = useState<any>(null), [departments, setDepartments] = useState<any[]>([]), [decision, setDecision] = useState<any>(null), [error, setError] = useState(''), [actingId, setActingId] = useState('')
+  const [showVacancyForm, setShowVacancyForm] = useState(false), [posting, setPosting] = useState(false)
+  const emptyVacancy = { title: '', dept_id: '', kind: 'Faculty', openings: 1, status: 'open', description: '', qualification: '', experience: '', skills: '', closing_date: '', priority: 'normal', notes: '' }
+  const [vacancy, setVacancy] = useState<any>(emptyVacancy)
+  const isPrincipalView = Boolean(principalView)
   function load() {
-    api.leave().then(setLeave).catch(() => {})
-    api.jobs().then(setJobs).catch(() => {})
-    api.payrollRuns().then(setPayrollRuns).catch(() => setPayrollRuns({ runs: [] }))
+    setError('')
+    api.leave().then(setLeave).catch(() => setError('Unable to load leave requests.'))
+    api.jobs().then(setJobs).catch(() => setError('Unable to load recruitment vacancies.'))
+    if (principalView === 'recruitment') api.departments().then((result: any) => setDepartments(result.departments || [])).catch(() => setError('Unable to load tenant departments.'))
   }
-  useEffect(() => { load() }, [])
-
-  async function decide(id: string, action: string) {
-    try { const r = await api.decideLeave(id, action); setDecision(r.decision); load() }
-    catch (e: any) { setDecision({ outcome: 'DENY', reason: e.message }) }
-  }
-
-  async function generatePayroll() {
+  useEffect(load, [])
+  async function decide(id: string, action: string) { setActingId(id); try { const response = await api.decideLeave(id, action); setDecision({ ...response.decision, reason: `Leave request ${response.status} successfully.` }); load() } catch (e: any) { setDecision({ outcome: 'DENY', reason: e.message || `Unable to ${action} this leave request.` }) } finally { setActingId('') } }
+  async function addVacancy(event: any) {
+    event.preventDefault()
+    setPosting(true); setError('')
     try {
-      const now = new Date()
-      const payrollMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
-      const r = await api.createPayrollRun({
-        payroll_month: payrollMonth,
-        run_name: `${now.toLocaleString('en-US', { month: 'long', year: 'numeric' })} Payroll Run`,
-      })
-      setDecision({ outcome: 'ALLOW', reason: `Payroll generated successfully (${r.run_id})` })
+      const response = await api.createJob({ ...vacancy, openings: Number(vacancy.openings), closing_date: vacancy.closing_date || null })
+      setShowVacancyForm(false); setVacancy(emptyVacancy)
+      setDecision({ ...response.decision, reason: 'Recruitment requirement added successfully.' })
       load()
-      setTab('payroll')
-    } catch (e: any) {
-      setDecision({ outcome: 'DENY', reason: e.message })
-    }
+    } catch (e: any) { setError(e.message || 'Unable to add the recruitment requirement.') } finally { setPosting(false) }
   }
-
-  async function loadPayrollDetail(runId: string) {
-    try {
-      const r = await api.payrollRunDetails(runId)
-      setPayrollDetail(r)
-    } catch (e: any) {
-      setDecision({ outcome: 'DENY', reason: e.message })
-    }
-  }
-
-  async function updatePayrollEntry(entryId: string, status: string) {
-    try {
-      const r = await api.updatePayrollEntryStatus(entryId, status)
-      setDecision({ outcome: 'ALLOW', reason: `Payroll entry updated to ${r.status}` })
-      if (payrollDetail) {
-        const next = { ...payrollDetail, entries: (payrollDetail.entries || []).map((entry: any) => entry.id === entryId ? { ...entry, payment_status: r.status } : entry) }
-        setPayrollDetail(next)
-      }
-      load()
-    } catch (e: any) {
-      setDecision({ outcome: 'DENY', reason: e.message })
-    }
-  }
-
-  if (!leave) return <Spinner />
-
-  return (
-    <div className="fade-in">
-      <PageHead title="Human Resources" sub="Leave lifecycle, recruitment, and payroll" />
-      <div className="tabs">
-        <button className={`tab ${tab === 'leave' ? 'on' : ''}`} onClick={() => setTab('leave')}>Leave requests</button>
-        <button className={`tab ${tab === 'jobs' ? 'on' : ''}`} onClick={() => setTab('jobs')}>Openings</button>
-        <button className={`tab ${tab === 'payroll' ? 'on' : ''}`} onClick={() => setTab('payroll')}>Payroll</button>
-      </div>
-
-      {tab === 'leave' && (
-        <div className="card">
-          <div className="tbl-scroll">
-            <table className="tbl">
-              <thead><tr><th>Staff</th><th>Type</th><th>Dates</th><th>Days</th><th>Reason</th><th>Status</th><th style={{ textAlign: 'right' }}>Decision</th></tr></thead>
-              <tbody>
-                {leave.leave.map((l: any) => (
-                  <tr key={l.id}>
-                    <td><b>{l.staff}</b></td>
-                    <td><span className="tag">{l.kind}</span></td>
-                    <td>{l.from} → {l.to}</td>
-                    <td>{l.days}</td>
-                    <td>{l.reason}</td>
-                    <td><span className={`pill s-${l.status}`}>{l.status}</span></td>
-                    <td style={{ textAlign: 'right' }}>
-                      {l.status === 'pending' ? (
-                        <div className="row-actions">
-                          <button className="btn btn-sm btn-teal" disabled={!caps.approve_leave} onClick={() => decide(l.id, 'approve')}>Approve</button>
-                          <button className="btn btn-sm btn-rose" disabled={!caps.approve_leave} onClick={() => decide(l.id, 'reject')}>Reject</button>
-                        </div>
-                      ) : <span className="hint">closed</span>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {tab === 'jobs' && jobs && (
-        <div className="card">
-          <div className="tbl-scroll">
-            <table className="tbl">
-              <thead><tr><th>Title</th><th>Dept</th><th>Type</th><th>Openings</th><th>Status</th></tr></thead>
-              <tbody>
-                {jobs.jobs.map((j: any) => (
-                  <tr key={j.id}><td><b>{j.title}</b></td><td>{j.dept}</td><td><span className="tag">{j.kind}</span></td><td>{j.openings}</td><td><span className="pill s-open">{j.status}</span></td></tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {tab === 'payroll' && (
-        <div className="card">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
-            <h3 style={{ margin: 0 }}>Payroll runs</h3>
-            <button className="btn btn-teal" onClick={generatePayroll}>Generate current payroll</button>
-          </div>
-
-          {!payrollRuns ? <Spinner /> : (
-            <div className="tbl-scroll">
-              <table className="tbl">
-                <thead>
-                  <tr>
-                    <th>Run</th>
-                    <th>Month</th>
-                    <th>Status</th>
-                    <th>Payment date</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(payrollRuns.runs || []).map((run: any) => (
-                    <tr key={run.id}>
-                      <td><b>{run.run_name}</b></td>
-                      <td>{run.payroll_month}</td>
-                      <td><span className={`pill s-${run.status}`}>{run.status}</span></td>
-                      <td>{run.payment_date || '—'}</td>
-                      <td><button className="btn btn-sm btn-primary" onClick={() => loadPayrollDetail(run.id)}>View</button></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {payrollDetail && (
-            <div style={{ marginTop: '24px' }}>
-              <h3 style={{ marginBottom: '12px' }}>Payroll details — {payrollDetail.run.run_name}</h3>
-              <div className="tbl-scroll">
-                <table className="tbl">
-                  <thead>
-                    <tr>
-                      <th>Employee</th>
-                      <th>Gross</th>
-                      <th>Deductions</th>
-                      <th>Net</th>
-                      <th>Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(payrollDetail.entries || []).map((entry: any) => (
-                      <tr key={entry.id}>
-                        <td>
-                          <div><b>{entry.employee_name}</b></div>
-                          <small>{entry.employee_code || entry.employee_id}</small>
-                        </td>
-                        <td>₹{Number(entry.gross_salary || 0).toLocaleString('en-IN')}</td>
-                        <td>₹{Number(entry.total_deductions || 0).toLocaleString('en-IN')}</td>
-                        <td>₹{Number(entry.net_salary || 0).toLocaleString('en-IN')}</td>
-                        <td>
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-start' }}>
-                            <span className={`pill s-${entry.payment_status}`}>{entry.payment_status}</span>
-                            {entry.payment_status !== 'paid' && <span className="hint">Accounts payment pending</span>}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-      {decision && <DecisionToast decision={decision} onClose={() => setDecision(null)} />}
-    </div>
-  )
+  const activeTab = principalView === 'recruitment' ? 'jobs' : principalView === 'leave' ? 'leave' : tab
+  if (!leave && !jobs && !error) return <Spinner />
+  if (!leave && !jobs) return <div className="empty-state"><h3>Unable to load human resources data.</h3><button className="btn btn-crimson" onClick={load}>Retry</button></div>
+  const leaveRows = leave?.leave || [], jobRows = jobs?.jobs || []
+  const title = activeTab === 'leave' ? (isPrincipalView ? 'Leave' : 'Human Resources') : 'Recruitment & Vacancies'
+  const subtitle = activeTab === 'leave' ? 'Review staff leave requests and record workflow decisions.' : 'Review current academic and operational vacancies.'
+  return <div className={`fade-in principal-operations principal-hr ${isPrincipalView ? 'principal-hr-focused' : ''}`}>
+    <PageHead title={title} sub={subtitle} right={isPrincipalView ? <div className="hr-page-actions"><span className="hr-status"><i />{activeTab === 'leave' ? `${leaveRows.length} requests` : `${jobRows.length} vacancies`}</span>{activeTab === 'jobs' && jobs?.can_post && <button className="btn btn-crimson" onClick={() => setShowVacancyForm(true)}>+ Add Recruitment Requirement</button>}</div> : undefined} />
+    {!isPrincipalView && <div className="hr-tabs"><button className={activeTab === 'leave' ? 'active' : ''} onClick={() => setTab('leave')}>Leave requests</button><button className={activeTab === 'jobs' ? 'active' : ''} onClick={() => setTab('jobs')}>Recruitment & vacancies</button></div>}
+    {error && <div className="hr-error">{error}<button className="btn btn-out" onClick={load}>Retry</button></div>}
+    {activeTab === 'leave' && <section className="card hr-card"><div className="hr-card-head"><div><span>Leave register</span><h3>Staff leave requests</h3></div><b>{leaveRows.length} records</b></div><div className="tbl-scroll"><table className="tbl hr-table"><thead><tr><th>Staff</th><th>Leave type</th><th>Dates</th><th>Days</th><th>Reason</th><th>Status</th><th>Decision</th></tr></thead><tbody>{leaveRows.map((row: any) => <tr key={row.id}><td><b>{row.staff}</b></td><td><span className="hr-kind">{row.kind}</span></td><td>{row.from} → {row.to}</td><td>{row.days}</td><td className="hr-reason">{row.reason}</td><td><span className={`pill s-${row.status}`}>{row.status}</span></td><td>{row.status === 'pending' ? <div className="row-actions"><button className="btn btn-sm btn-crimson" disabled={!leave?.can_approve || actingId === row.id} onClick={() => decide(row.id, 'approve')}>{actingId === row.id ? 'Approving...' : 'Approve'}</button><button className="btn btn-sm btn-out" disabled={!leave?.can_approve || actingId === row.id} onClick={() => decide(row.id, 'reject')}>{actingId === row.id ? 'Rejecting...' : 'Reject'}</button></div> : <span className="hint">Closed</span>}</td></tr>)}</tbody></table>{!leaveRows.length && <div className="principal-empty"><b>No leave requests found.</b><p>New staff requests will appear here.</p></div>}</div></section>}
+    {activeTab === 'jobs' && <section className="card hr-card"><div className="hr-card-head"><div><span>Recruitment register</span><h3>Open vacancies</h3></div><b>{jobRows.length} records</b></div><div className="tbl-scroll"><table className="tbl hr-table"><thead><tr><th>Role / Vacancy</th><th>Department</th><th>Employment type</th><th>Openings</th><th>Status</th></tr></thead><tbody>{jobRows.map((row: any) => <tr key={row.id}><td><b>{row.title}</b></td><td>{row.dept}</td><td><span className="hr-kind">{row.kind}</span></td><td>{row.openings}</td><td><span className={`pill s-${row.status}`}>{row.status}</span></td></tr>)}</tbody></table>{!jobRows.length && <div className="principal-empty"><b>No recruitment vacancies found.</b><p>Open positions will appear here when available.</p></div>}</div></section>}
+    {showVacancyForm && <div className="modal-bg recruitment-modal-bg" role="dialog" aria-modal="true" aria-labelledby="vacancy-form-title"><form className="modal recruitment-modal" onSubmit={addVacancy}><div className="modal-h"><div><h3 id="vacancy-form-title">Add recruitment requirement</h3><p>Create a vacancy for this tenant only. The selected department is verified before it is saved.</p></div><button type="button" className="modal-x" aria-label="Close" onClick={() => setShowVacancyForm(false)}>×</button></div><div className="modal-b"><div className="recruitment-form-grid"><label className="recruitment-wide">Role / Vacancy Title <input className="inp" required maxLength={180} value={vacancy.title} onChange={e => setVacancy({ ...vacancy, title: e.target.value })} placeholder="Assistant Professor - Computer Science" /></label><label>Department <select className="select" required value={vacancy.dept_id} onChange={e => setVacancy({ ...vacancy, dept_id: e.target.value })}><option value="">Select tenant department</option>{departments.map((department: any) => <option key={department.id} value={department.id}>{department.code} — {department.name}</option>)}</select>{!departments.length && <small>Create a tenant department in Academic Setup first.</small>}</label><label>Employment Type <select className="select" value={vacancy.kind} onChange={e => setVacancy({ ...vacancy, kind: e.target.value })}>{['Faculty', 'Staff', 'Administrative', 'Contract'].map(value => <option key={value}>{value}</option>)}</select></label><label>Number of Openings <input className="inp" required type="number" min="1" max="999" value={vacancy.openings} onChange={e => setVacancy({ ...vacancy, openings: e.target.value })} /></label><label>Status <select className="select" value={vacancy.status} onChange={e => setVacancy({ ...vacancy, status: e.target.value })}>{['open', 'closed', 'filled', 'cancelled'].map(value => <option key={value} value={value}>{value[0].toUpperCase() + value.slice(1)}</option>)}</select></label><label>Qualification <input className="inp" value={vacancy.qualification} onChange={e => setVacancy({ ...vacancy, qualification: e.target.value })} placeholder="M.Tech / PhD" /></label><label>Experience <input className="inp" value={vacancy.experience} onChange={e => setVacancy({ ...vacancy, experience: e.target.value })} placeholder="2+ years" /></label><label>Skills <input className="inp" value={vacancy.skills} onChange={e => setVacancy({ ...vacancy, skills: e.target.value })} placeholder="Teaching, mentoring" /></label><label>Application / Closing Date <input className="inp" type="date" value={vacancy.closing_date} onChange={e => setVacancy({ ...vacancy, closing_date: e.target.value })} /></label><label>Priority <select className="select" value={vacancy.priority} onChange={e => setVacancy({ ...vacancy, priority: e.target.value })}>{['normal', 'low', 'high', 'urgent'].map(value => <option key={value} value={value}>{value[0].toUpperCase() + value.slice(1)}</option>)}</select></label><label className="recruitment-wide">Description / Requirement <textarea className="inp" value={vacancy.description} onChange={e => setVacancy({ ...vacancy, description: e.target.value })} placeholder="Teaching and academic responsibilities..." /></label><label className="recruitment-wide">Notes <textarea className="inp" value={vacancy.notes} onChange={e => setVacancy({ ...vacancy, notes: e.target.value })} placeholder="Optional internal note" /></label></div></div><div className="modal-f"><button type="button" className="btn btn-out" onClick={() => setShowVacancyForm(false)}>Cancel</button><button className="btn btn-crimson" disabled={posting || !departments.length}>{posting ? 'Adding vacancy...' : 'Add Vacancy'}</button></div></form></div>}
+    {decision && <DecisionToast decision={decision} onClose={() => setDecision(null)} />}
+  </div>
 }

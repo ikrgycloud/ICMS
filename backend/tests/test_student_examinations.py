@@ -10,6 +10,7 @@ if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
 from database import SessionLocal, TENANT
+from domain_seed import seed_domain
 from models import User
 import domain_models as D
 
@@ -17,8 +18,9 @@ import domain_models as D
 class StudentExaminationsPortalTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        seed_domain()
         cls.db = SessionLocal()
-        cls.base_url = os.getenv("ICMS_API_URL", "http://127.0.0.1:8010")
+        cls.base_url = "http://127.0.0.1:8000"
         cls.student_token = cls._login("student")
         cls.professor_token = cls._login("professor")
 
@@ -33,7 +35,7 @@ class StudentExaminationsPortalTests(unittest.TestCase):
 
         other_student = cls.db.query(D.Student).filter(D.Student.id != cls.student.id).first()
         cls.temp_mark_id = "test_portal_other_student_mark"
-        existing = cls.db.query(D.Mark).get(cls.temp_mark_id)
+        existing = cls.db.get(D.Mark, cls.temp_mark_id)
         if existing is None:
             existing = D.Mark(
                 id=cls.temp_mark_id,

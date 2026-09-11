@@ -33,9 +33,9 @@ NOT_ALLOWED = "Not Allowed"
 
 # Permission verbs (Document §9 — 21 verbs stored in the permission catalog).
 VERBS = [
-    "view", "create", "edit", "delete", "approve", "reject", "submit", "verify",
-    "review", "assign", "export", "print", "download", "upload", "configure",
-    "publish", "lock", "unlock", "override", "audit", "delegate",
+    "view", "create", "edit", "delete", "approve", "reject", "submit", "receive",
+    "verify", "review", "assign", "export", "print", "download", "upload",
+    "configure", "publish", "lock", "unlock", "override", "audit", "delegate",
 ]
 
 # Org-scope tree levels (Document §11), broad -> narrow.
@@ -54,11 +54,8 @@ RECOMMEND_OUT = "RECOMMEND"
 # ----------------------------------------------------------------------------
 # JWT-ish token (self-contained, HS256). Short-lived; carries tenant + scope.
 # ----------------------------------------------------------------------------
-_environment = os.environ.get("ICMS_ENVIRONMENT", "development").lower()
-_configured_secret = os.environ.get("JWT_SECRET", "")
-if _environment in {"production", "prod"} and (not _configured_secret or _configured_secret == "change-me-in-production"):
-    raise RuntimeError("JWT_SECRET must be configured securely in production")
-_SECRET = (_configured_secret or "icms-development-only-secret-not-for-production").encode()
+_SECRET = os.environ.get(
+    "JWT_SECRET", "icms-authority-plane-secret-key-change-in-prod").encode()
 
 
 def _b64e(raw: bytes) -> str:
@@ -214,23 +211,6 @@ def authorize(*, ctx: dict, action: str, resource: str,
     return Decision(ALLOW, "Authorized", rbac_authority)
 
 
-def _matches_delegated_authority(authority: str, action: str) -> bool:
-    if authority in ("*", action):
-        return True
-    if not isinstance(authority, str):
-        return False
-    normalized = authority.strip()
-    if not normalized:
-        return False
-    name = normalized.lower()
-    if name == action.lower():
-        return True
-    if ":" in name:
-        granted_action, _, _ = name.partition(":")
-        return granted_action == action.lower()
-    return False
-
-
 def _delegation_valid(d: dict, action: str, target_scope_level: str,
                       amount: Optional[float]) -> bool:
     if d.get("status") != "active":
@@ -243,8 +223,7 @@ def _delegation_valid(d: dict, action: str, target_scope_level: str,
         return False
     if not (start <= now <= end):
         return False
-    authority = d.get("authority")
-    if authority and action not in ("view",) and not _matches_delegated_authority(authority, action):
+    if d.get("authority") and action not in ("view",) and d["authority"] not in ("*", action):
         return False
     if d.get("limit") is not None and amount is not None and amount > float(d["limit"]):
         return False

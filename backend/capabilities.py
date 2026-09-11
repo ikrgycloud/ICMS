@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Capability map — the bridge between the 40 offices (Document Part B) and the
 functional modules the app renders. It answers two questions:
@@ -18,27 +18,8 @@ through authorize() in authority.py. This map only decides what is *offered*.
 
 # App module keys and their display metadata (icon is a glyph used by the UI).
 MODULES = {
-    "messages": {"label": "Messages", "icon": "Msg", "group": "Workspace"},
-    "announcements": {"label": "Announcements", "icon": "Ann", "group": "Workspace"},
-    "assignments": {"label": "Assignments", "icon": "Asn", "group": "Academics"},
-    "assessments": {"label": "Assessments", "icon": "Asm", "group": "Academics"},
-    "marks_entry": {"label": "Marks Entry", "icon": "Mrk", "group": "Academics"},
-    "course_materials": {"label": "Course Materials", "icon": "Mat", "group": "Academics"},
-    "mentoring": {"label": "Mentoring", "icon": "Mtr", "group": "Academics"},
-    "payroll": {"label": "Payroll", "icon": "Pay", "group": "Operations"},
-    "leave": {"label": "Leave Requests", "icon": "Lve", "group": "Operations"},
-    "digital_id": {"label": "Digital ID", "icon": "ID", "group": "Reference"},
-    "frontdesk_dashboard": {"label": "Dashboard", "icon": "◆", "group": "Front Desk"},
-    "frontdesk_visitors": {"label": "Visitor Management", "icon": "◉", "group": "Front Desk"},
-    "frontdesk_appointments": {"label": "Appointments", "icon": "◷", "group": "Front Desk"},
-    "frontdesk_helpdesk": {"label": "Helpdesk", "icon": "?", "group": "Front Desk"},
-    "frontdesk_calls": {"label": "Telephony / Calls", "icon": "☎", "group": "Front Desk"},
-    "frontdesk_directory": {"label": "Directory", "icon": "▦", "group": "Front Desk"},
-    "frontdesk_delegations": {"label": "Delegations", "icon": "⤳", "group": "Front Desk"},
-    "frontdesk_verify": {"label": "Verify / Scan", "icon": "⌗", "group": "Front Desk"},
+    "academic_catalog": {"label": "Academic Setup", "icon": "Setup", "group": "Academics"},
     "curriculum":   {"label": "Curriculum", "icon": "Curr", "group": "Academics"},
-    "program_proposals": {"label": "Programme Requests", "icon": "Curr", "group": "Academics"},
-    "rollover":     {"label": "Academic Rollover", "icon": "Rollover", "group": "Academics"},
     "overview":     {"label": "Overview",      "icon": "◆", "group": "Workspace"},
     "my_schedule":  {"label": "My Schedule",   "icon": "📅", "group": "Workspace"},
     "calendar":     {"label": "Calendar",      "icon": "📆", "group": "Workspace"},
@@ -66,14 +47,16 @@ MODULES = {
     "directory":    {"label": "Directory",     "icon": "▦", "group": "Reference"},
     "matrices":     {"label": "Matrices",      "icon": "▩", "group": "Reference"},
     "governance":   {"label": "Governance",    "icon": "🏛", "group": "Authority"},
+    "risks":        {"label": "Risk & Issues", "icon": "⚠", "group": "Performance"},
+    "escalations":  {"label": "Escalations", "icon": "↗", "group": "Authority"},
+    "campus_reports": {"label": "Reports & Analytics", "icon": "▤", "group": "Reports"},
     "admin":        {"label": "System Admin",  "icon": "⚙", "group": "Authority"},
     "analytics":    {"label": "Analytics",     "icon": "📊", "group": "Workspace"},
-    "accountant_report": {"label": "Accountant Report", "icon": "▤", "group": "Reports"},
     "integrations": {"label": "Integrations",  "icon": "🔌", "group": "Platform"},
 }
 
 # Modules every signed-in office gets.
-BASE_MODULES = ["overview", "calendar",
+BASE_MODULES = ["overview", "calendar", "academic_calendar",
                 "workflows", "delegation", "audit", "directory", "matrices"]
 
 # Per-office module assignment (office_n -> [module keys], in addition to BASE).
@@ -81,27 +64,27 @@ BASE_MODULES = ["overview", "calendar",
 OFFICE_MODULES = {
     1:  ["governance", "analytics", "finance", "hr", "integrations", "approvals"], # Chairman
     2:  ["governance", "analytics", "finance", "approvals"],                       # Vice Chairman
-    3:  ["analytics", "academics", "finance", "hr", "approvals"],                  # Campus Head
-    4:  ["my_schedule", "analytics", "academics", "students", "admissions", "attendance", "examinations", "finance", "rollover", "hr", "procurement", "assets", "hostel", "transport", "grievance", "approvals"],  # Principal: branch oversight views
+    3:  ["analytics", "academics", "finance", "hr", "approvals", "risks"],        # Campus Head
+    4:  ["my_schedule", "analytics", "academics", "academic_catalog", "students", "admissions", "attendance", "examinations", "finance", "hr", "procurement", "assets", "hostel", "transport", "grievance", "governance", "approvals"],  # Principal: branch oversight views
     5:  ["academics", "students", "attendance", "examinations", "approvals"],      # Vice Principal
-        6: ["academics", "students", "examinations", "rollover", "research", "academic_calendar", "approvals"],        # Dean Academics
+    6:  ["academics", "students", "examinations", "research", "approvals"],        # Dean Academics
     7:  ["hr", "procurement", "assets", "finance", "approvals"],                   # Dean Administration
     8:  ["students", "grievance", "hostel", "approvals"],                          # Dean Student Affairs
     9:  ["research", "analytics", "approvals"],                                    # Dean R&D / IQAC
-    10: ["academics", "students", "attendance", "examinations", "hr", "academic_calendar", "approvals"],# HOD
-    11: ["my_schedule", "messages", "announcements", "academics", "attendance", "assignments", "assessments", "marks_entry", "examinations", "course_materials", "mentoring", "research", "leave", "payroll", "digital_id"], # Professor
-    12: ["my_schedule", "messages", "announcements", "academics", "attendance", "assignments", "assessments", "marks_entry", "examinations", "course_materials", "mentoring", "research", "leave", "payroll", "digital_id"], # Associate Professor
-    13: ["my_schedule", "messages", "announcements", "academics", "attendance", "assignments", "assessments", "marks_entry", "examinations", "course_materials", "mentoring", "leave", "payroll", "digital_id"], # Assistant Professor
-    14: ["my_schedule", "messages", "announcements", "academics", "attendance", "assignments", "assessments", "marks_entry", "examinations", "course_materials", "leave", "payroll", "digital_id"], # Lecturer
+    10: ["academics", "students", "attendance", "examinations", "hr", "approvals"],# HOD
+    11: ["my_schedule", "academics", "attendance", "examinations", "research"], # Professor
+    12: ["my_schedule", "academics", "attendance", "examinations", "research"], # Associate Professor
+    13: ["my_schedule", "academics", "attendance", "examinations"],              # Assistant Professor
+    14: ["my_schedule", "academics", "attendance", "examinations"],              # Lecturer
     15: ["admissions", "students", "approvals"],                                   # Admission Office
     16: ["examinations", "students", "approvals"],                                 # Exam Controller
-    17: ["academics", "attendance", "rollover", "academic_calendar", "approvals"],             # Academic Coordinator
+    17: ["academics", "attendance", "approvals"],                                  # Academic Coordinator
     18: ["placements", "students", "analytics"],                                   # Placement Office
     19: ["library"],                                                              # Library
     20: ["grievance", "students"],                                                 # Grievance
     21: ["grievance", "students"],                                                 # Discipline
-    22: ["finance", "students", "rollover", "approvals", "analytics"],                         # Finance Manager
-    23: ["finance", "students", "hr", "approvals", "accountant_report"],         # Accounts
+    22: ["finance", "students", "approvals", "analytics"],                         # Finance Manager
+    23: ["finance", "students", "approvals"],                                      # Accounts
     24: ["hr", "approvals", "analytics"],                                          # HR Manager
     25: ["hr", "approvals"],                                                       # HR Executive
     26: ["procurement", "assets", "hr", "approvals"],                              # Admin Manager
@@ -113,16 +96,13 @@ OFFICE_MODULES = {
     32: ["procurement", "approvals"],                                              # Purchase
     33: ["assets", "procurement"],                                                 # Store / Inventory
     34: ["assets"],                                                               # Security
-    35: ["frontdesk_dashboard", "frontdesk_visitors", "frontdesk_verify", "frontdesk_appointments", "frontdesk_helpdesk", "frontdesk_calls", "frontdesk_directory", "frontdesk_delegations"],
+    35: ["students", "directory"],                                                 # Front Office
     36: ["students", "academics", "attendance", "examinations", "scores", "finance",         # Student Portal
          "library", "hostel", "transport", "placements", "grievance"],
     37: ["students", "finance"],                                                   # Parent Portal
     38: ["placements", "analytics"],                                               # Alumni
     39: ["finance", "audit", "analytics"],                                         # External Auditor
     40: ["governance", "analytics", "finance", "hr", "approvals"],                 # Governing Body
-    41: ["program_proposals", "curriculum", "academic_calendar", "approvals"],       # Program Coordinator
-    42: ["academics", "academic_calendar", "approvals"],                              # Academic Office
-    43: ["academics", "academic_calendar", "approvals"],                              # Timetable Coordinator
 }
 
 # Which verb (from the RBAC matrix) a module's key actions require. The UI uses
@@ -132,21 +112,17 @@ MODULE_ACTIONS = {
     "calendar":     {"view": "view", "create": "create", "edit": "edit",
                      "delete": "delete"},
     "academic_calendar": {"view": "view", "create": "create", "edit": "edit",
-                          "delete": "delete", "approve_proposal": "approve",
-                          "reject_proposal": "reject"},
+                          "delete": "delete"},
     "students":     {"view": "view", "add": "create", "edit": "edit"},
 
     "academics":    {"view": "view", "create_section": "create", "create_course": "create", "edit": "edit",
                      "assign_faculty": "assign"},
 
-    "academics":    {"view": "view", "create_program": "create", "create_course": "create", "create_section": "create", "edit": "edit",
+    "academics":    {"view": "view", "create_course": "create", "create_section": "create", "edit": "edit",
                      "assign_faculty": "assign", "manage_timetable": "edit",
                      "create_task": "create", "edit_task": "edit",
                      "publish_task": "publish", "close_task": "edit",
-                     "publish_announcement": "publish", "approve_proposal": "approve",
-                     "reject_proposal": "reject", "resolve_exception": "verify",
-                     "manage_quality": "create", "manage_committee": "create",
-                     "manage_outcomes": "create", "manage_planning": "create"},
+                     "publish_announcement": "publish"},
     "attendance":   {"view": "view", "mark": "create", "correct": "edit"},
     "examinations": {"view": "view", "enter_marks": "create", "moderate": "verify",
                      "publish_result": "publish", "lock": "lock",
@@ -154,21 +130,7 @@ MODULE_ACTIONS = {
                      "publish_marks": "publish", "manage_timetable": "edit"},
     "scores":       {"view": "view"},
     "admissions":   {"view": "view", "verify": "verify", "offer": "approve",
-                     "reject": "reject", "manage_cycle": "edit",
-                     "register_application": "create", "submit": "submit",
-                     "view_cycle": "view", "create_application": "create",
-                     "edit_application": "edit", "submit_application": "submit",
-                     "upload_document": "upload", "view_application": "view",
-                     "review_application": "review",
-                     "view_eligibility": "view", "manage_eligibility_rules": "edit",
-                     "manage_quotas": "edit", "evaluate_eligibility": "verify",
-                     "view_assessment": "view", "record_assessment": "verify", "manage_merit": "edit",
-                     "schedule_counselling": "create", "record_counselling": "edit", "manage_seat_pool": "edit",
-                     "allocate_seat": "approve", "manage_waitlist": "approve", "recommend_offer": "create",
-                     "approve_offer": "approve", "issue_offer": "approve",
-                     "start_review": "edit", "request_correction": "edit",
-                     "resubmit": "submit", "complete_document_verification": "verify",
-                     "accept_offer": "submit", "withdraw": "submit"},
+                     "reject": "reject"},
     "finance":      {"view": "view", "create_invoice": "create",
                      "record_payment": "create", "waive": "approve",
                      "approve_budget": "approve"},
@@ -187,6 +149,13 @@ MODULE_ACTIONS = {
     "governance":   {"view": "view", "publish_policy": "publish", "edit_dashboard": "edit"},
     "admin":        {"view": "view", "configure": "configure"},
     "approvals":    {"view": "view", "approve": "approve", "reject": "reject"},
+    "risks":        {"view": "view", "create": "create", "edit": "edit", "assign": "assign",
+                     "corrective_action": "create", "corrective_update": "edit",
+                     "resolve": "edit", "close": "edit", "escalate": "approve"},
+        "escalations": {"view": "view", "create": "create", "edit": "edit", "submit": "submit",
+                                        "receive": "receive", "follow_up": "edit", "resolve": "edit", "close": "edit"},
+        "campus_reports": {"view": "view", "create": "create", "edit": "edit", "submit": "submit",
+                                             "resubmit": "submit", "review": "review", "return": "edit", "approve": "approve"},
 }
 
 
@@ -198,86 +167,47 @@ ACTION_OFFICE_ALLOW = {
     ("calendar", "create"): set(range(1, 36)) | {40},
     ("calendar", "edit"): set(range(1, 36)) | {40},
     ("calendar", "delete"): set(range(1, 36)) | {40},
-    ("academic_calendar", "view"): {6, 10, 17},
-    ("academic_calendar", "create"): {6, 10, 17},
-    ("academic_calendar", "edit"): {6, 10, 17},
-    ("academic_calendar", "delete"): {6, 10, 17},
-    ("academic_calendar", "approve_proposal"): {6},
-    ("academic_calendar", "reject_proposal"): {6},
-    ("students", "add"): {15},                        # Admissions owns student creation
-    ("students", "edit"): {10, 15},                   # HOD and Admissions maintain records
-    ("academics", "create_section"): {6, 10, 17},     # Dean Acad, HOD, Acad Coordinator
-    ("academics", "create_program"): {6, 10, 17},     # Academic programme master owners
-    ("academics", "create_course"): {6, 10, 17},      # Curriculum owners
+    ("academic_calendar", "create"): {1, 2, 4, 5},
+    ("academic_calendar", "edit"): {1, 2, 4, 5},
+    ("academic_calendar", "delete"): {1, 2, 4, 5},
+    ("students", "add"): {4, 15, 35},                 # Principal branch setup; Admissions / Front Office daily intake
+    ("students", "edit"): {10, 15, 35},               # Principal has oversight, not record editing
+    ("academics", "create_section"): {4, 6, 10, 17},  # Principal + curriculum owners
+    ("academics", "create_course"): {4, 6, 10, 17},   # Principal + curriculum owners
     ("academics", "assign_faculty"): {6, 10, 17},
-    ("academics", "manage_timetable"): {43},
+    ("academics", "manage_timetable"): {6, 10, 17},
     ("academics", "create_task"): {10, 11, 12, 13, 14, 17},
     ("academics", "edit_task"): {10, 11, 12, 13, 14, 17},
     ("academics", "publish_task"): {10, 11, 12, 13, 14, 17},
     ("academics", "close_task"): {10, 11, 12, 13, 14, 17},
     ("academics", "publish_announcement"): {6, 8, 10, 17},
-    ("academics", "approve_proposal"): {6},
-    ("academics", "reject_proposal"): {6},
-    ("academics", "resolve_exception"): {6},
-    ("academics", "manage_quality"): {6, 10, 17},
-    ("academics", "manage_committee"): {6, 9, 17},
-    ("academics", "manage_outcomes"): {6, 9, 17},
-    ("academics", "manage_planning"): {6, 17},
     ("attendance", "mark"): {10, 11, 12, 13, 14, 17},  # HOD + faculty + coordinator
     ("attendance", "correct"): {10, 17},
     ("examinations", "enter_marks"): {11, 12, 13, 14, 16},  # faculty + exam cell
-    ("examinations", "moderate"): {16},
+    ("examinations", "moderate"): {10, 16},
     ("examinations", "publish_result"): {16},          # Exam Controller only (SoD)
     ("examinations", "lock"): {16},
     ("examinations", "create_assessment"): {11, 12, 13, 14, 16},
     ("examinations", "edit_assessment"): {11, 12, 13, 14, 16},
-    ("examinations", "publish_marks"): {11, 12, 13, 14, 16},
+    ("examinations", "publish_marks"): {16},
     ("examinations", "manage_timetable"): {6, 10, 16, 17},
     ("admissions", "verify"): {15},
     ("admissions", "offer"): {4, 15},
     ("admissions", "reject"): {4, 15},
-    ("admissions", "manage_cycle"): {15},
-    ("admissions", "view_cycle"): {4, 15, 35},
-    ("admissions", "register_application"): {15, 35},
-    ("admissions", "create_application"): {15, 35},
-    ("admissions", "edit_application"): {15, 35},
-    ("admissions", "submit_application"): {15, 35},
-    ("admissions", "upload_document"): {15, 35},
-    ("admissions", "view_application"): {4, 15, 35},
-    ("admissions", "review_application"): {15},
-    ("admissions", "view_eligibility"): {4, 15},
-    ("admissions", "manage_eligibility_rules"): {15},
-    ("admissions", "manage_quotas"): {15},
-    ("admissions", "evaluate_eligibility"): {15},
-    ("admissions", "view_assessment"): {4, 15},
-    ("admissions", "record_assessment"): {15},
-    ("admissions", "manage_merit"): {15},
-    ("admissions", "schedule_counselling"): {15},
-    ("admissions", "record_counselling"): {15},
-    ("admissions", "manage_seat_pool"): {15},
-    ("admissions", "allocate_seat"): {15},
-    ("admissions", "manage_waitlist"): {15},
-    ("admissions", "recommend_offer"): {15},
-    ("admissions", "approve_offer"): {4, 15},
-    ("admissions", "issue_offer"): {4, 15},
-    ("admissions", "submit"): {15, 35},
-    ("admissions", "start_review"): {15},
-    ("admissions", "request_correction"): {15},
-    ("admissions", "resubmit"): {15, 35},
-    ("admissions", "complete_document_verification"): {15},
-    ("admissions", "allocate"): {15},
-    ("admissions", "withdraw"): {15},
     ("finance", "create_invoice"): {22, 23},
     ("finance", "record_payment"): {22, 23},
     ("finance", "waive"): {4, 22, 23},                 # Principal/CFO, Finance, Accounts
     ("finance", "approve_budget"): {1, 2, 3, 4, 22, 40},
-    ("hr", "post_job"): {24, 25, 26},
-    ("hr", "approve_leave"): {10, 24, 26},             # HOD, HR Mgr, Admin Mgr
-    ("hr", "reject_leave"): {10, 24, 26},
+    # Recruitment requirements are initiated by the campus Principal.  The
+    # existing HR offices remain recognised by the capability catalog; the
+    # creation route below additionally limits this Principal-page action.
+    ("hr", "post_job"): {4, 24, 25, 26},
+    ("hr", "approve_leave"): {4, 10, 24, 26},          # Principal is the final stage of faculty leave
+    ("hr", "reject_leave"): {4, 10, 24, 26},
     ("library", "add_book"): {19},
     ("library", "issue"): {19},
     ("library", "return"): {19},
-    ("hostel", "allocate"): {8, 30},
+    ("hostel", "allocate"): {4, 8, 30},  # Principal approves campus hostel allocation
     ("hostel", "add_room"): {30},
     ("transport", "assign"): {31},
     ("transport", "add_route"): {31},
@@ -292,6 +222,7 @@ ACTION_OFFICE_ALLOW = {
     ("grievance", "investigate"): {8, 20, 21},
     ("governance", "publish_policy"): {1, 2, 40},
     ("governance", "edit_dashboard"): {1, 2, 40},
+    ("escalations", "receive"): {1, 2, 3, 4},
     ("admin", "configure"): {27, 28},
 }
 
@@ -305,12 +236,8 @@ def action_allowed_for_office(module: str, action: str, office_n: int) -> bool:
 
 def modules_for_office(n: int) -> list:
     """Ordered, de-duplicated module list for an office."""
-    # Keep only the route shell needed for the future Front Office dashboard.
-    # Shared base modules remain unchanged for every other office.
-    if n == 35:
-        return list(OFFICE_MODULES[35])
     mods = list(OFFICE_MODULES.get(n, []))
-    if n in {4, 5, 6, 10, 17, 41}:
+    if n in {4, 5, 6, 10, 17}:
         mods.append("curriculum")
     # base modules always available, appended after the office-specific ones
     ordered = []

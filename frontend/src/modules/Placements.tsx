@@ -6,6 +6,7 @@ export default function Placements({ caps }: { caps: any }) {
   const [data, setData] = useState<any>(null)
   useEffect(() => { api.placements().then(setData).catch(() => {}) }, [])
   if (!data) return <Spinner />
+  if (data.data_status === 'unavailable') return <div className="fade-in"><PageHead title="Placements" sub="Recruiter drives and offers" /><div className="empty">{data.reason || 'Campus-scoped placement data is unavailable.'}</div></div>
   const s = data.summary
   return (
     <div className="fade-in">

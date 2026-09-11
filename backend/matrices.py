@@ -20,8 +20,10 @@ RBAC_MATRIX = {
     3:  {"view": F, "create": L, "edit": L, "delete": X, "approve": L, "reject": L, "verify": V, "publish": C, "export": F, "configure": X, "delegate": D, "audit": V},
     4:  {"view": F, "create": L, "edit": L, "delete": X, "approve": F, "reject": F, "verify": V, "publish": C, "export": F, "configure": X, "delegate": F, "audit": V},
     5:  {"view": F, "create": L, "edit": L, "delete": X, "approve": D, "reject": L, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
-    6:  {"view": F, "create": F, "edit": L, "delete": X, "approve": L, "reject": L, "verify": F, "publish": X, "export": F, "configure": X, "delegate": X, "audit": V},
-    10: {"view": F, "create": F, "edit": L, "delete": X, "approve": L, "reject": L, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
+    # HOD is the designated verification stage for marks_submission. This
+    # permits only verification decisions on the assigned workflow; marks
+    # entry and result publication remain separately reserved.
+    10: {"view": F, "create": F, "edit": L, "delete": X, "approve": L, "reject": L, "verify": L, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
     14: {"view": L, "create": L, "edit": L, "delete": X, "approve": X, "reject": X, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
     15: {"view": F, "create": F, "edit": L, "delete": X, "approve": L, "reject": L, "verify": F, "publish": X, "export": F, "configure": X, "delegate": X, "audit": V},
     16: {"view": F, "create": F, "edit": L, "delete": X, "approve": F, "reject": F, "verify": F, "publish": F, "export": F, "configure": L, "delegate": X, "audit": F},
@@ -30,9 +32,6 @@ RBAC_MATRIX = {
     27: {"view": F, "create": F, "edit": F, "delete": L, "approve": L, "reject": L, "verify": V, "publish": X, "export": F, "configure": F, "delegate": X, "audit": F},
     28: {"view": F, "create": F, "edit": F, "delete": L, "approve": L, "reject": L, "verify": V, "publish": X, "export": F, "configure": F, "delegate": X, "audit": F},
     36: {"view": V, "create": L, "edit": X, "delete": X, "approve": X, "reject": X, "verify": X, "publish": X, "export": L, "configure": X, "delegate": X, "audit": X},
-    41: {"view": F, "create": F, "edit": L, "delete": X, "approve": X, "reject": X, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
-    42: {"view": F, "create": F, "edit": L, "delete": X, "approve": X, "reject": X, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
-    43: {"view": F, "create": F, "edit": L, "delete": X, "approve": X, "reject": X, "verify": L, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
     37: {"view": V, "create": X, "edit": X, "delete": X, "approve": X, "reject": X, "verify": X, "publish": X, "export": X, "configure": X, "delegate": X, "audit": X},
     39: {"view": V, "create": X, "edit": X, "delete": X, "approve": X, "reject": X, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
     40: {"view": F, "create": L, "edit": X, "delete": X, "approve": F, "reject": F, "verify": V, "publish": V, "export": F, "configure": L, "delegate": F, "audit": F},
@@ -56,7 +55,7 @@ def rbac_for(office_n: int, level: int, verb: str) -> str:
     if verb in row:
         return row[verb]
     # Sensible defaults for verbs not in the 12-column representative matrix.
-    if verb in ("submit", "review", "assign", "upload", "print", "download"):
+    if verb in ("submit", "receive", "review", "assign", "upload", "print", "download"):
         return LIMITED if level <= 7 else VIEW
     if verb in ("lock", "unlock", "override"):
         return LIMITED if office_n in (16, 27, 28) else NOT_ALLOWED
@@ -71,9 +70,13 @@ def rbac_for(office_n: int, level: int, verb: str) -> str:
 # Each: key, label, chain[initiator, reviewer, approver, final], escalation,
 #       owning office_n, valid workflow states for progression, has_amount
 APPROVAL_MATRIX = [
-    {"key": "fee_structure", "label": "Fee structure approval", "office_n": 22,
-     "chain": ["Finance Manager", "Principal / Campus Head"],
-     "escalation": "Chairman", "amount": False},
+    {"key": "branch_operational_plan", "label": "Branch Operational Plan", "office_n": 3,
+     "chain": ["Campus Head", "Vice Chairman"],
+     "escalation": "Vice Chairman", "amount": False},
+    {"key": "compliance_requirement", "label": "Compliance requirement", "office_n": 4,
+     "chain": ["Responsible Department", "IQAC", "Principal", "Vice Chairman"],
+     "stage_owners": [9, 9, 4, 2], "final_stages": [2, 3],
+     "stage_escalations": {2: 3}, "escalation": "Vice Chairman", "amount": False},
     {"key": "student_admission", "label": "Student admission", "office_n": 15,
      "chain": ["Applicant", "Admissions Office", "Admissions Dir.", "Principal/Registrar"],
      "escalation": "VC", "amount": False},
@@ -81,8 +84,8 @@ APPROVAL_MATRIX = [
      "chain": ["Student", "Faculty Advisor", "HOD", "Vice Principal"],
      "escalation": "Principal", "amount": False},
     {"key": "attendance_correction", "label": "Attendance correction", "office_n": 10,
-      "chain": ["Faculty", "Class Coordinator", "HOD", "Vice Principal"],
-      "escalation": "", "amount": False},
+     "chain": ["Faculty", "Class Coordinator", "HOD", "Vice Principal"],
+     "escalation": "Principal", "amount": False},
     {"key": "faculty_leave", "label": "Faculty leave", "office_n": 25,
      "chain": ["Faculty", "HOD", "Vice Principal", "Principal"],
      "escalation": "VC", "amount": False},
@@ -93,8 +96,9 @@ APPROVAL_MATRIX = [
      "chain": ["Student", "Accounts Office", "Finance Mgr", "CFO"],
      "escalation": "VC", "amount": True},
     {"key": "purchase_request", "label": "Purchase request → PO", "office_n": 32,
-     "chain": ["Any office", "Purchase Office", "Procurement Mgr", "CFO/Principal"],
-     "escalation": "VC", "amount": True},
+     "chain": ["Any office", "Purchase Office", "Procurement Manager", "Principal (final authority)", "Vice Chairman (escalation)"],
+     "stage_owners": [None, 32, 26, 4, 2], "final_stages": [3, 4],
+     "stage_escalations": {1: 4, 2: 4, 3: 4}, "escalation": "VC", "amount": True},
     {"key": "payroll_approval", "label": "Payroll approval", "office_n": 24,
      "chain": ["HR Executive", "HR Manager", "CFO", "CFO"],
      "escalation": "VC", "amount": True},
@@ -102,7 +106,8 @@ APPROVAL_MATRIX = [
      "chain": ["QP Setter", "QP Moderator", "QP Coordinator", "Controller of Exams"],
      "escalation": "VC", "amount": False},
     {"key": "marks_submission", "label": "Marks submission", "office_n": 16,
-     "chain": ["Faculty", "Evaluation Coord.", "HOD", "Controller of Exams"],
+     "chain": ["Faculty", "HOD verification", "Controller of Exams"],
+     "stage_owners": [None, 10, 16], "final_stages": [2],
      "escalation": "Principal", "amount": False},
     {"key": "result_publication", "label": "Result publication", "office_n": 16,
      "chain": ["Result Proc.", "Grade Verify", "Dy. Controller", "Controller of Exams"],
@@ -131,6 +136,9 @@ APPROVAL_MATRIX = [
     {"key": "infrastructure_capex", "label": "Infrastructure / capex", "office_n": 29,
      "chain": ["Any office", "Maintenance/Facilities", "Principal", "VC/Chairman"],
      "escalation": "Chairman", "amount": True},
+    {"key": "infrastructure_capex_v2", "label": "Infrastructure / capex", "office_n": 29,
+     "chain": ["Any office", "Maintenance/Facilities", "Principal", "Campus Head", "VC/Chairman"],
+     "escalation": "Chairman", "amount": True},
     {"key": "recruitment", "label": "Recruitment / promotion", "office_n": 24,
      "chain": ["HR", "HR Director", "Principal", "VC"],
      "escalation": "Chairman", "amount": False},
@@ -140,11 +148,19 @@ APPROVAL_MATRIX = [
     {"key": "branch_creation", "label": "Branch creation / closure", "office_n": 1,
      "chain": ["Chairman/VC", "VC", "Chairman", "Chairman"],
      "escalation": "—", "amount": False},
+    {"key": "campus_risk_escalation", "label": "Campus risk escalation", "office_n": 3,
+     "chain": ["Campus Head", "Principal", "Vice Chairman"],
+     "stage_owners": [3, 4, 2], "final_stages": [1, 2],
+     "stage_escalations": {1: 2}, "escalation": "Vice Chairman", "amount": False},
+    {"key": "campus_risk_escalation_critical", "label": "Critical campus risk escalation", "office_n": 3,
+     "chain": ["Campus Head", "Principal", "Vice Chairman", "Chairman"],
+     "stage_owners": [3, 4, 2, 1], "final_stages": [1, 2, 3],
+     "stage_escalations": {1: 2, 2: 3}, "escalation": "Chairman", "amount": False},
 ]
 
 # Workflow states every request moves through (Document §7, office workflow images).
-WF_STATES = ["draft", "submitted", "under_review", "reviewed", "approved",
-             "executed", "rejected", "escalated"]
+WF_STATES = ["draft", "submitted", "under_review", "reviewed", "returned", "approved",
+             "active", "executed", "rejected", "escalated"]
 
 # Which state must an entity be in for each action to be valid (Document §7 step 11).
 WF_VALID = {
@@ -154,20 +170,36 @@ WF_VALID = {
     "reject": ["submitted", "under_review", "reviewed", "escalated"],
     "execute": ["approved"],
     "escalate": ["submitted", "under_review", "reviewed"],
+    "return": ["submitted", "under_review", "reviewed"],
 }
 
 # Approval limits by process & scope level (Document §10 — configurable, never hardcoded).
 # scope_level -> {process_key -> threshold}. Above threshold auto-escalates.
 APPROVAL_LIMITS = {
     "campus":     {"fee_waiver": 100000, "refund": 100000, "purchase_request": 500000,
-                   "payroll_approval": 2000000, "infrastructure_capex": 1000000},
+                   "payroll_approval": 2000000, "infrastructure_capex": 1000000,
+                   "infrastructure_capex_v2": 1000000},
     "university": {"fee_waiver": 500000, "refund": 500000, "purchase_request": 5000000,
-                   "payroll_approval": 20000000, "infrastructure_capex": 10000000},
+                   "payroll_approval": 20000000, "infrastructure_capex": 10000000,
+                   "infrastructure_capex_v2": 10000000},
     "faculty":    {"fee_waiver": 50000, "refund": 50000, "purchase_request": 200000,
-                   "infrastructure_capex": 300000},
+                   "infrastructure_capex": 300000, "infrastructure_capex_v2": 300000},
     "department": {"fee_waiver": 20000, "refund": 20000, "purchase_request": 75000},
     "global":     {"fee_waiver": 10000000, "refund": 10000000, "purchase_request": 100000000,
-                   "payroll_approval": 100000000, "infrastructure_capex": 100000000},
+                   "payroll_approval": 100000000, "infrastructure_capex": 100000000,
+                   "infrastructure_capex_v2": 100000000},
+}
+
+RISK_ESCALATION_TARGETS = {
+    # Campus Head escalations first become Principal decisions. Higher
+    # authority is reached only by the configured workflow escalation path.
+    "HIGH": (4, "Principal"),
+    "CRITICAL": (4, "Principal"),
+}
+
+RISK_ESCALATION_PROCESS = {
+    "HIGH": "campus_risk_escalation",
+    "CRITICAL": "campus_risk_escalation_critical",
 }
 
 
@@ -191,7 +223,6 @@ OFFICE_SCOPE = {
     27: "university", 28: "global", 29: "campus", 30: "campus", 31: "campus",
     32: "campus", 33: "campus", 34: "campus", 35: "campus",
     36: "individual", 37: "individual", 38: "individual", 39: "individual",
-    41: "program", 42: "faculty", 43: "section",
 }
 
 

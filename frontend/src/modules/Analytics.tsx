@@ -2,14 +2,19 @@ import { useState, useEffect } from 'react'
 import { api } from '../api'
 import { PageHead, Spinner, money, Kpis } from './kit'
 
-export default function Analytics({ user, go }: { user: any; go?: (view: string) => void }) {
-  return user?.office_n === 6 ? <DeanPerformanceResults go={go} /> : <GenericAnalytics />
-}
-
-function GenericAnalytics() {
+export default function Analytics({ user }: { user: any }) {
   const [data, setData] = useState<any>(null)
-  useEffect(() => { api.overview().then(setData).catch(() => {}) }, [])
+  const [year, setYear] = useState(''), [semester, setSemester] = useState('')
+  useEffect(() => { (user.office_n === 4 ? api.principalOverview(year, semester) : api.overview()).then(setData).catch(() => {}) }, [user.office_n, year, semester])
   if (!data) return <Spinner />
+  if (user.office_n === 4) {
+    const p = data.performance, k = data.kpis
+    return <div className="fade-in principal-operations"><PageHead title="Reports & Analytics" sub="Campus-scoped academic and operational reporting." />
+      <div className="operations-filter"><label>Academic Year<select className="select" value={year || data.filters.selected_year} onChange={e => setYear(e.target.value)}>{data.filters.academic_years.map((x: string) => <option key={x}>{x}</option>)}</select></label><label>Semester<select className="select" value={semester} onChange={e => setSemester(e.target.value)}><option value="">All Semesters</option>{data.filters.student_semesters.map((x: number) => <option key={x} value={x}>Semester {x}</option>)}</select></label></div>
+      <div className="operations-kpis"><Metric label="Students" value={k.students}/><Metric label="Average CGPA" value={p.average_cgpa}/><Metric label="Pass rate" value={p.pass_rate == null ? '—' : `${p.pass_rate}%`}/><Metric label="At risk" value={k.risk_students}/></div>
+      <section className="card card-pad"><div className="card-h"><h3>Academic performance</h3><span className="hint">Selected academic year and semester</span></div><div className="grid-3"><Metric label="Distinction" value={p.bands.distinction}/><Metric label="First class" value={p.bands.first}/><Metric label="Second class" value={p.bands.second}/></div></section>
+    </div>
+  }
   const s = data.stats
   const dept = data.dept_distribution || {}
   const max = Math.max(1, ...Object.values(dept).map(Number))
@@ -38,58 +43,4 @@ function GenericAnalytics() {
   )
 }
 
-function DeanPerformanceResults({ go }: { go?: (view: string) => void }) {
-  const [data, setData] = useState<any>(null)
-  const [error, setError] = useState('')
-
-  useEffect(() => {
-    api.deanDashboard().then(setData).catch((e: any) => setError(e.message || 'Unable to load performance data'))
-  }, [])
-
-  if (!data) return error ? <div className="card card-pad calendar-banner warn">{error}</div> : <Spinner />
-
-  const health = data.health || {}
-  const departments = [...(data.department_performance || [])].sort((a: any, b: any) => Number(a.pass_rate || 0) - Number(b.pass_rate || 0))
-  const trends = data.result_trends || []
-  const risks = Number(health.at_risk_students || 0)
-  const conflicts = Number(data.kpis?.timetable_conflicts || 0)
-  const targetPassRate = 75
-  return <div className="fade-in dean-performance-page">
-    <PageHead title="Performance & Results" sub="Compare academic outcomes, identify intervention areas, and track results across your scope." right={<button className="btn btn-out" onClick={() => window.location.reload()} type="button">Refresh</button>} />
-    <div className="dean-performance-kpis">
-      <PerformanceMetric label="Pass rate" value={formatPerformancePercent(health.pass_rate)} note={`Target ${targetPassRate}%`} tone={Number(health.pass_rate || 0) >= targetPassRate ? 'good' : 'warning'} />
-      <PerformanceMetric label="Attendance" value={formatPerformancePercent(health.attendance)} note="Institution average" tone="good" />
-      <PerformanceMetric label="Average CGPA" value={health.avg_cgpa == null ? '—' : Number(health.avg_cgpa).toFixed(2)} note="Current academic scope" tone="neutral" />
-      <PerformanceMetric label="At-risk students" value={Number(health.at_risk_students || 0).toLocaleString()} note="Requires intervention" tone={risks ? 'danger' : 'good'} />
-    </div>
-    <div className="dean-performance-grid">
-      <section className="card dean-performance-panel dean-performance-departments">
-        <div className="card-h"><div><h3>Department performance</h3><p className="hint">Lowest pass rates appear first for faster intervention.</p></div><span className="dean-performance-target">Target {targetPassRate}%</span></div>
-        <div className="dean-performance-bars">
-          {departments.length ? departments.map((row: any) => {
-            const passRate = Number(row.pass_rate || 0)
-            return <button className="dean-performance-bar-row" key={row.id} onClick={() => go?.('dean_risk')} type="button" title={`${row.name}: ${passRate}% pass rate`}>
-              <span className="dean-performance-bar-name">{row.name}</span><span className="dean-performance-bar-track"><i className={passRate < targetPassRate ? 'below-target' : ''} style={{ width: `${Math.max(6, passRate)}%` }} /></span><b>{passRate}%</b>
-            </button>
-          }) : <div className="dean-empty">No department result data for this scope.</div>}
-        </div>
-      </section>
-      <section className="card dean-performance-panel dean-performance-trends">
-        <div className="card-h"><div><h3>Result trend</h3><p className="hint">Pass rate across academic years.</p></div></div>
-        {trends.length ? <div className="dean-performance-trend-list">{trends.map((row: any) => <div className="dean-performance-trend-row" key={row.academic_year}><span>{row.academic_year}</span><div className="dean-performance-bar-track"><i style={{ width: `${Math.max(6, Number(row.pass_rate || 0))}%` }} /></div><b>{Number(row.pass_rate || 0)}%</b></div>)}</div> : <div className="dean-empty">No result trend data available.</div>}
-      </section>
-    </div>
-    <section className="dean-performance-actions" aria-label="Performance actions">
-      <div><span className="dean-performance-action-kicker">Decision queue</span><h3>Performance signals needing attention</h3><p>Use department-level results to guide quality reviews and timetable interventions.</p></div>
-      <div className="dean-performance-action-items"><button className="dean-performance-action danger" onClick={() => go?.('dean_risk')} type="button"><b>{risks}</b><span>At-risk students</span></button><button className="dean-performance-action warning" onClick={() => go?.('dean_timetable')} type="button"><b>{conflicts}</b><span>Timetable conflicts</span></button><button className="dean-performance-action neutral" onClick={() => go?.('dean_reports')} type="button"><b>{Number(data.kpis?.academic_actions || 0)}</b><span>Academic actions</span></button></div>
-    </section>
-  </div>
-}
-
-function PerformanceMetric({ label, value, note, tone }: { label: string; value: string; note: string; tone: string }) {
-  return <div className={`dean-performance-metric ${tone}`}><span>{label}</span><b>{value}</b><small>{note}</small></div>
-}
-
-function formatPerformancePercent(value: number | null | undefined) {
-  return value == null ? '—' : `${Math.round(Number(value))}%`
-}
+function Metric({ label, value }: any) { return <div><span>{label}</span><b>{value}</b></div> }
