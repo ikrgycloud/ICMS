@@ -4060,60 +4060,263 @@ def update_faculty_self_profile(body: FacultyProfileUpdateIn, ctx=Depends(auth),
 
 
 @router.get("/faculty/schedule")
-def faculty_schedule(week_start: str = "", ctx=Depends(auth), s=Depends(db)):
-    """Read-only faculty schedule from active allocations, timetable entries and sessions."""
+def faculty_schedule(
+    week_start: str = "",
+    ctx=Depends(auth),
+    s=Depends(db)
+):
+    """Read-only faculty schedule from timetable entries and class sessions."""
+
     stf = _staff_or_404(s, ctx)
-    today = date.today(); week_start = today - timedelta(days=today.weekday()); week_end = week_start + timedelta(days=6)
-    courses = {row.id: row for row in s.query(D.Course).all()}
-    days = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
+
+    # ---------------------------------------------------------
+    # 1. Resolve requested week
+    # ---------------------------------------------------------
+    try:
+        start = date.fromisoformat(week_start) if week_start else date.today()
+    except ValueError:
+        start = date.today()
+
+    # Normalize to Monday
+    start = start - timedelta(days=start.weekday())
+    end = start + timedelta(days=6)
+
+    # ---------------------------------------------------------
+    # 2. Get faculty sections
+    # ---------------------------------------------------------
+    section_list = (
+        s.query(D.Section)
+        .filter(D.Section.faculty_person_id == stf.id)
+        .all()
+    )
+
+    section_map = {
+        section.id: section
+        for section in section_list
+    }
+
+    section_ids = list(section_map.keys())
+
+    # ---------------------------------------------------------
+    # 3. Load courses
+    # ---------------------------------------------------------
+    courses = {
+        course.id: course
+        for course in s.query(D.Course).all()
+    }
+
     events = []
-    sections = s.query(D.Section).filter(D.Section.faculty_person_id == stf.id).all()
-    for section in sections:
-        parts = (section.schedule or "").split(maxsplit=1); names = parts[0] if parts else ""; class_time = parts[1] if len(parts) > 1 else "Time pending"
+    covered_slots = set()
+
+    # ---------------------------------------------------------
+    # 4. Common event payload
+    # ---------------------------------------------------------
+    def payload(
+        event_id,
+        when,
+        starts,
+        ends,
+        section,
+        room=None,
+        status="scheduled",
+        session_id=None,
+    ):
         course = courses.get(section.course_id)
-        return {"id": event_id, "date": when.isoformat(), "time": starts, "end_time": ends,
-                "title": f"{course.code if course else 'Course'} ({section.section_code})",
-                "course_code": course.code if course else "", "course_title": course.title if course else "",
-                "section": section.section_code, "section_id": section.id, "class_session_id": session_id,
-                "detail": course.title if course else "Assigned section", "location": room or section.room or "Room not configured",
-                "status": "unavailable" if when in approved_leave_dates else status,
-                "leave_state": "Approved leave" if when in approved_leave_dates else "", "type": "class", "route": "attendance"}
 
-    events, covered_slots = [], set()
-    sessions = (s.query(D.ClassSession)
-                .filter(D.ClassSession.tenant_id == ctx["tenant_id"], D.ClassSession.faculty_id == stf.id,
-                        D.ClassSession.section_id.in_(section_ids) if section_ids else False,
-                        D.ClassSession.session_date >= start, D.ClassSession.session_date <= end)
-                .order_by(D.ClassSession.session_date, D.ClassSession.scheduled_start).all())
-    for session in sessions:
-        section = sections.get(session.section_id)
-        if not section:
-            continue
-        start_time = session.scheduled_start.strftime("%H:%M") if session.scheduled_start else "Time not configured"
-        end_time = session.scheduled_end.strftime("%H:%M") if session.scheduled_end else ""
-        events.append(payload(f"session-{session.id}", session.session_date, start_time, end_time, section, session.room, session.status, session.id))
-        covered_slots.add((session.timetable_entry_id, session.session_date))
-        covered_slots.add((session.section_id, session.session_date, start_time))
-    entries = (s.query(D.TimetableEntry)
-               .filter(D.TimetableEntry.tenant_id == ctx["tenant_id"],
-                       D.TimetableEntry.section_id.in_(section_ids) if section_ids else False,
-                       D.TimetableEntry.status == "active",
-                       (D.TimetableEntry.effective_from == None) | (D.TimetableEntry.effective_from <= end),
-                       (D.TimetableEntry.effective_to == None) | (D.TimetableEntry.effective_to >= start)).all())
-    for entry in entries:
-        when = start + timedelta(days=entry.day_of_week)
-        if (entry.id, when) in covered_slots or (entry.section_id, when, entry.start_time) in covered_slots:
-            continue
-        section = sections.get(entry.section_id)
-        if section:
-            events.append(payload(f"timetable-{entry.id}-{when.isoformat()}", when, entry.start_time, entry.end_time, section, entry.room, "scheduled"))
-    events.sort(key=lambda item: (item["date"], item["time"], item["id"]))
-    return {"profile": {"name": stf.name, "email": stf.email, "phone": stf.phone, "office_hours": stf.office_hours or ""},
-            "week_start": start.isoformat(), "week_end": end.isoformat(), "events": events, "meetings": [],
-            "leave": [{"id": row.id, "status": row.status, "from_date": row.from_date.isoformat(), "to_date": row.to_date.isoformat()} for row in leaves],
-            "summary": {"classes": len(events), "meetings": 0, "sections": len(section_ids), "leave_requests": len(leaves)}}
+        return {
+            "id": event_id,
+            "date": when.isoformat(),
+            "time": starts or "Time not configured",
+            "end_time": ends or "",
+            "title": (
+                f"{course.code if course else 'Course'} "
+                f"({section.section_code})"
+            ),
+            "course_code": course.code if course else "",
+            "course_title": course.title if course else "",
+            "section": section.section_code,
+            "section_id": section.id,
+            "class_session_id": session_id,
+            "detail": (
+                course.title
+                if course
+                else "Assigned section"
+            ),
+            "location": (
+                room
+                or section.room
+                or "Room not configured"
+            ),
+            "status": status or "scheduled",
+            "leave_state": "",
+            "type": "class",
+            "route": "attendance",
+        }
 
+    # ---------------------------------------------------------
+    # 5. Class sessions
+    # ---------------------------------------------------------
+    if section_ids:
+        sessions = (
+            s.query(D.ClassSession)
+            .filter(
+                D.ClassSession.tenant_id == ctx["tenant_id"],
+                D.ClassSession.faculty_id == stf.id,
+                D.ClassSession.section_id.in_(section_ids),
+                D.ClassSession.session_date >= start,
+                D.ClassSession.session_date <= end,
+            )
+            .order_by(
+                D.ClassSession.session_date,
+                D.ClassSession.scheduled_start,
+            )
+            .all()
+        )
 
+        for session in sessions:
+            section = section_map.get(session.section_id)
+
+            if not section:
+                continue
+
+            start_time = (
+                session.scheduled_start.strftime("%H:%M")
+                if session.scheduled_start
+                else "Time not configured"
+            )
+
+            end_time = (
+                session.scheduled_end.strftime("%H:%M")
+                if session.scheduled_end
+                else ""
+            )
+
+            events.append(
+                payload(
+                    event_id=f"session-{session.id}",
+                    when=session.session_date,
+                    starts=start_time,
+                    ends=end_time,
+                    section=section,
+                    room=session.room,
+                    status=session.status,
+                    session_id=session.id,
+                )
+            )
+
+            if session.timetable_entry_id:
+                covered_slots.add(
+                    (
+                        session.timetable_entry_id,
+                        session.session_date,
+                    )
+                )
+
+            covered_slots.add(
+                (
+                    session.section_id,
+                    session.session_date,
+                    start_time,
+                )
+            )
+
+    # ---------------------------------------------------------
+    # 6. Timetable entries
+    # ---------------------------------------------------------
+    if section_ids:
+        entries = (
+            s.query(D.TimetableEntry)
+            .filter(
+                D.TimetableEntry.tenant_id == ctx["tenant_id"],
+                D.TimetableEntry.section_id.in_(section_ids),
+                D.TimetableEntry.status == "active",
+                (
+                    (D.TimetableEntry.effective_from == None)
+                    | (D.TimetableEntry.effective_from <= end)
+                ),
+                (
+                    (D.TimetableEntry.effective_to == None)
+                    | (D.TimetableEntry.effective_to >= start)
+                ),
+            )
+            .all()
+        )
+
+        for entry in entries:
+            when = start + timedelta(days=entry.day_of_week)
+
+            start_time = (
+                entry.start_time.strftime("%H:%M")
+                if hasattr(entry.start_time, "strftime")
+                else str(entry.start_time or "")
+            )
+
+            end_time = (
+                entry.end_time.strftime("%H:%M")
+                if hasattr(entry.end_time, "strftime")
+                else str(entry.end_time or "")
+            )
+
+            if (
+                (entry.id, when) in covered_slots
+                or (
+                    entry.section_id,
+                    when,
+                    start_time,
+                ) in covered_slots
+            ):
+                continue
+
+            section = section_map.get(entry.section_id)
+
+            if not section:
+                continue
+
+            events.append(
+                payload(
+                    event_id=f"timetable-{entry.id}-{when.isoformat()}",
+                    when=when,
+                    starts=start_time,
+                    ends=end_time,
+                    section=section,
+                    room=entry.room,
+                    status="scheduled",
+                )
+            )
+
+    # ---------------------------------------------------------
+    # 7. Sort events
+    # ---------------------------------------------------------
+    events.sort(
+        key=lambda item: (
+            item["date"],
+            item["time"],
+            item["id"],
+        )
+    )
+
+    # ---------------------------------------------------------
+    # 8. Response
+    # ---------------------------------------------------------
+    return {
+        "profile": {
+            "name": stf.name,
+            "email": stf.email,
+            "phone": stf.phone,
+            "office_hours": stf.office_hours or "",
+        },
+        "week_start": start.isoformat(),
+        "week_end": end.isoformat(),
+        "events": events,
+        "meetings": [],
+        "leave": [],
+        "summary": {
+            "classes": len(events),
+            "meetings": 0,
+            "sections": len(section_ids),
+            "leave_requests": 0,
+        },
+    }
 @router.get("/faculty/section/{section_id}/students")
 def faculty_section_students(section_id: str, ctx=Depends(auth), s=Depends(db)):
     stf = _staff_or_404(s, ctx)
