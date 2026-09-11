@@ -3942,40 +3942,62 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
 @router.get("/faculty/sections")
 def faculty_sections(ctx=Depends(auth), s=Depends(db)):
     stf = _staff_or_404(s, ctx)
-    sections = (
-    s.query(D.Section)
-    .filter(D.Section.faculty_person_id == stf.id)
-    .all()
-)
 
-if stf.dept_id:
-    sections = [
-        section
-        for section in sections
-        if not section.dept_id or section.dept_id == stf.dept_id
-    ]
-    course_map = {row.id: row for row in s.query(D.Course).all()}
+    sections = (
+        s.query(D.Section)
+        .filter(D.Section.faculty_person_id == stf.id)
+        .all()
+    )
+
+    if stf.dept_id:
+        sections = [
+            section
+            for section in sections
+            if not section.dept_id or section.dept_id == stf.dept_id
+        ]
+
+    course_map = {
+        row.id: row
+        for row in s.query(D.Course).all()
+    }
+
     out = []
+
     for section in sections:
         course = course_map.get(section.course_id)
+
         enrolled = (
             s.query(D.Enrollment)
-            .filter(D.Enrollment.section_id == section.id, D.Enrollment.status == "enrolled")
+            .filter(
+                D.Enrollment.section_id == section.id,
+                D.Enrollment.status == "enrolled"
+            )
             .count()
         )
-        assessments = s.query(D.Assessment).filter(D.Assessment.section_id == section.id).count()
+
+        assessments = (
+            s.query(D.Assessment)
+            .filter(D.Assessment.section_id == section.id)
+            .count()
+        )
+
         out.append(
             {
                 "id": section.id,
                 "course_code": course.code if course else "",
                 "title": course.title if course else "",
                 "section": section.section_code,
-                "schedule": _section_schedule_string(s, section.id, section.schedule),
+                "schedule": _section_schedule_string(
+                    s,
+                    section.id,
+                    section.schedule
+                ),
                 "room": section.room,
                 "enrolled": enrolled,
                 "assessments": assessments,
             }
         )
+
     return {"sections": out}
 
 
