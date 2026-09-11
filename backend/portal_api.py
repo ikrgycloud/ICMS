@@ -3531,7 +3531,22 @@ def update_payroll_entry_status(entry_id: str, body: dict, ctx=Depends(auth), s=
 
 @router.get("/payroll/me")
 def my_payroll(month: str = None, ctx=Depends(auth), s=Depends(db)):
-    stf = _staff_or_404(s, ctx)
+    stf = s.query(D.StaffMember).filter(D.StaffMember.user_id == ctx["sub"]).first()
+    if not stf:
+        # A valid employee login may be provisioned before its staff record is
+        # linked. Payroll is self-service, so expose the configuration state
+        # rather than presenting this expected onboarding condition as a 404.
+        user = s.get(User, ctx["sub"])
+        person = s.get(Person, user.person_id) if user and user.person_id else None
+        return {
+            "payroll_configured": False,
+            "profile": {
+                "name": person.name if person else user.username if user else "",
+                "designation": user.role if user else "",
+            },
+            "available_months": [],
+        }
+    dept = s.query(D.Department).get(stf.dept_id) if stf.dept_id else None
 
     payroll_emp = (
         s.query(D.PayrollEmployee)
@@ -3540,7 +3555,21 @@ def my_payroll(month: str = None, ctx=Depends(auth), s=Depends(db)):
         .first()
     )
     if not payroll_emp:
-        raise HTTPException(404, "Payroll profile not found")
+        # A staff account can be active before HR has created its payroll
+        # profile. This is an expected self-service state, not a missing API
+        # resource, so return a usable response instead of a 404.
+        return {
+            "payroll_configured": False,
+            "profile": {
+                "name": stf.name,
+                "emp_id": stf.emp_id,
+                "designation": stf.designation,
+                "department": dept.name if dept else "",
+                "email": stf.email,
+                "phone": stf.phone or None,
+            },
+            "available_months": [],
+        }
 
     structure = (
         s.query(D.PayrollSalaryStructure)
@@ -3594,8 +3623,6 @@ def my_payroll(month: str = None, ctx=Depends(auth), s=Depends(db)):
             .first()
         )
 
-    dept = s.query(D.Department).get(stf.dept_id) if stf.dept_id else None
-
     earnings = []
     deductions = []
     if structure:
@@ -3617,6 +3644,7 @@ def my_payroll(month: str = None, ctx=Depends(auth), s=Depends(db)):
         ]
 
     return {
+        "payroll_configured": True,
         "profile": {
             "name": stf.name,
             "emp_id": stf.emp_id,

@@ -168,15 +168,6 @@ const FACULTY_NAV = [
   ['Workflow', 'Attendance Correction Reviews', 'attendance_corrections'], ['Workflow', 'My Requests', 'workflows'],
 ] as const
 
-const FACULTY_ACTIVE_LABEL: Record<string, string> = {
-  overview: 'Overview', my_schedule: 'My Schedule', workflows: 'My Requests', attendance_corrections: 'Attendance Correction Reviews',
-  academics: 'My Sections', attendance: 'Attendance', examinations: 'Assessments & Marks',
-  assignments: 'Assignments', assessments: 'Assessments & Marks', marks_entry: 'Marks',
-  course_materials: 'Course Materials', mentoring: 'Mentoring & Advisees', leave: 'Leave & Requests',
-  payroll: 'Payroll', digital_id: 'Digital ID', messages: 'Messages', announcements: 'Announcements',
-  research: 'Research & Guidance', academic_calendar: 'Academic Calendar', my_profile: 'My Profile',
-}
-
 const COORDINATOR_NAV = [
   ['Workspace', 'Overview', 'overview'],
   ['Academic planning', 'Academic Calendar', 'academic_calendar'], ['Academic planning', 'Curriculum Execution', 'curriculum'],
@@ -451,9 +442,11 @@ export default function App({ onLogout }: { onLogout: () => void }) {
         ? Object.values(deanAdministrationGroups).flat().find((module: any) => module.key === view)
         : coordinatorShell
           ? Object.values(coordinatorGroups).flat().find((module: any) => module.key === view)
-          : admissionsOperationsShell
-            ? Object.values(activeAdmissionsGroups).flat().find((module: any) => module.key === view)
-            : undefined
+          : facultyShell
+            ? Object.values(facultyGroups).flat().find((module: any) => module.key === view)
+            : admissionsOperationsShell
+              ? Object.values(activeAdmissionsGroups).flat().find((module: any) => module.key === view)
+              : undefined
   ) || sidebarModules.find((module: any) => module.key === view) || sidebarModules[0]
   const campusHeader = user.scope_level === 'campus' ? user.scope_ref : ''
   const isDeanNavActive = (moduleKey: string) =>
@@ -489,7 +482,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
               {((!deanAcademicsShell && !deanAdministrationShell && !admissionsOperationsShell) || ((deanAcademicsShell || deanAdministrationShell) ? !collapsedDeanGroups[group] : !collapsedDirectorGroups[group])) && ((coordinatorShell ? coordinatorGroups[group] : deanAcademicsShell ? deanGroups[group] : deanAdministrationShell ? deanAdministrationGroups[group] : principalShell ? principalGroups[group] : facultyShell ? facultyGroups[group] : admissionsOperationsShell ? activeAdmissionsGroups[group] : groups[group]) || []).map((module: any) => (
                 <button
                   key={(deanAcademicsShell || deanAdministrationShell || coordinatorShell || principalShell || facultyShell || admissionsOperationsShell) ? `${group}-${module.label}` : module.key}
-                  className={`nav-item ${(coordinatorShell ? view === module.key : deanAcademicsShell ? isDeanNavActive(module.key) : facultyShell ? FACULTY_ACTIVE_LABEL[view] === module.label : view === module.key) && (!(deanAcademicsShell || deanAdministrationShell || coordinatorShell || principalShell || facultyShell || admissionsOperationsShell) || module.enabled) ? 'on' : ''} ${((principalShell || facultyShell || admissionsOperationsShell) && !module.enabled) ? 'nav-item-disabled' : ''}`}
+                  className={`nav-item ${(coordinatorShell ? view === module.key : deanAcademicsShell ? isDeanNavActive(module.key) : view === module.key) && (!(deanAcademicsShell || deanAdministrationShell || coordinatorShell || principalShell || facultyShell || admissionsOperationsShell) || module.enabled) ? 'on' : ''} ${((principalShell || facultyShell || admissionsOperationsShell) && !module.enabled) ? 'nav-item-disabled' : ''}`}
                   onClick={() => {
                     setView(module.key)
                     setSideOpen(false)
