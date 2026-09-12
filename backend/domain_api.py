@@ -847,7 +847,7 @@ def workspace(ctx=Depends(auth), s=Depends(db)):
             .filter(D.PayrollEmployee.staff_member_id == staff.id, D.PayrollEmployee.status == "active")
             .first()
         )
-        if payroll and not any(item["key"] == "my_payroll" for item in mods):
+        if ctx["office_n"] not in {31, 35} and payroll and not any(item["key"] == "my_payroll" for item in mods):
             mods.append({
                 "key": "my_payroll",
                 "label": "My Payroll",

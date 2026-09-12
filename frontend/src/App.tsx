@@ -346,6 +346,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     () => {
       const modules = rawModules
       .filter((module: any) => !(user?.persona === 'student' && module.key === 'students'))
+      .filter((module: any) => !([31, 35].includes(user?.office_n) && module.key === 'my_payroll'))
       // Finance Manager works only with fee operations and fee-approval tasks.
       // Governance matrices and generic administration screens are not part of this portal.
       .filter((module: any) => user?.office_n !== 22 || ['overview', 'finance', 'rollover', 'approvals', 'audit'].includes(module.key))
@@ -359,7 +360,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
       if (user?.persona === 'student' && !modules.some((module: any) => module.key === 'finance')) {
         modules.push({ key: 'finance', label: 'Fees & Payments', group: 'Student Services', enabled: true })
       }
-      if (user?.persona && !['student', 'parent', 'faculty'].includes(user.persona) && !modules.some((module: any) => module.key === 'my_payroll')) {
+      if (![31, 35].includes(user?.office_n) && user?.persona && !['student', 'parent', 'faculty'].includes(user.persona) && !modules.some((module: any) => module.key === 'my_payroll')) {
         modules.push({ key: 'my_payroll', label: 'My Payroll', group: 'Self Service', enabled: true })
       }
       return modules

@@ -273,6 +273,14 @@ stages {
                             -f docker-compose.prod.yml \
                             up -d
 
+
+                        echo "Provisioning payroll staff demo data..."
+
+                        docker compose \
+                            -f docker-compose.prod.yml \
+                            exec -T backend \
+                            python provision_payroll_demo.py
+
                         echo "Deployment completed."
 
                         echo "Current container status:"

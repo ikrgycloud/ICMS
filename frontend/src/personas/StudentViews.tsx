@@ -151,14 +151,17 @@ export function StudentCalendarView({ user, go }: { user: any; go: (v: string) =
   }
 
   function openCalendarEvent(event: any) {
+    if (!event) return
+
     if (event.kind === 'personal') {
       setError('')
+      const startDate = event.rawStartDate || event.rawDate || selectedDate
       setPersonalForm({
         id: event.personal_event_id || event.personalEventId,
-        title: event.title,
-        startDate: event.rawStartDate || event.rawDate || selectedDate,
+        title: event.title || '',
+        startDate,
         startTime: event.rawStartTime || event.rawTime || '09:00',
-        endDate: event.rawEndDate || event.rawStartDate || event.rawDate || selectedDate,
+        endDate: event.rawEndDate || event.rawStartDate || event.rawDate || startDate,
         endTime: event.rawEndTime || event.rawTime || '10:00',
         note: event.note || '',
       })
@@ -3046,18 +3049,19 @@ function blankPersonalEvent(date: string) {
   }
 }
 
-function buildPersonalEventPayload(form: any) {
-  const startAt = combineDateAndTime(form.startDate, form.startTime)
-  const endAt = combineDateAndTime(form.endDate, form.endTime)
+function buildPersonalEventPayload(form: any = {}) {
+  const safeForm = form || {}
+  const startAt = combineDateAndTime(safeForm.startDate, safeForm.startTime)
+  const endAt = combineDateAndTime(safeForm.endDate, safeForm.endTime)
   return {
-    title: String(form.title || '').trim() || 'Personal Event',
-    note: String(form.note || '').trim(),
+    title: String(safeForm.title || '').trim() || 'Personal Event',
+    note: String(safeForm.note || '').trim(),
     start_at: startAt,
     end_at: endAt,
   }
 }
 
-function combineDateAndTime(rawDate: string, rawTime: string) {
+function combineDateAndTime(rawDate: string | undefined, rawTime: string | undefined) {
   const dateKey = rawDate || todayDateKey()
   const timeKey = rawTime || '09:00'
   return `${dateKey}T${timeKey}:00`
