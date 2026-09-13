@@ -14,7 +14,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import desc
 
 from database import SessionLocal, TENANT
-from models import AuditLog, Notification, NotificationDelivery, Delegation
+from models import AuditLog, Notification, NotificationDelivery, Delegation, User
 from authority import decode_token, audit_hash
 
 # A named bearer scheme makes FastAPI expose one global "Authorize" control in
@@ -34,7 +34,15 @@ def auth(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_schem
     if not credentials or credentials.scheme.lower() != "bearer":
         raise HTTPException(401, "Missing token")
     try:
-        return decode_token(credentials.credentials)
+        ctx = decode_token(credentials.credentials)
+        session = SessionLocal()
+        try:
+            user = session.get(User, ctx.get("sub"))
+            if not user or user.tenant_id != ctx.get("tenant_id") or user.status != "active":
+                raise HTTPException(401, "Inactive or invalid user")
+        finally:
+            session.close()
+        return ctx
     except Exception:
         raise HTTPException(401, "Invalid or expired token")
 
@@ -71,8 +79,10 @@ def notify(s, user_id, title, body, severity="info"):
 
 
 def active_delegation_for(s, user_id):
+    now = datetime.utcnow()
     d = (s.query(Delegation)
-         .filter(Delegation.to_user == user_id, Delegation.status == "active")
+         .filter(Delegation.to_user == user_id, Delegation.status == "active",
+                 Delegation.start <= now, Delegation.end >= now)
          .order_by(desc(Delegation.created_at)).first())
     if not d:
         return None

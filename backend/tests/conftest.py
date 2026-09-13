@@ -89,6 +89,18 @@ def pytest_configure(config) -> None:
                      .order_by(D.StaffMember.id)
                      .first())
         if not candidate:
+            # Current domain seed data assigns every roster-backed faculty row
+            # to a named demo user. Reuse one roster-backed row for the legacy
+            # generic professor account instead of failing test configuration.
+            candidate = (db.query(D.StaffMember)
+                         .join(D.TeachingAllocation, D.TeachingAllocation.faculty_id == D.StaffMember.id)
+                         .join(D.Enrollment, D.Enrollment.section_id == D.TeachingAllocation.section_id)
+                         .filter(D.TeachingAllocation.status == "active",
+                                 D.Enrollment.status == "enrolled",
+                                 D.StaffMember.id != "staff_fac_1")
+                         .order_by(D.StaffMember.id)
+                         .first())
+        if not candidate:
             raise RuntimeError("Test seed has no active faculty allocation with an enrolled roster")
         candidate.user_id = professor.id
         candidate.office_n = 11

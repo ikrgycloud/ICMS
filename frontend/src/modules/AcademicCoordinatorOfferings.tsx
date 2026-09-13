@@ -6,6 +6,8 @@ export default function AcademicCoordinatorOfferings() {
   const [rows, setRows] = useState<any[] | null>(null);
   const [selected, setSelected] = useState<any>(null);
   const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [newOfferingId, setNewOfferingId] = useState("");
   const [year, setYear] = useState(0);
   const [academicYear, setAcademicYear] = useState("");
   const [program, setProgram] = useState("");
@@ -82,6 +84,7 @@ export default function AcademicCoordinatorOfferings() {
   const submitCreate = async () => {
     setCreating(true);
     setError("");
+    setMessage("");
     try {
       if (!createForm.academic_year || !createForm.semester || !createForm.program_id || !createForm.course_id || !createForm.term) {
         throw new Error("Academic year, semester, branch, course, and term are required");
@@ -92,19 +95,30 @@ export default function AcademicCoordinatorOfferings() {
         academic_year: createForm.academic_year.trim(),
         term: createForm.term.trim(),
         semester: Number(createForm.semester),
+        course_start_date: createForm.course_start_date || null,
+        expected_completion_date: createForm.expected_completion_date || null,
       });
       const offering = created.offering;
-      if (createForm.faculty_id) {
-        await api.createFacultyAllocation(offering.id, { faculty_id: createForm.faculty_id });
-      }
-      if (createForm.course_start_date || createForm.expected_completion_date) {
-        await api.updateCurriculumExecution(offering.id, {
-          course_start_date: createForm.course_start_date,
-          expected_completion_date: createForm.expected_completion_date,
-        });
-      }
+      // Creation is the durable user action.  Reflect it immediately and
+      // close the dialog before attempting any optional follow-up work.
+      setRows((current) => [offering, ...(current || []).filter((row: any) => row.id !== offering.id)]);
+      setNewOfferingId(offering.id);
+      setYear(0);
+      setAcademicYear("");
+      setProgram("");
+      setFaculty("");
+      setStatus("");
+      setTerm(offering.term);
       setCreateOpen(false);
       setCreateForm({ academic_year: "", semester: "", department: "", program_id: "", course_id: "", term: "", faculty_id: "", course_start_date: "", expected_completion_date: "" });
+      setMessage(`${offering.course_code} was created and is now shown below. Next: request HOD input.`);
+      if (createForm.faculty_id) {
+        try {
+          await api.createFacultyAllocation(offering.id, { faculty_id: createForm.faculty_id });
+        } catch (allocationError: any) {
+          setError(`Offering created, but the optional faculty allocation needs follow-up: ${allocationError.message || "unable to create allocation"}`);
+        }
+      }
       await load();
     } catch (e: any) {
       setError(e.message || "Unable to create course offering");
@@ -124,7 +138,15 @@ export default function AcademicCoordinatorOfferings() {
       ]);
       setSelected({
         row,
-        hod: h.hod_input,
+        hod: h.hod_input || {
+          id: "",
+          required_faculty_count: 0,
+          required_sections: 0,
+          expected_capacity: 0,
+          delivery_type: "theory",
+          remarks: "",
+          status: "Pending",
+        },
         allocations: a.allocations || [],
         readiness: r.readiness,
         sections: (sections.sections || []).filter(
@@ -135,7 +157,15 @@ export default function AcademicCoordinatorOfferings() {
     } catch {
       setSelected({
         row,
-        hod: row.hod_input,
+        hod: row.hod_input || {
+          id: "",
+          required_faculty_count: 0,
+          required_sections: 0,
+          expected_capacity: 0,
+          delivery_type: "theory",
+          remarks: "",
+          status: "Pending",
+        },
         allocations: row.faculty_allocations || [],
         readiness: row.readiness,
         sections: [],
@@ -143,6 +173,7 @@ export default function AcademicCoordinatorOfferings() {
       });
     }
   }
+
 
   const years = useMemo(
     () =>
@@ -174,7 +205,7 @@ export default function AcademicCoordinatorOfferings() {
               (a: any) => String(a.faculty || a.faculty_id) === faculty,
             ))
         );
-      }),
+      }).slice().sort((left: any, right: any) => String(right.created_at || "").localeCompare(String(left.created_at || ""))),
     [rows, year, academicYear, program, term, status, faculty],
   );
 
@@ -269,6 +300,11 @@ export default function AcademicCoordinatorOfferings() {
 
         .offerings-message {
           margin-bottom: 20px;
+        }
+
+        .offer-new-row {
+          background: #f0faf4;
+          box-shadow: inset 4px 0 0 #25834d;
         }
 
         .offerings-year-nav {
@@ -503,6 +539,27 @@ export default function AcademicCoordinatorOfferings() {
           font-size: 12px;
         }
 
+        .offer-date-value {
+          display: flex;
+          flex-direction: column;
+          gap: 3px;
+          min-width: 104px;
+        }
+
+        .offer-date-value span {
+          color: #7c8088;
+          font-size: 10px;
+          font-weight: 700;
+          letter-spacing: .04em;
+          text-transform: uppercase;
+        }
+
+        .offer-date-value b {
+          color: #30333a;
+          font-size: 12px;
+          font-weight: 700;
+        }
+
         .offer-view {
           border: 0;
           background: transparent;
@@ -526,6 +583,33 @@ export default function AcademicCoordinatorOfferings() {
           display: flex;
           flex-direction: column;
           gap: 22px;
+        }
+
+        .modal.offer-detail-modal {
+          width: min(760px, 96vw);
+          max-width: 760px;
+          max-height: min(88vh, 820px);
+          display: flex;
+          flex-direction: column;
+          border: 1px solid #eadde1;
+          border-radius: 16px;
+        }
+
+        .offer-detail-modal .modal-h {
+          flex: 0 0 auto;
+        }
+
+        .offer-detail-modal .modal-h h3 {
+          min-width: 0;
+          overflow-wrap: anywhere;
+        }
+
+        .offer-detail-modal .modal-b {
+          flex: 1 1 auto;
+          min-height: 0;
+          overflow-y: auto;
+          padding: 22px 24px 26px;
+          scrollbar-gutter: stable;
         }
 
         .offer-modal-hero {
@@ -555,6 +639,56 @@ export default function AcademicCoordinatorOfferings() {
         .offer-modal-meta {
           color: #747880;
           font-size: 12px;
+          line-height: 1.55;
+          overflow-wrap: anywhere;
+        }
+
+        .offer-schedule {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+          margin-top: -6px;
+        }
+
+        .offer-schedule-card {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          min-width: 0;
+          padding: 13px 15px;
+          border: 1px solid #eadde1;
+          border-radius: 10px;
+          background: linear-gradient(135deg, #fffafb, #f9f7f8);
+        }
+
+        .offer-schedule-mark {
+          display: grid;
+          flex: 0 0 32px;
+          place-items: center;
+          width: 32px;
+          height: 32px;
+          border-radius: 9px;
+          color: #7a1f35;
+          background: #f4e5e9;
+          font-size: 14px;
+          font-weight: 800;
+        }
+
+        .offer-schedule-card span {
+          display: block;
+          margin-bottom: 3px;
+          color: #85808a;
+          font-size: 10px;
+          font-weight: 700;
+          letter-spacing: .06em;
+          text-transform: uppercase;
+        }
+
+        .offer-schedule-card strong {
+          display: block;
+          color: #303238;
+          font-size: 13px;
+          overflow-wrap: anywhere;
         }
 
         .offer-modal-section {
@@ -636,6 +770,33 @@ export default function AcademicCoordinatorOfferings() {
           text-align: right;
         }
 
+        .offer-hod-panel {
+          display: flex;
+          flex-direction: column;
+          gap: 14px;
+          padding: 16px;
+          border: 1px solid #eadde1;
+          border-radius: 12px;
+          background: linear-gradient(135deg, #fff, #fffafc);
+          box-shadow: 0 8px 22px rgba(122,31,53,0.06);
+        }
+
+        .offer-hod-panel .form-row {
+          margin-bottom: 0;
+        }
+
+        .offer-hod-panel .offer-info-grid {
+          align-items: end;
+        }
+
+        .offer-hod-actions {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+
         @media (max-width: 900px) {
           .offer-filter {
             flex-basis: calc(50% - 8px);
@@ -673,6 +834,16 @@ export default function AcademicCoordinatorOfferings() {
           .offer-modal-hero {
             flex-direction: column;
           }
+
+          .offer-schedule {
+            grid-template-columns: 1fr;
+          }
+
+          .offer-detail-modal .modal-h,
+          .offer-detail-modal .modal-b {
+            padding-left: 16px;
+            padding-right: 16px;
+          }
         }
       `}</style>
 
@@ -692,6 +863,7 @@ export default function AcademicCoordinatorOfferings() {
       {error && (
         <div className="calendar-banner warn offerings-message">{error}</div>
       )}
+      {message && <div className="calendar-banner success offerings-message" role="status">{message}</div>}
 
       <nav className="offerings-year-nav" aria-label="Student year">
         <button
@@ -823,6 +995,10 @@ export default function AcademicCoordinatorOfferings() {
                 <th>Program</th>
                 <th>Academic Year</th>
                 <th>Semester / Term</th>
+                <th>Current status</th>
+                <th>HOD input</th>
+                <th>Sections</th>
+                <th>Readiness</th>
                 <th>Faculty</th>
                 <th>Start Date</th>
                 <th>End Date</th>
@@ -837,7 +1013,7 @@ export default function AcademicCoordinatorOfferings() {
                 ).join(", ");
 
                 return (
-                  <tr key={x.id}>
+                  <tr key={x.id} className={x.id === newOfferingId ? "offer-new-row" : ""}>
                     <td className="offer-course">
                       <div className="offer-course-code">
                         {x.course_code || "—"}
@@ -860,14 +1036,19 @@ export default function AcademicCoordinatorOfferings() {
                       </span>
                     </td>
 
+                    <td><Pill s={x.status || "Draft"} /></td>
+                    <td><Pill s={x.hod_input?.status || "Pending"} /></td>
+                    <td>{x.sections?.length || 0} / {x.hod_input?.required_sections || 0}</td>
+                    <td><Pill s={x.readiness?.ready ? "Ready" : "Pending"} /></td>
+
                     <td>
                       <span className="offer-faculty-names">
                         {facultyNames || "No faculty assigned"}
                       </span>
                     </td>
 
-                    <td className="offer-date">{x.course_start_date || "—"}</td>
-                    <td className="offer-date">{x.expected_completion_date || "—"}</td>
+                    <td className="offer-date"><div className="offer-date-value"><span>Starts</span><b>{x.course_start_date || "Not set"}</b></div></td>
+                    <td className="offer-date"><div className="offer-date-value"><span>Ends</span><b>{x.expected_completion_date || "Not set"}</b></div></td>
 
                     <td>
                       <button
@@ -893,6 +1074,7 @@ export default function AcademicCoordinatorOfferings() {
 
       {selected && (
         <Modal
+          className="offer-detail-modal"
           title={`${selected.row.course_code} · Sections & Workflow`}
           onClose={() => setSelected(null)}
         >
@@ -927,35 +1109,37 @@ export default function AcademicCoordinatorOfferings() {
                 />
               </div>
 
+              <div className="offer-schedule" aria-label="Course dates">
+                <div className="offer-schedule-card">
+                  <div className="offer-schedule-mark">01</div>
+                  <div>
+                    <span>Start date</span>
+                    <strong>{selected.row.course_start_date || "Not scheduled"}</strong>
+                  </div>
+                </div>
+                <div className="offer-schedule-card">
+                  <div className="offer-schedule-mark">02</div>
+                  <div>
+                    <span>End date</span>
+                    <strong>{selected.row.expected_completion_date || "Not scheduled"}</strong>
+                  </div>
+                </div>
+              </div>
+
               <DetailSection
-                title="HOD Input"
+                title="HOD Review Input"
                 badge={selected.hod?.status || "Pending"}
               >
                 {selected.hod ? (
                   <div className="offer-info-grid">
-                    <Info
-                      l="Required faculty"
-                      v={selected.hod.required_faculty_count}
-                    />
-                    <Info
-                      l="Required sections"
-                      v={selected.hod.required_sections}
-                    />
-                    <Info
-                      l="Expected capacity"
-                      v={selected.hod.expected_capacity}
-                    />
-                    <Info
-                      l="Lab / Theory"
-                      v={selected.hod.delivery_type}
-                    />
-                    <Info
-                      l="Remarks"
-                      v={selected.hod.remarks || "—"}
-                    />
+                    <Info l="Required faculty" v={selected.hod.required_faculty_count} />
+                    <Info l="Required sections" v={selected.hod.required_sections} />
+                    <Info l="Expected capacity" v={selected.hod.expected_capacity} />
+                    <Info l="Lab / Theory" v={selected.hod.delivery_type} />
+                    <Info l="Remarks" v={selected.hod.remarks || "—"} />
                   </div>
                 ) : (
-                  <Empty text="HOD input is pending." />
+                  <Empty text="HOD review input is pending." />
                 )}
               </DetailSection>
 

@@ -212,6 +212,10 @@ class WorkflowInstance(Base):
     initiator_name = Column(String)
     current_stage = Column(Integer, default=0)   # index into approval chain
     scope_level = Column(String)
+    scope_ref = Column(String, default="", index=True)
+    version_no = Column(Integer, default=1, nullable=False)
+    source_type = Column(String, default="", index=True)
+    source_id = Column(String, default="", index=True)
     escalated = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)

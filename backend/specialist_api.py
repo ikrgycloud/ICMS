@@ -34,6 +34,11 @@ def record_payload(record):
 class CreateIn(BaseModel): assignee_id:str=""; specialist_category:str=""
 class UpdateIn(BaseModel): expected_version:int; status:str; notes:str=""; external_reference:str=""
 
+class PromotionIn(BaseModel):
+    staff_id: str
+    proposed_title: str
+    effective_date: datetime
+
 @router.get("/queue")
 def queue(ctx=Depends(auth),s=Depends(db)):
     categories=[key for key,value in OWNER.items() if value==ctx["office_n"]]
@@ -108,3 +113,66 @@ def update_specialist_record(requirement_id:str,body:UpdateIn,ctx=Depends(auth),
     event=("ExecutionResumed" if body.status=="IN_PROGRESS" and old_state=="ON_HOLD" else "ExecutionStarted" if body.status=="IN_PROGRESS" else "ExecutionHeld" if body.status=="ON_HOLD" else "ExecutionCompleted" if body.status=="COMPLETED" else None)
     if event:emit_outbox(s,row.tenant_id,event,row.id,{"recipient":"user_7","title":f"{event}: {row.reference_code}","body":row.title,"severity":"info"},f"{event}:{row.id}")
     write_audit(s,ctx["sub"],actor(s,ctx),ctx["office_n"],"specialist.record.update",f"{rec.__tablename__}:{rec.id}",old,target,body.notes,commit=False);s.commit();return {"status":rec.status,"requirement_state":row.state,"version":row.version}
+
+
+@router.post("/hr/promotions")
+def create_promotion(body: PromotionIn, ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") != 24:
+        raise HTTPException(403, "Only HR Manager may submit promotions")
+    if body.effective_date <= datetime.utcnow():
+        raise HTTPException(422, "Effective date must be in the future")
+    staff = s.query(__import__("domain_models").StaffMember).filter_by(id=body.staff_id, tenant_id=ctx["tenant_id"]).first()
+    if not staff:
+        raise HTTPException(404, "Staff member not found")
+    existing = s.query(S.HRPromotionRequest).filter(S.HRPromotionRequest.staff_id == staff.id, S.HRPromotionRequest.status.in_(("SUBMITTED", "UNDER_REVIEW", "APPROVED"))).first()
+    if existing:
+        raise HTTPException(409, "An active promotion already exists for this employee")
+    wf = __import__("models").WorkflowInstance(id=uid(), tenant_id=ctx["tenant_id"], process_key="recruitment", label="Recruitment / promotion", office_n=24, title=f"Promotion: {staff.name} to {body.proposed_title}", state="under_review", current_stage=2, scope_level="campus", scope_ref=staff.campus, version_no=1, initiator_id=ctx["sub"], initiator_name=actor(s,ctx), source_type="hr_promotion_request")
+    row = S.HRPromotionRequest(id=uid(), tenant_id=ctx["tenant_id"], staff_id=staff.id, current_title=staff.designation or "", proposed_title=body.proposed_title.strip(), effective_date=body.effective_date, workflow_id=wf.id, requested_by=ctx["sub"])
+    wf.source_id = row.id
+    s.add(wf); s.add(row); s.commit()
+    from core import notify
+    notify(s, "user_4", "Promotion approval", wf.title, severity="action")
+    write_audit(s,ctx["sub"],actor(s,ctx),ctx["office_n"],"hr.promotion.submit",f"promotion:{row.id}","","SUBMITTED",wf.title)
+    return {"promotion_id": row.id, "workflow_id": wf.id, "status": row.status}
+
+
+@router.post("/hr/promotions/{promotion_id}/execute")
+def execute_promotion(promotion_id: str, ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") != 24:
+        raise HTTPException(403, "Only HR Manager may execute promotions")
+    row = s.get(S.HRPromotionRequest, promotion_id)
+    if not row or row.tenant_id != ctx["tenant_id"]:
+        raise HTTPException(404, "Promotion request not found")
+    if row.status != "APPROVED":
+        raise HTTPException(409, "Promotion is not approved")
+    if row.effective_date > datetime.utcnow():
+        raise HTTPException(409, "Promotion effective date has not arrived")
+    staff = s.query(__import__("domain_models").StaffMember).filter_by(id=row.staff_id, tenant_id=row.tenant_id).first()
+    if not staff:
+        raise HTTPException(404, "Staff member not found")
+    if staff.designation == row.proposed_title:
+        return {"status": "EXECUTED", "staff_id": staff.id}
+    previous = staff.designation or ""
+    staff.designation = row.proposed_title
+    row.status = "EXECUTED"; row.updated_by = ctx["sub"] if hasattr(row, "updated_by") else row.requested_by; row.updated_at = datetime.utcnow()
+    write_audit(s, ctx["sub"], actor(s,ctx), ctx["office_n"], "hr.promotion.execute", f"staff:{staff.id}", previous, staff.designation, row.id, commit=False)
+    emit_outbox(s, row.tenant_id, "PromotionExecuted", row.id, {"recipient":row.requested_by,"title":"Promotion executed","body":staff.name,"severity":"info"}, f"promotion-executed:{row.id}")
+    s.commit()
+    return {"status": row.status, "staff_id": staff.id, "designation": staff.designation}
+
+
+@router.post("/{requirement_id}/purchase-order")
+def issue_purchase_order(requirement_id: str, ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") != 32:
+        raise HTTPException(403, "Only Purchase Office may issue purchase orders")
+    row=s.get(A.AdministrativeRequirement,requirement_id)
+    if not row or row.tenant_id!=ctx.get("tenant_id") or row.category!="PROCUREMENT": raise HTTPException(404,"Procurement requirement not found")
+    rec=record_for(s,row)
+    if not isinstance(rec,S.ProcurementRequisition): raise HTTPException(409,"Procurement requisition has not been created")
+    if rec.status != "APPROVED": raise HTTPException(409,"Requisition is not approved")
+    if rec.purchase_order_no: return {"purchase_order_no":rec.purchase_order_no,"status":rec.status}
+    rec.purchase_order_no=f"PO-{datetime.utcnow().year}-{rec.requisition_no[-4:]}"; rec.status="PO_ISSUED"; rec.updated_by=ctx["sub"]; rec.updated_at=datetime.utcnow()
+    emit_outbox(s,row.tenant_id,"PurchaseOrderIssued",row.id,{"recipient":row.requester_id,"title":f"Purchase order issued: {rec.purchase_order_no}","body":row.title,"severity":"info"},f"po-issued:{rec.id}")
+    write_audit(s,ctx["sub"],actor(s,ctx),ctx["office_n"],"procurement.purchase_order.issue",f"procurement:{rec.id}","APPROVED","PO_ISSUED",rec.purchase_order_no,commit=False); s.commit()
+    return {"purchase_order_no":rec.purchase_order_no,"status":rec.status}

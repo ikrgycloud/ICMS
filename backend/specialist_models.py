@@ -32,6 +32,15 @@ class HRStaffingRequest(Base):
     completion_notes=Column(Text,default=""); created_by=Column(String,nullable=False); updated_by=Column(String,nullable=False)
     created_at=Column(DateTime,default=datetime.utcnow); updated_at=Column(DateTime,default=datetime.utcnow)
 
+class HRPromotionRequest(Base):
+    __tablename__ = "hr_promotion_requests"
+    id=Column(String,primary_key=True); tenant_id=Column(String,nullable=False,index=True)
+    staff_id=Column(String,nullable=False,index=True); current_title=Column(String,default="")
+    proposed_title=Column(String,nullable=False); effective_date=Column(DateTime,nullable=False)
+    status=Column(String,nullable=False,default="SUBMITTED",index=True); workflow_id=Column(String,index=True)
+    requested_by=Column(String,nullable=False); decided_by=Column(String,default="")
+    created_at=Column(DateTime,default=datetime.utcnow); updated_at=Column(DateTime,default=datetime.utcnow)
+
 class ProcurementRequisition(Base):
     __tablename__ = "procurement_requisitions"
     id=Column(String,primary_key=True); tenant_id=Column(String,nullable=False,index=True)

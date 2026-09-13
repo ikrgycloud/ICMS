@@ -56,6 +56,7 @@ export default function DeanAcademicWorkspaces({
         workload,
         delivery,
         jobData,
+        timetablePlans,
       ] = await Promise.all([
         api.allocationProposals(),
         api.timetableReadiness(),
@@ -73,6 +74,7 @@ export default function DeanAcademicWorkspaces({
         api.facultyWorkload(),
         api.deliveryMonitoring(),
         api.monitorJobs(),
+        api.timetablePlans(),
       ]);
       setData({
         allocations,
@@ -90,6 +92,7 @@ export default function DeanAcademicWorkspaces({
         conflicts,
         workload,
         delivery,
+        timetablePlans: timetablePlans.plans || [],
       });
       setJobs(jobData);
     } catch (e: any) {
@@ -172,6 +175,19 @@ export default function DeanAcademicWorkspaces({
       setError(
         e.message || "This proposal cannot be approved by the current user",
       );
+    } finally {
+      setSaving(false);
+    }
+  }
+  async function decideTimetable(plan: any, action: "approve" | "return") {
+    const reason = action === "return" ? window.prompt("Return reason (required)") || "" : "";
+    if (action === "return" && !reason.trim()) return;
+    setSaving(true);
+    try {
+      await api.timetableDeanDecision(plan.id, action, reason);
+      await load();
+    } catch (e: any) {
+      setError(e.message || "Unable to update timetable review");
     } finally {
       setSaving(false);
     }
@@ -474,6 +490,20 @@ export default function DeanAcademicWorkspaces({
             <div className="dean-workspace-metric"><span>Sections checked</span><b>{Number(data.sections?.length || 0)}</b><small>Current academic scope</small></div>
             <div className="dean-workspace-metric success"><span>Decision access</span><b>{data.readiness.can_decide ? "Yes" : "View"}</b><small>{data.readiness.can_decide ? "You can resolve" : "Escalate to owner"}</small></div>
           </div>
+          <section className="card card-pad dean-workspace-table">
+            <div className="card-h">
+              <div><h3>Timetable review queue</h3><p className="hint">Review complete timetable plans after HOD approval. Publication remains with the VP stage.</p></div>
+              <b>{(data.timetablePlans || []).filter((plan: any) => plan.status === "Dean Review").length} pending</b>
+            </div>
+            {(data.timetablePlans || []).filter((plan: any) => plan.status === "Dean Review" || plan.status === "Published").map((plan: any) => (
+              <div className="dean-workspace-row" key={plan.id}>
+                <span><b>{plan.offering_id} / {plan.section_id}</b><br /><small>{plan.last_action} · {plan.submitted_by} · {formatWorkspaceDate(plan.updated_at)}</small></span>
+                <Pill s={plan.status} />
+                {data.allocations.can_decide && plan.status === "Dean Review" && <span className="row-actions"><button className="btn btn-sm btn-crimson" disabled={saving} onClick={() => decideTimetable(plan, "approve")}>Forward to VP</button><button className="btn btn-sm btn-out" disabled={saving} onClick={() => decideTimetable(plan, "return")}>Return</button></span>}
+              </div>
+            ))}
+            {!(data.timetablePlans || []).some((plan: any) => plan.status === "Dean Review" || plan.status === "Published") && <Empty text="No timetable plans are awaiting Dean review." />}
+          </section>
           <section className="card card-pad dean-workspace-table">
           <div className="card-h">
             <div><h3>Timetable readiness exceptions</h3><p className="hint">Resolve faculty, room, and section clashes before publishing the timetable.</p></div>

@@ -3,6 +3,11 @@ import { api } from '../api'
 import { Spinner, AuthChip } from './ui'
 
 export default function Permissions({ user }: { user: any }) {
+  if (user?.office_n === 4) return <PrincipalPermissions />
+  return <GenericPermissions />
+}
+
+function GenericPermissions() {
   const [perms, setPerms] = useState<any>(null)
   const [verb, setVerb] = useState('approve')
   const [scope, setScope] = useState('department')
@@ -84,4 +89,36 @@ export default function Permissions({ user }: { user: any }) {
       </div>
     </div>
   )
+}
+
+function PrincipalPermissions() {
+  const [perms, setPerms] = useState<any>(null), [verb, setVerb] = useState('approve'), [scope, setScope] = useState('department'), [amount, setAmount] = useState(''), [result, setResult] = useState<any>(null)
+  const [checking, setChecking] = useState(false), [error, setError] = useState(''), [q, setQ] = useState(''), [filter, setFilter] = useState('')
+  const load = () => { setError(''); api.myPermissions().then(setPerms).catch(() => setError('Unable to load Authority & Permissions.')) }
+  useEffect(load, [])
+  if (!perms && !error) return <Spinner />
+  if (error) return <div className="empty-state"><h3>Unable to load Authority &amp; Permissions.</h3><p>Authority and permission information is currently unavailable.</p><button className="btn btn-crimson" onClick={load}>Retry</button></div>
+
+  const authority = new Map<string, string>((perms.permissions || []).map((permission: any): [string, string] => [String(permission.verb), String(permission.authority)]))
+  const allVerbs = perms.all_verbs || []
+  const verbs = allVerbs.filter((name: string) => (!q || `${name} ${authority.get(name) || ''}`.toLowerCase().includes(q.toLowerCase())) && (!filter || name.toLowerCase() === filter))
+  const availableFilters: string[] = [...new Set<string>(allVerbs.map((name: string) => name.toLowerCase()))].sort()
+  const scopeValue = perms.scope_level === 'campus' ? 'One Campus Only' : (perms.scope_level || 'Not configured')
+
+  async function check() {
+    setChecking(true)
+    try { setResult(await api.authzCheck(verb, scope, amount ? parseFloat(amount) : undefined)) }
+    catch (e: any) { setResult({ outcome: 'DENY', reason: e.message }) }
+    setChecking(false)
+  }
+  const resultTone = result?.outcome === 'ALLOW' ? 'allow' : result?.outcome === 'DENY' ? 'deny' : 'conditional'
+
+  return <div className="fade-in principal-operations authority-page">
+    <div className="authority-head"><div><h1>Authority &amp; Permissions</h1><p>Review your effective permissions, scope and approval authority.</p></div><span className="authority-active"><i />Authority active</span></div>
+    <div className="authority-summary"><div><span>Authority level</span><b>L{perms.level || '—'}</b><small>{perms.role || 'Principal authority'}</small></div><div><span>Scope</span><b>{scopeValue}</b><small>Applied to every live check</small></div><div><span>Approval limit</span><b>{perms.approval_limit != null ? `₹${Number(perms.approval_limit).toLocaleString('en-IN')}` : 'No limit set'}</b><small>Effective approval ceiling</small></div><div><span>Granted verbs</span><b>{perms.permissions?.length || 0}</b><small>Permissions available</small></div></div>
+    <div className="authority-grid">
+      <section className="card authority-permissions"><div className="authority-card-head"><div><span>Effective access</span><h3>Granted permissions</h3><p>Permissions resolved from your role, authority level, scope and active delegations.</p></div><b>{perms.permissions?.length || 0} verbs</b></div><div className="authority-filter"><input className="inp" value={q} onChange={event => setQ(event.target.value)} placeholder="Search permissions"/><select className="select" value={filter} onChange={event => setFilter(event.target.value)}><option value="">All permissions</option>{availableFilters.map(value => <option key={value}>{value}</option>)}</select></div><div className="permission-chips">{verbs.length ? verbs.map((name: string) => <div className="permission-chip" key={name}><span>{name.replace(/_/g, ' ')}</span><AuthChip v={authority.get(name) || 'Not granted'} /></div>) : <p className="principal-empty">No permissions match your filters.</p>}</div><div className="authority-context"><div><span>Scope level</span><b>{scopeValue}</b></div><div><span>Auth level</span><b>L{perms.level || '—'}</b></div><div><span>Approval limit</span><b>{perms.approval_limit != null ? `₹${Number(perms.approval_limit).toLocaleString('en-IN')}` : 'None set'}</b></div></div></section>
+      <section className="card authority-check"><div className="authority-card-head"><div><span>Decision engine</span><h3>Live authority check</h3><p>Simulate the same authority evaluation used by protected actions.</p></div><b>Live</b></div><div className="authority-check-form"><label>Action<select className="select" value={verb} onChange={event => setVerb(event.target.value)}>{allVerbs.map((value: string) => <option key={value}>{value}</option>)}</select></label><label>Target scope<select className="select" value={scope} onChange={event => setScope(event.target.value)}>{['global', 'university', 'campus', 'faculty', 'department', 'program', 'section', 'individual'].map(value => <option key={value}>{value}</option>)}</select></label><label>Amount (₹, optional)<input className="inp mono" value={amount} onChange={event => setAmount(event.target.value)} placeholder="e.g. 300000" /></label><button className="btn btn-crimson" onClick={check} disabled={checking}>{checking ? 'Evaluating...' : 'Run authority check'}</button></div>{result && <div className={`authority-result ${resultTone}`}><div className="authority-result-title"><span>Decision</span><b>{result.outcome}</b>{result.authority && <AuthChip v={result.authority} />}</div><p>{result.reason}</p><div className="authority-result-fields"><div><span>Requested action</span><b>{verb}</b></div><div><span>Target scope</span><b>{scope}</b></div>{result.escalate_to && <div><span>Escalates to</span><b>{result.escalate_to}</b></div>}</div></div>}</section>
+    </div>
+  </div>
 }

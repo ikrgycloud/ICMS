@@ -399,8 +399,11 @@ def request_final_approval(session,ctx,application_id,expected_version):
     app=_app(session,ctx,application_id,{"FINANCE_CLEARED"},expected_version)
     if not session.query(D.AdmissionFinanceClearance).filter_by(application_id=app.id,finance_status="CLEARED").first(): raise HTTPException(409,"Finance clearance is required")
     app=transition_application(session,ctx,app.id,"request_final_approval",app.status_version,"Final admission approval requested",skip_capability=True)
-    workflow=WorkflowInstance(id=uid(),tenant_id=app.tenant_id,process_key="student_admission",label="Final admission",office_n=15,title=f"Final admission {app.application_no}",state="submitted",initiator_id=ctx["sub"],initiator_name=ctx["sub"],current_stage=1,scope_level=ctx.get("scope_level","campus"))
-    session.add(workflow);session.add(D.AdmissionWorkflowLink(id=uid(),tenant_id=app.tenant_id,application_id=app.id,workflow_id=workflow.id,purpose="final_admission",status="active"));session.commit()
+    workflow=WorkflowInstance(id=uid(),tenant_id=app.tenant_id,process_key="student_admission",label="Final admission",office_n=15,title=f"Final admission {app.application_no}",state="under_review",initiator_id=ctx["sub"],initiator_name=ctx["sub"],current_stage=3,scope_level="campus",scope_ref=app.campus,version_no=1,source_type="application",source_id=app.id)
+    session.add(workflow)
+    session.flush()
+    session.add(D.AdmissionWorkflowLink(id=uid(),tenant_id=app.tenant_id,application_id=app.id,workflow_id=workflow.id,purpose="final_admission",status="active"))
+    session.commit()
     write_audit(session,ctx["sub"],ctx["sub"],ctx["office_n"],"admission.final.request",f"application:{app.id}","FINANCE_CLEARED","FINAL_APPROVAL_PENDING",workflow.id)
     return app,workflow
 

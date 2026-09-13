@@ -1052,6 +1052,13 @@ def _workflow_stage_offices(proc, stage):
 def _workflow_visible_to(wf, proc, ctx):
     if wf.tenant_id != ctx.get("tenant_id", TENANT):
         return False
+    if ctx.get("office_n") == 4 and ctx.get("scope_level") == "campus":
+        # New workflows carry the source campus explicitly. Legacy rows can
+        # only be treated as campus records when their scope level is campus.
+        if wf.scope_level != "campus":
+            return False
+        if wf.scope_ref and wf.scope_ref != ctx.get("scope_ref"):
+            return False
     if wf.initiator_id == ctx["sub"] or wf.office_n == ctx["office_n"]:
         return True
     return ctx["office_n"] in _workflow_stage_offices(proc, wf.current_stage)
@@ -1158,6 +1165,8 @@ def _start_workflow_record(
     semester_key: str = "",
     semester_label: str = "",
     notes: str = "",
+    source_type: str = "",
+    source_id: str = "",
 ):
     proc = _workflow_process(process_key)
     if not proc:
@@ -1175,7 +1184,9 @@ def _start_workflow_record(
         id=uid(), tenant_id=ctx.get("tenant_id", TENANT), process_key=proc["key"], label=proc["label"],
         office_n=proc["office_n"], title=clean_title, state="submitted",
         amount=amount, initiator_id=u.id, initiator_name=p.name if p else u.username,
-        current_stage=1, scope_level=ctx.get("scope_level", "campus"))
+        current_stage=1, scope_level=ctx.get("scope_level", "campus"),
+        scope_ref=ctx.get("scope_ref", ""), version_no=1,
+        source_type=source_type.strip(), source_id=source_id.strip())
     s.add(wf)
     s.commit()
     _ensure_workflow_profile(s, wf, semester_key=semester_key, semester_label=semester_label, notes=notes)
@@ -1190,11 +1201,14 @@ class StartWF(BaseModel):
     process_key: str
     title: str
     amount: float | None = None
+    source_type: str = ""
+    source_id: str = ""
 
 
 @app.post("/api/workflows/start")
 def start_workflow(body: StartWF, ctx=Depends(non_front_office), s=Depends(db)):
-    wf, proc = _start_workflow_record(s, ctx, body.process_key, body.title, body.amount)
+    wf, proc = _start_workflow_record(s, ctx, body.process_key, body.title, body.amount,
+                                      source_type=body.source_type, source_id=body.source_id)
     return _wf_payload(s, wf, proc)
     proc = next((p for p in APPROVAL_MATRIX if p["key"] == body.process_key), None)
     if not proc:
@@ -1257,13 +1271,16 @@ class DecideWF(BaseModel):
     workflow_id: str
     action: str          # approve / reject / review / escalate / execute
     reason: str = ""
+    expected_version: int | None = None
 
 
 @app.post("/api/workflows/decide")
 def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)):
-    wf = s.query(WorkflowInstance).get(body.workflow_id)
+    wf = s.query(WorkflowInstance).filter(WorkflowInstance.id == body.workflow_id).with_for_update().first()
     if not wf or wf.tenant_id != ctx.get("tenant_id", TENANT):
         raise HTTPException(404, "Workflow not found")
+    if body.expected_version is not None and body.expected_version != (wf.version_no or 1):
+        raise HTTPException(409, "Workflow changed; reload before deciding")
     proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
     # Attendance corrections have an exact participant resolver (Coordinator,
     # HOD, then VP) and their final decision updates the original attendance
@@ -1286,7 +1303,7 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
     o = office(ctx["office_n"])
 
     # Resolve RBAC authority for this action.
-    verb = "approve" if body.action in ("approve", "execute") else body.action
+    verb = "approve" if body.action in ("approve", "execute", "return") else body.action
     if body.action == "reject":
         verb = "reject"
     rbac = rbac_for(ctx["office_n"], o["level"], verb if verb in VERBS else "approve")
@@ -1296,7 +1313,7 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
 
     # Run the authority gate (Document §7 steps 8-13).
     dec = authorize(
-        ctx=ctx, action=body.action if body.action in VERBS else "approve",
+        ctx=ctx, action=body.action if body.action in VERBS or body.action == "return" else "approve",
         resource=f"workflow:{wf.process_key}",
         rbac_authority=rbac,
         workflow_state=wf.state,
@@ -1308,7 +1325,7 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
         # Retaining the Finance Manager's university scope here would deny the
         # campus-scoped Principal, including for records submitted before the
         # workflow scope was corrected.
-        target_scope_level="campus" if wf.process_key == "fee_structure" else wf.scope_level,
+        target_scope_level="campus" if wf.process_key in {"fee_structure", "attendance_condonation"} else wf.scope_level,
         escalate_to=proc["escalation"] if proc else None,
     )
 
@@ -1324,6 +1341,8 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
     if dec.outcome == ALLOW:
         if body.action == "reject":
             wf.state = "rejected"
+        elif body.action == "return":
+            wf.state = "returned"
         elif body.action == "execute":
             wf.state = "executed"
         elif body.action == "review":
@@ -1344,17 +1363,11 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
     else:  # DENY
         pass  # state unchanged; decision recorded
 
-    if wf.process_key == "fee_structure":
-        structure = s.query(D.FeeStructure).filter(D.FeeStructure.workflow_id == wf.id).first()
-        if structure:
-            if wf.state == "approved":
-                structure.status = "APPROVED"
-            elif wf.state == "rejected":
-                structure.status = "REJECTED"
-            elif wf.state in ("under_review", "reviewed", "escalated"):
-                structure.status = "UNDER_REVIEW"
-            structure.updated_at = datetime.utcnow()
+    if dec.outcome == ALLOW and body.action in {"approve", "reject", "return"}:
+        from workflow_dispatcher import apply_decision
+        apply_decision(s, wf, body.action, u.id, p.name if p else u.username)
 
+    wf.version_no = (wf.version_no or 1) + 1
     wf.updated_at = datetime.utcnow()
     s.commit()
 
@@ -1392,6 +1405,10 @@ def _wf_payload(s, wf, proc):
         "amount": wf.amount, "initiator": wf.initiator_name,
         "current_stage": wf.current_stage, "escalated": wf.escalated,
         "scope_level": wf.scope_level,
+        "scope_ref": getattr(wf, "scope_ref", "") or "",
+        "version_no": getattr(wf, "version_no", 1) or 1,
+        "source_type": getattr(wf, "source_type", "") or "",
+        "source_id": getattr(wf, "source_id", "") or "",
         "request_student": request_student, "correction_id": correction_id,
         "chain": proc["chain"] if proc else [],
         "escalation": "" if wf.process_key == "attendance_correction" else (proc["escalation"] if proc else ""),
@@ -2250,6 +2267,7 @@ def get_audit(limit: int = 60, ctx=Depends(non_front_office), s=Depends(db)):
             .limit(limit)
             .all())
     return {"entries": [{"id": r.id, "actor": r.actor_name or r.actor, "office_n": r.office_n,
+                         "campus": ctx.get("scope_ref", "") if ctx.get("office_n") == 4 else "",
                          "action": r.action, "entity": r.entity, "new_state": r.new_state,
                          "outcome": r.new_state, "reason": r.reason, "auth_level": r.auth_level,
                          "hash": r.hash, "prev_hash": r.prev_hash,

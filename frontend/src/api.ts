@@ -112,10 +112,17 @@ export const api = {
   scopeMatrix: () => req('/matrices/scope'),
 
   processes: () => req('/workflows/processes'),
-  startWorkflow: (process_key: string, title: string, amount?: number) =>
-    req('/workflows/start', { method: 'POST', body: JSON.stringify({ process_key, title, amount }) }),
-  decideWorkflow: (workflow_id: string, action: string, reason = '') =>
-    req('/workflows/decide', { method: 'POST', body: JSON.stringify({ workflow_id, action, reason }) }),
+  startWorkflow: (process_key: string, title: string, amount?: number, source_type = '', source_id = '') =>
+    req('/workflows/start', { method: 'POST', body: JSON.stringify({ process_key, title, amount, source_type, source_id }) }),
+  decideWorkflow: (workflow_id: string, action: string, reason = '', expected_version?: number) =>
+    req('/workflows/decide', { method: 'POST', body: JSON.stringify({ workflow_id, action, reason, expected_version }) }),
+  createAttendanceCondonation: (body: any) => req('/attendance/condonation', { method: 'POST', body: JSON.stringify(body) }),
+  createCondonationInvoice: (body: any) => req('/finance/condonation-invoice', { method: 'POST', body: JSON.stringify(body) }),
+  submitSeriousDiscipline: (id: string) => req(`/discipline/${id}/submit`, { method: 'POST' }),
+  createPromotion: (body: any) => req('/specialist/hr/promotions', { method: 'POST', body: JSON.stringify(body) }),
+  executePromotion: (id: string) => req(`/specialist/hr/promotions/${id}/execute`, { method: 'POST' }),
+  issuePurchaseOrder: (requirementId: string) => req(`/specialist/${requirementId}/purchase-order`, { method: 'POST' }),
+  escalateCourseRegistration: (enrollmentId: string) => req(`/portal/faculty/course-registrations/${enrollmentId}/escalate`, { method: 'POST' }),
   workflows: (scope = 'all') => req(`/workflows?scope=${scope}`),
   workflow: (id: string) => req(`/workflows/${id}`),
   payrollRuns: () => req('/portal/payroll/runs'),
@@ -196,6 +203,14 @@ export const api = {
     if (student_semester) params.set('student_semester', student_semester)
     return req(`/overview/principal?${params.toString()}`)
   },
+  principalAtRiskStudents: () => req('/principal/at-risk-students'),
+  principalComplianceRequirements: () => req('/principal/compliance-requirements'),
+  principalEscalations: () => req('/principal/escalations'),
+  approvalHistory: (filters: Record<string, string> = {}) => req(`/approval-history?${new URLSearchParams(filters).toString()}`),
+  escalations: (filters: Record<string, string> = {}) => req(`/escalations?${new URLSearchParams(filters).toString()}`),
+  complianceRequirements: (filters: Record<string, string> = {}) => req(`/compliance-requirements?${new URLSearchParams(filters).toString()}`),
+  complianceRequirement: (id: string) => req(`/compliance-requirements/${encodeURIComponent(id)}`),
+  examSectionOversight: (sectionId: string) => req(`/exams/sections/${encodeURIComponent(sectionId)}/oversight`),
   chairmanOverview: (start = '', end = '') => {
     const params = new URLSearchParams()
     if (start) params.set('start', start)
@@ -391,6 +406,7 @@ export const api = {
   timetablePlans: () => req('/academics/timetable-plans'),
   submitTimetablePlan: (body: any) => req('/academics/timetable-plans/submit', { method: 'POST', body: JSON.stringify(body) }),
   timetableHodDecision: (id: string, action: string, reason = '') => req(`/academics/timetable-plans/${id}/hod-decision`, { method: 'POST', body: JSON.stringify({ action, reason }) }),
+  timetableDeanDecision: (id: string, action: string, reason = '') => req(`/academics/timetable-plans/${id}/dean-decision`, { method: 'POST', body: JSON.stringify({ action, reason }) }),
   timetableVpDecision: (id: string, action: string, reason = '') => req(`/academics/timetable-plans/${id}/vp-decision`, { method: 'POST', body: JSON.stringify({ action, reason }) }),
   publishTimetablePlan: (id: string) => req(`/academics/timetable-plans/${id}/publish`, { method: 'POST' }),
   closeTimetablePlan: (id: string) => req(`/academics/timetable-plans/${id}/close`, { method: 'POST' }),
@@ -617,7 +633,13 @@ export const api = {
   decideFacultyLeave: (id: string, body: any) => req(`/faculty/leave-requests/${id}/decide`, { method: 'POST', body: JSON.stringify(body) }),
 
   // ---- ops ----
-  assets: () => req('/assets'),
+  assets: (filters: Record<string, string> = {}) => {
+    const params = new URLSearchParams()
+    Object.entries(filters).forEach(([key, value]) => { if (value) params.set(key, value) })
+    const qs = params.toString()
+    return req(`/assets${qs ? `?${qs}` : ''}`)
+  },
+  procurement: () => req('/procurement'),
   hostel: () => req('/hostel'),
   allocateHostel: (id: string) => req(`/hostel/allocate/${id}`, { method: 'POST' }),
   transport: () => req('/transport'),
@@ -670,6 +692,8 @@ export const api = {
   // ---- grievance ----
   grievance: () => req('/grievance'),
   raiseComplaint: (b: any) => req('/grievance', { method: 'POST', body: JSON.stringify(b) }),
+  investigateComplaint: (complaint_id: string, notes = '') =>
+    req('/grievance/resolve', { method: 'POST', body: JSON.stringify({ complaint_id, status: 'investigating', notes }) }),
   resolveComplaint: (complaint_id: string, status = 'resolved') =>
     req('/grievance/resolve', { method: 'POST', body: JSON.stringify({ complaint_id, status }) }),
 

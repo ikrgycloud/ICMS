@@ -42,6 +42,10 @@ from migrations import v0039_allocation_resubmission_policy
 from migrations import v0040_course_offering_lineage
 from migrations import v0041_quality_risk_identity
 from migrations import v0042_quality_action_independent_verification
+from migrations import v0043_principal_oversight
+from migrations import v0044_workflow_scope_version
+from migrations import v0045_workflow_source_refs
+from migrations import v0046_principal_handoff_sources
 from migrations import v0008_transport_route_status
 from migrations import v0009_course_offerings
 from migrations import v0010_offering_workflow
@@ -57,6 +61,7 @@ from migrations import v0020_execution_targets
 from migrations import v0021_execution_marks
 from migrations import v0022_mid_execution_progress
 from migrations import v0009_faculty_teaching
+from migrations import v0047_faculty_allocation_offering
 
 MIGRATIONS = [v0001_admissions_foundation, v0002_repair_legacy_application_status,
               v0003_admission_seat_pool_identity, v0004_admissions_phase2_application_context]
@@ -99,6 +104,10 @@ MIGRATIONS.append(v0039_allocation_resubmission_policy)
 MIGRATIONS.append(v0040_course_offering_lineage)
 MIGRATIONS.append(v0041_quality_risk_identity)
 MIGRATIONS.append(v0042_quality_action_independent_verification)
+MIGRATIONS.append(v0043_principal_oversight)
+MIGRATIONS.append(v0044_workflow_scope_version)
+MIGRATIONS.append(v0045_workflow_source_refs)
+MIGRATIONS.append(v0046_principal_handoff_sources)
 MIGRATIONS.append(v0008_transport_route_status)
 MIGRATIONS.append(v0009_course_offerings)
 MIGRATIONS.append(v0010_offering_workflow)
@@ -114,6 +123,7 @@ MIGRATIONS.append(v0020_execution_targets)
 MIGRATIONS.append(v0021_execution_marks)
 MIGRATIONS.append(v0022_mid_execution_progress)
 MIGRATIONS.append(v0009_faculty_teaching)
+MIGRATIONS.append(v0047_faculty_allocation_offering)
 
 
 def upgrade(engine):

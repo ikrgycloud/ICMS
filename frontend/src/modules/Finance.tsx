@@ -606,6 +606,61 @@ export default function Finance({ caps, user, onOpenApprovals, overviewOnly = fa
   )
 }
 
+export function PrincipalFinance({ caps, readOnly = false }: { caps: any; readOnly?: boolean }) {
+  const [tab, setTab] = useState<'fees' | 'budget'>('fees')
+  const [data, setData] = useState<any>(null)
+  const [budget, setBudget] = useState<any>(null)
+  const [decision, setDecision] = useState<any>(null)
+  const [modal, setModal] = useState<{ kind: 'pay' | 'waive'; inv: any } | null>(null)
+  const [amount, setAmount] = useState('')
+
+  function load() {
+    api.invoices().then(setData).catch(() => {})
+    api.budget().then(setBudget).catch(() => {})
+  }
+  useEffect(() => { load() }, [])
+
+  async function act() {
+    if (!modal) return
+    try {
+      const value = Number(amount)
+      const result = modal.kind === 'pay'
+        ? await api.recordPayment(modal.inv.id, value)
+        : await api.waiveFee({ invoice_id: modal.inv.id, amount: value, reason: 'Approved waiver' })
+      setDecision(result.decision || { outcome: 'APPROVE', reason: modal.kind === 'pay' ? 'Payment recorded.' : 'Fee waiver submitted.' })
+      setModal(null)
+      setAmount('')
+      load()
+    } catch (error: any) {
+      setDecision({ outcome: 'DENY', reason: error.message || 'Finance action could not be completed.' })
+      setModal(null)
+    }
+  }
+
+  if (!data) return <Spinner />
+  const summary = data.summary || { total_billed: 0, total_collected: 0, outstanding: 0 }
+  const feesUnavailable = data.data_status === 'unavailable'
+  const collectionRate = Math.round(100 * Number(summary.total_collected || 0) / (Number(summary.total_billed || 0) || 1))
+
+  return <div className="fade-in principal-finance">
+    <PageHead title="Finance" sub="Fee collection, waivers (with limit-based escalation), and budget oversight" />
+    {feesUnavailable ? <div className="empty">{data.reason || 'Campus-scoped invoice data is unavailable.'}</div> : <div className="kpi-row principal-finance-kpis">
+      <div className="kpi"><div className="kpi-v">{money(summary.total_billed)}</div><div className="kpi-l">Total billed</div></div>
+      <div className="kpi"><div className="kpi-v" style={{ color: 'var(--teal)' }}>{money(summary.total_collected)}</div><div className="kpi-l">Collected</div></div>
+      <div className="kpi"><div className="kpi-v" style={{ color: 'var(--rose)' }}>{money(summary.outstanding)}</div><div className="kpi-l">Outstanding</div></div>
+      <div className="kpi"><div className="kpi-v">{collectionRate}%</div><div className="kpi-l">Collection rate</div></div>
+    </div>}
+    <div className="tabs principal-finance-tabs">
+      <button className={`tab ${tab === 'fees' ? 'on' : ''}`} onClick={() => setTab('fees')}>Fee invoices</button>
+      <button className={`tab ${tab === 'budget' ? 'on' : ''}`} onClick={() => setTab('budget')}>Budget</button>
+    </div>
+    {tab === 'fees' && !feesUnavailable && <div className="card principal-finance-card"><div className="tbl-scroll"><table className="tbl"><thead><tr><th>Roll No</th><th>Name</th><th>Billed</th><th>Paid</th><th>Balance</th><th>Status</th>{!readOnly && <th style={{ textAlign: 'right' }}>Actions</th>}</tr></thead><tbody>{(data.invoices || []).slice(0, 80).map((invoice: any) => <tr key={invoice.id}><td className="mono">{invoice.roll_no}</td><td>{invoice.name}</td><td>{money(invoice.amount)}</td><td>{money(invoice.paid)}</td><td><b style={{ color: invoice.balance > 0 ? 'var(--rose)' : 'var(--teal)' }}>{money(invoice.balance)}</b></td><td><span className={`pill s-${invoice.status}`}>{invoice.status}</span></td>{!readOnly && <td style={{ textAlign: 'right' }}><div className="row-actions"><button className="btn btn-sm btn-out" disabled={!caps.record_payment || invoice.balance <= 0} onClick={() => { setModal({ kind: 'pay', inv: invoice }); setAmount(String(invoice.balance)) }}>Payment</button><button className="btn btn-sm btn-brass" disabled={!caps.waive || invoice.balance <= 0} onClick={() => { setModal({ kind: 'waive', inv: invoice }); setAmount(String(invoice.balance)) }}>Waive</button></div></td>}</tr>)}</tbody></table></div></div>}
+    {tab === 'budget' && budget && <div className="card principal-finance-card"><div className="card-pad">{(budget.budget || []).map((item: any) => { const percent = Math.round(100 * Number(item.spent || 0) / (Number(item.allocated || 0) || 1)); return <div className="budget-row" key={item.category}><div className="budget-head"><b>{item.category}</b><span>{money(item.spent)} / {money(item.allocated)}</span></div><div className="bar-track"><div className="bar-fill" style={{ width: `${percent}%`, background: percent > 85 ? 'var(--rose)' : 'var(--brass)' }} /></div></div> })}</div></div>}
+    {modal && <Modal title={modal.kind === 'pay' ? 'Record fee payment' : 'Approve fee waiver'} onClose={() => setModal(null)} footer={<><button className="btn btn-out" onClick={() => setModal(null)}>Cancel</button><button className="btn btn-brass" onClick={act}>{modal.kind === 'pay' ? 'Record' : 'Approve waiver'}</button></>}><div className="form-row"><label>Student</label><div className="mono">{modal.inv.roll_no} · {modal.inv.name}</div></div><div className="form-row"><label>Amount (₹)</label><input className="inp" type="number" value={amount} onChange={event => setAmount(event.target.value)} /></div>{modal.kind === 'waive' && <p className="hint">Waivers above your scope’s approval limit auto-escalate to the Vice-Chancellor per the approval matrix.</p>}</Modal>}
+    {decision && <DecisionToast decision={decision} onClose={() => setDecision(null)} />}
+  </div>
+}
+
 function AccountsOfficeOverview({ totalCollected, todayCollected, pendingVerification, refundsReady, vendorDue, reconciliation, paymentModes, paymentRows, todayPayments, onOpen }: any) {
   const modeRows = Object.entries(paymentModes).sort(([, left]: any, [, right]: any) => right - left)
   const maxMode = Math.max(1, ...modeRows.map(([, value]: any) => Number(value)))
