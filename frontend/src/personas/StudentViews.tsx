@@ -151,14 +151,17 @@ export function StudentCalendarView({ user, go }: { user: any; go: (v: string) =
   }
 
   function openCalendarEvent(event: any) {
+    if (!event) return
+
     if (event.kind === 'personal') {
       setError('')
+      const startDate = event.rawStartDate || event.rawDate || selectedDate
       setPersonalForm({
         id: event.personal_event_id || event.personalEventId,
-        title: event.title,
-        startDate: event.rawStartDate || event.rawDate || selectedDate,
+        title: event.title || '',
+        startDate,
         startTime: event.rawStartTime || event.rawTime || '09:00',
-        endDate: event.rawEndDate || event.rawStartDate || event.rawDate || selectedDate,
+        endDate: event.rawEndDate || event.rawStartDate || event.rawDate || startDate,
         endTime: event.rawEndTime || event.rawTime || '10:00',
         note: event.note || '',
       })
@@ -992,6 +995,29 @@ export function StudentCoursesView() {
       )}
     </div>
   )
+}
+
+export function StudentCurriculumExecution() {
+  const [data, setData] = useState<any>(null)
+  useEffect(() => { api.studentCurriculumExecution().then(setData).catch(() => setData({ items: [] })) }, [])
+  if (!data) return <Spinner />
+  const items = data.items || []
+  return <main className="student-portal fade-in">
+    <header className="student-portal-head"><div><h1>Curriculum Execution</h1><p>Progress for your current academic year and enrolled courses.</p></div></header>
+    {!items.length ? <Empty text="No curriculum execution records match your current year and enrolled courses." /> : <section className="student-portal-card">
+      <div className="faculty-student-table-wrap"><table><thead><tr><th>Course</th><th>Academic year</th><th>Section</th><th>Schedule</th><th>Dates</th><th>Status</th></tr></thead><tbody>
+        {items.map((item: any) => <tr key={item.id}><td><b>{item.course_code}</b><span>{item.course_title}</span></td><td>{item.academic_year}<span>{item.term}</span></td><td>{item.section}</td><td>{item.schedule || 'Not set'}<span>{item.room || 'Room not set'}</span></td><td>{item.course_start_date || 'Not started'}<span>{item.expected_completion_date || 'No end date'}</span></td><td>{item.execution_status}</td></tr>)}
+      </tbody></table></div>
+    </section>}
+  </main>
+}
+
+export function AcademicNotices() {
+  const [data, setData] = useState<any>(null)
+  useEffect(() => { api.academicAnnouncements().then(setData).catch(() => setData({ announcements: [] })) }, [])
+  if (!data) return <Spinner />
+  const rows = data.announcements || []
+  return <main className="faculty-students fade-in"><section className="faculty-students-heading"><div><h1>Academic Notices</h1><p>Published academic notices for the institution.</p></div></section><article className="faculty-student-table-card"><header><div><h2>Notices</h2><p>{rows.length ? `${rows.length} notice${rows.length === 1 ? '' : 's'}` : 'No current notices.'}</p></div></header><div className="faculty-student-table-wrap"><table><thead><tr><th>Title</th><th>Notice</th><th>Date</th></tr></thead><tbody>{rows.map((row: any) => <tr key={row.id}><td><b>{row.title}</b></td><td>{row.body || '-'}</td><td>{row.published_at ? new Date(row.published_at).toLocaleDateString() : '-'}</td></tr>)}{!rows.length && <tr><td colSpan={3}>No academic notices to display.</td></tr>}</tbody></table></div></article></main>
 }
 
 function StudentAcademicMetric({
@@ -3023,18 +3049,19 @@ function blankPersonalEvent(date: string) {
   }
 }
 
-function buildPersonalEventPayload(form: any) {
-  const startAt = combineDateAndTime(form.startDate, form.startTime)
-  const endAt = combineDateAndTime(form.endDate, form.endTime)
+function buildPersonalEventPayload(form: any = {}) {
+  const safeForm = form || {}
+  const startAt = combineDateAndTime(safeForm.startDate, safeForm.startTime)
+  const endAt = combineDateAndTime(safeForm.endDate, safeForm.endTime)
   return {
-    title: String(form.title || '').trim() || 'Personal Event',
-    note: String(form.note || '').trim(),
+    title: String(safeForm.title || '').trim() || 'Personal Event',
+    note: String(safeForm.note || '').trim(),
     start_at: startAt,
     end_at: endAt,
   }
 }
 
-function combineDateAndTime(rawDate: string, rawTime: string) {
+function combineDateAndTime(rawDate: string | undefined, rawTime: string | undefined) {
   const dateKey = rawDate || todayDateKey()
   const timeKey = rawTime || '09:00'
   return `${dateKey}T${timeKey}:00`

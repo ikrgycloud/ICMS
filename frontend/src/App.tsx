@@ -52,7 +52,8 @@ import Procurement from './modules/Procurement'
 import Facilities from './modules/Facilities'
 import Integrations from './modules/Integrations'
 import StudentHome from './personas/StudentHome'
-import { StudentAttendanceView, StudentCalendarView, StudentCoursesView, StudentExaminationsView, StudentFeesView, StudentLibraryView, StudentScoresView } from './personas/StudentViews'
+import { AcademicNotices, StudentAttendanceView, StudentCalendarView, StudentCoursesView, StudentCurriculumExecution, StudentExaminationsView, StudentFeesView, StudentLibraryView, StudentScoresView } from './personas/StudentViews'
+import FacultyCourseOfferings from './personas/FacultyCourseOfferings'
 import FacultyHome from './personas/FacultyHome'
 import AssociateProfessorHome from './personas/AssociateProfessorHome'
 import FacultySchedule from './personas/FacultySchedule'
@@ -101,12 +102,10 @@ const GROUP_ORDER = ['Workspace', 'Academics', 'Services', 'Operations', 'Platfo
 const DEAN_ACADEMICS_NAV = [
   ['Workspace', 'Overview', 'overview'],
   ['Academic Planning', 'Programs', 'dean_programs'], ['Academic Planning', 'Curriculum', 'curriculum'], ['Academic Planning', 'Courses', 'courses_subjects'],
-  // The workspace owns its related operational and quality tabs. Keeping each
-  // tab in this global navigation made the sidebar duplicate the on-page menu.
-  ['Academic Operations', 'Academic Calendar', 'academic_calendar'], ['Academic Operations', 'Academic Operations', 'dean_academic_operations'],
-  ['Academic Quality', 'Performance & Results', 'analytics'], ['Academic Quality', 'Academic Quality', 'dean_academic_quality'],
+  ['Academic Operations', 'Academic Calendar', 'academic_calendar'], ['Academic Operations', 'Timetable', 'dean_timetable'], ['Academic Operations', 'Faculty Allocation', 'dean_allocation'],
+  ['Academic Quality', 'Performance & Results', 'analytics'], ['Academic Quality', 'Academic Risk', 'dean_risk'],
   ['Authority', 'My Approvals', 'decision_inbox'], ['Authority', 'My Requests', 'workflows'],
-  ['Reports', 'Reports & Analytics', 'dean_reports'], ['Reports', 'Audit', 'audit'],
+  ['Reports', 'Audit', 'audit'],
   ['Reference', 'Directory', 'directory'],
 ] as const
 
@@ -161,8 +160,8 @@ const PRINCIPAL_NAV = [
 // teaching workspace described by the Professor Office information layout.
 // A link is only interactive when its backing module is authorised.
 const FACULTY_NAV = [
-  ['Workspace', 'Overview', 'overview'], ['Workspace', 'My Schedule', 'my_schedule'], ['Workspace', 'Messages', 'messages'],
-  ['Teaching & Academics', 'My Sections', 'academics'], ['Teaching & Academics', 'Attendance', 'attendance'], ['Teaching & Academics', 'Assignments', 'assignments'],
+  ['Workspace', 'Overview', 'overview'], ['Workspace', 'My Schedule', 'my_schedule'], ['Workspace', 'Messages', 'messages'], ['Workspace', 'Academic Calendar', 'academic_calendar'],
+  ['Teaching & Academics', 'My Sections', 'academics'], ['Teaching & Academics', 'Course Offerings', 'faculty_course_offerings'], ['Teaching & Academics', 'Attendance', 'attendance'], ['Teaching & Academics', 'Assignments', 'assignments'],
   ['Teaching & Academics', 'Assessments & Marks', 'assessments'], ['Teaching & Academics', 'Marks', 'marks_entry'], ['Teaching & Academics', 'Examinations', 'examinations'],
   ['Teaching & Academics', 'Course Materials', 'course_materials'], ['Teaching & Academics', 'Mentoring & Advisees', 'mentoring'], ['Teaching & Academics', 'Research & Guidance', 'research'],
   ['Communication', 'Announcements', 'announcements'],
@@ -175,7 +174,7 @@ const COORDINATOR_NAV = [
   ['Academic planning', 'Academic Calendar', 'academic_calendar'], ['Academic planning', 'Curriculum Execution', 'curriculum'],
   ['scheduling', 'Course Offerings', 'coordinator_course_offerings'], ['scheduling', 'Sections & Timetable', 'coordinator_sections'], ['scheduling', 'Conflict Center', 'coordinator_conflicts'],
   ['coordination', 'Academic Notices', 'coordinator_notices'],
-  ['authority', 'My Requests', 'coordinator_requests'],
+  ['authority', 'Approvals', 'coordinator_approvals'], ['authority', 'Requests', 'coordinator_requests'],
   ['reports', 'Reports', 'coordinator_reports'], ['reports', 'Audit', 'audit'],
   ['reference', 'Directory', 'directory'],
 ] as const
@@ -256,9 +255,15 @@ export default function App({ onLogout }: { onLogout: () => void }) {
 
   useEffect(() => {
     api.me().then(r => {
-      setUser(r.user)
-      if (r.user?.office_n === 31) setView('transport')
-      else if (r.user?.office_n === 23) setView('finance')
+      const nextUser = r.user
+      setUser(nextUser)
+      if (nextUser?.office_n === 31) setView('transport')
+      else if (nextUser?.office_n === 23) setView('finance')
+      else setView('overview')
+
+      if ([10, 17].includes(nextUser?.office_n) && window.location.hash && window.location.hash !== '#overview') {
+        window.location.hash = 'overview'
+      }
     }).catch(() => {})
     loadWs()
     loadNotifs()
@@ -343,15 +348,21 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     () => {
       const modules = rawModules
       .filter((module: any) => !(user?.persona === 'student' && module.key === 'students'))
+      .filter((module: any) => !([31, 35].includes(user?.office_n) && module.key === 'my_payroll'))
       // Finance Manager works only with fee operations and fee-approval tasks.
       // Governance matrices and generic administration screens are not part of this portal.
       .filter((module: any) => user?.office_n !== 22 || ['overview', 'finance', 'rollover', 'approvals', 'audit'].includes(module.key))
       .filter((module: any) => module && module.key)
-      .map((module: any) => ({ ...module, actions: module.actions || {}, ...displayMeta(user, module) }))
+      .map((module: any) => {
+        if (user?.office_n === 10 && module.key === 'workflows') {
+          return { ...module, label: 'Requests', actions: module.actions || {}, ...displayMeta(user, module) }
+        }
+        return { ...module, actions: module.actions || {}, ...displayMeta(user, module) }
+      })
       if (user?.persona === 'student' && !modules.some((module: any) => module.key === 'finance')) {
         modules.push({ key: 'finance', label: 'Fees & Payments', group: 'Student Services', enabled: true })
       }
-      if (user?.persona && !['student', 'parent', 'faculty'].includes(user.persona) && !modules.some((module: any) => module.key === 'my_payroll')) {
+      if (![31, 35].includes(user?.office_n) && user?.persona && !['student', 'parent', 'faculty'].includes(user.persona) && !modules.some((module: any) => module.key === 'my_payroll')) {
         modules.push({ key: 'my_payroll', label: 'My Payroll', group: 'Self Service', enabled: true })
       }
       return modules
@@ -661,7 +672,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'messages':
       return <FacultyCommunication mode="messages" />
     case 'announcements':
-      return <FacultyCommunication mode="announcements" />
+      return <AcademicNotices />
     case 'academic_calendar':
       return <AcademicCalendar user={user} caps={caps} />
     case 'rollover':
@@ -703,7 +714,10 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'dean_reports':
       return <DeanAcademicWorkspaces initialTab="reports" />
     case 'curriculum':
-      return user.office_n === 17 ? <AcademicCoordinatorCurriculumExecution onNavigate={go} /> : <Curriculum />
+      if (user.persona === 'student') return <StudentCurriculumExecution />
+      return [6, 17].includes(user.office_n) ? <AcademicCoordinatorCurriculumExecution onNavigate={go} /> : <Curriculum />
+    case 'faculty_course_offerings':
+      return <FacultyCourseOfferings />
     case 'courses_subjects':
       return <CoursesSubjects />
     case 'coordinator_course_offerings':
@@ -713,11 +727,13 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'coordinator_conflicts':
       return <AcademicCoordinatorConflicts onNavigate={go} />
     case 'coordinator_notices':
-      return Number(user.office_n) === 17 ? <AcademicCoordinatorNotices /> : <Academics caps={caps} />
+      return [6, 17].includes(Number(user.office_n)) ? <AcademicCoordinatorNotices /> : <Academics caps={caps} />
+    case 'coordinator_approvals':
+      return <DecisionInbox />
     case 'coordinator_requests':
-      return <Workflows user={user} onChange={onChange} initialTab="mine" />
+      return <MyRequests go={go} />
     case 'coordinator_reports':
-      return user.office_n === 17 ? <AcademicCoordinatorReports onNavigate={go} /> : <Analytics user={user} />
+      return [6, 17].includes(user.office_n) ? <AcademicCoordinatorReports onNavigate={go} /> : <Analytics user={user} />
     case 'attendance':
       if (user.persona === 'faculty') return <FacultyAttendance />
       if (user.persona === 'student') return <StudentAttendanceView />
@@ -846,6 +862,11 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return user.office_n === 4 ? <PrincipalCompliance go={go} /> : <div className="empty">This Principal workspace is not available for this role.</div>
     case 'principal_escalations':
       return user.office_n === 4 ? <Escalations /> : <div className="empty">This Principal workspace is not available for this role.</div>
+      if (user.office_n === 1) return <ChairmanApprovals user={user} onChange={onChange} />
+      if (user.office_n === 10) return <DecisionInbox />
+      return <Workflows user={user} onChange={onChange} />
+    case 'workflows':
+      return [6, 10].includes(user.office_n) ? <MyRequests go={go} /> : <Workflows user={user} onChange={onChange} />
     case 'delegation':
       return user.office_n === 1 ? <ChairmanDelegation user={user} /> : <Delegations user={user} />
     case 'audit':

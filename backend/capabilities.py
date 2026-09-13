@@ -73,7 +73,7 @@ MODULES = {
 }
 
 # Modules every signed-in office gets.
-BASE_MODULES = ["overview", "calendar",
+BASE_MODULES = ["overview", "calendar", "academic_calendar",
                 "workflows", "delegation", "audit", "directory", "matrices"]
 
 # Per-office module assignment (office_n -> [module keys], in addition to BASE).
@@ -114,7 +114,7 @@ OFFICE_MODULES = {
     33: ["assets", "procurement"],                                                 # Store / Inventory
     34: ["assets"],                                                               # Security
     35: ["frontdesk_dashboard", "frontdesk_visitors", "frontdesk_verify", "frontdesk_appointments", "frontdesk_helpdesk", "frontdesk_calls", "frontdesk_directory", "frontdesk_delegations"],
-    36: ["students", "academics", "attendance", "examinations", "scores", "finance",         # Student Portal
+    36: ["students", "academics", "curriculum", "attendance", "examinations", "scores", "finance",         # Student Portal
          "library", "hostel", "transport", "placements", "grievance"],
     37: ["students", "finance"],                                                   # Parent Portal
     38: ["placements", "analytics"],                                               # Alumni
@@ -203,10 +203,12 @@ ACTION_OFFICE_ALLOW = {
     ("calendar", "create"): set(range(1, 36)) | {40},
     ("calendar", "edit"): set(range(1, 36)) | {40},
     ("calendar", "delete"): set(range(1, 36)) | {40},
-    ("academic_calendar", "view"): {6, 10, 17},
-    ("academic_calendar", "create"): {6, 10, 17},
-    ("academic_calendar", "edit"): {6, 10, 17},
-    ("academic_calendar", "delete"): {6, 10, 17},
+    ("academic_calendar", "create"): {1, 2, 4, 5, 17},
+    ("academic_calendar", "edit"): {1, 2, 4, 5, 17},
+    ("academic_calendar", "delete"): {1, 2, 4, 5, 17},
+    ("academic_calendar", "create"): {42},
+    ("academic_calendar", "edit"): {42},
+    ("academic_calendar", "delete"): {42},
     ("academic_calendar", "approve_proposal"): {6},
     ("academic_calendar", "reject_proposal"): {6},
     ("students", "add"): {15},                        # Admissions owns student creation

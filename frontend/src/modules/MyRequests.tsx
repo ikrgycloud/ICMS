@@ -6,6 +6,7 @@ type Filter = 'ALL' | 'DRAFT' | 'IN_REVIEW' | 'RETURNED' | 'COMPLETED'
 
 export default function MyRequests({ go }: { go?: (view: string) => void }) {
   const [data, setData] = useState<any>(null)
+  const [workflowData, setWorkflowData] = useState<any>(null)
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
   const [type, setType] = useState('ALL')
@@ -13,31 +14,99 @@ export default function MyRequests({ go }: { go?: (view: string) => void }) {
   const [sort, setSort] = useState('updated')
   const [selected, setSelected] = useState<any>(null)
   const [saving, setSaving] = useState(false)
+  const [showMessageModal, setShowMessageModal] = useState(false)
+  const [message, setMessage] = useState('')
+  const [sendingMessage, setSendingMessage] = useState(false)
 
   async function load() {
     setError('')
-    try { setData(await api.myRequests()) } catch (e: any) { setError(e.message || 'Requests could not be loaded.') }
+    try {
+      const [requests, workflows] = await Promise.all([
+        api.myRequests(),
+        api.workflows('mine'),
+      ])
+      setData(requests)
+      setWorkflowData(workflows)
+    } catch (e: any) {
+      setError(e.message || 'Requests could not be loaded.')
+    }
   }
   useEffect(() => { load() }, [])
+  useEffect(() => {
+    const onApprovalUpdated = () => { load() }
+    window.addEventListener('icms:approval-updated', onApprovalUpdated)
+    return () => window.removeEventListener('icms:approval-updated', onApprovalUpdated)
+  }, [])
+
+  const allRequests = useMemo(() => {
+    const proposalRequests = (data?.requests || []).map((item: any) => ({ ...item, source: 'proposal' }))
+    const workflowRequests = (workflowData?.workflows || []).map((item: any) => ({
+      id: item.id,
+      type: item.label || item.process_key || 'Request',
+      title: item.title,
+      department: 'Institution scope',
+      submitted_at: item.created_at,
+      updated_at: item.updated_at || item.created_at,
+      state: normalizeWorkflowState(item.state),
+      payload: { rationale: item.title, description: item.title },
+      events: item.history || [],
+      source: 'workflow',
+      chain: item.chain || [],
+      current_stage: item.current_stage,
+      process_key: item.process_key,
+    }))
+    return [...proposalRequests, ...workflowRequests]
+  }, [data, workflowData])
 
   const rows = useMemo(() => {
     const needle = query.trim().toLowerCase()
-    const result = (data?.requests || []).filter((item: any) => {
+    const result = allRequests.filter((item: any) => {
       const matchesQuery = !needle || [item.title, item.type, item.department, item.id].some(value => String(value || '').toLowerCase().includes(needle))
-      const matchesType = type === 'ALL' || item.type === type.toLowerCase()
-      const matchesStatus = status === 'ALL' || (status === 'DRAFT' ? item.state === 'DRAFT' : status === 'IN_REVIEW' ? ['SUBMITTED', 'RESUBMITTED', 'UNDER_REVIEW', 'ESCALATED'].includes(item.state) : status === 'RETURNED' ? ['RETURNED', 'CLARIFICATION_REQUIRED'].includes(item.state) : ['APPROVED', 'IMPLEMENTED', 'CLOSED', 'REJECTED'].includes(item.state))
+      const matchesType = type === 'ALL' || String(item.type || '').toLowerCase() === type.toLowerCase()
+      const matchesStatus = status === 'ALL' || (status === 'DRAFT' ? item.state === 'DRAFT' : status === 'IN_REVIEW' ? ['SUBMITTED', 'RESUBMITTED', 'UNDER_REVIEW', 'ESCALATED', 'IN_REVIEW'].includes(item.state) : status === 'RETURNED' ? ['RETURNED', 'CLARIFICATION_REQUIRED'].includes(item.state) : ['APPROVED', 'IMPLEMENTED', 'CLOSED', 'REJECTED'].includes(item.state))
       return matchesQuery && matchesType && matchesStatus
     })
     return result.sort((a: any, b: any) => sort === 'newest' ? String(b.created_at || '').localeCompare(String(a.created_at || '')) : sort === 'oldest' ? String(a.created_at || '').localeCompare(String(b.created_at || '')) : String(b.updated_at || '').localeCompare(String(a.updated_at || '')))
-  }, [data, query, type, status, sort])
+  }, [allRequests, query, type, status, sort])
+
+  const summary = useMemo(() => {
+    const completed = ['APPROVED', 'IMPLEMENTED', 'CLOSED', 'REJECTED']
+    return {
+      all: allRequests.length,
+      drafts: allRequests.filter((row: any) => row.state === 'DRAFT').length,
+      in_review: allRequests.filter((row: any) => ['SUBMITTED', 'RESUBMITTED', 'UNDER_REVIEW', 'ESCALATED', 'IN_REVIEW'].includes(row.state)).length,
+      needs_revision: allRequests.filter((row: any) => ['RETURNED', 'CLARIFICATION_REQUIRED'].includes(row.state)).length,
+      completed: allRequests.filter((row: any) => completed.includes(row.state)).length,
+    }
+  }, [allRequests])
 
   async function submit(item: any) {
     setSaving(true); setError('')
     try { await api.transitionMyRequest(item.id, { target_state: item.state === 'RETURNED' || item.state === 'CLARIFICATION_REQUIRED' ? 'RESUBMITTED' : 'SUBMITTED', expected_status_version: item.status_version, reason: item.state === 'DRAFT' ? 'Request submitted' : 'Request resubmitted' }); await setSelected(null); await load() } catch (e: any) { setError(e.message || 'Unable to update this request.') } finally { setSaving(false) }
   }
 
-  if (!data) return error ? <div className="card card-pad calendar-banner warn">{error} <button className="btn btn-sm btn-out" onClick={load} type="button">Retry</button></div> : <Spinner />
-  const summary = data.summary || {}
+  async function sendMessage() {
+    const text = message.trim()
+    if (!text) {
+      setError('Enter the request details for the Academic Coordinator.')
+      return
+    }
+
+    setSendingMessage(true)
+    setError('')
+    try {
+      await api.startWorkflow('academic_coordinator_message', text)
+      setShowMessageModal(false)
+      setMessage('')
+      await load()
+    } catch (e: any) {
+      setError(e.message || 'Unable to send this message.')
+    } finally {
+      setSendingMessage(false)
+    }
+  }
+
+  if (!data && !workflowData) return error ? <div className="card card-pad calendar-banner warn">{error} <button className="btn btn-sm btn-out" onClick={load} type="button">Retry</button></div> : <Spinner />
   return <div className="fade-in my-requests-page">
     <PageHead title="My Requests" sub="Track requests you submitted and monitor their progress." right={<button className="btn btn-out" onClick={load} type="button">Refresh</button>} />
     {error && <div className="calendar-banner warn">{error}</div>}
@@ -52,13 +121,14 @@ export default function MyRequests({ go }: { go?: (view: string) => void }) {
       <label><span>Search requests</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Title, request ID, department" /></label>
       <select value={type} onChange={event => setType(event.target.value)} aria-label="Request type"><option value="ALL">All request types</option><option value="curriculum">Curriculum</option><option value="allocation">Faculty allocation</option><option value="calendar">Academic calendar</option><option value="program">Program</option></select>
       <select value={sort} onChange={event => setSort(event.target.value)} aria-label="Sort requests"><option value="updated">Recently updated</option><option value="newest">Newest</option><option value="oldest">Oldest</option></select>
-      <button className="btn btn-crimson" onClick={() => go?.('curriculum')} type="button">+ New Request</button>
+      <button className="btn btn-crimson" onClick={() => setShowMessageModal(true)} type="button">+ New Request</button>
     </section>
     <section className="my-request-queue card">
       <div className="card-h"><div><h3>Request history</h3><span className="hint">{rows.length} visible request{rows.length === 1 ? '' : 's'}</span></div></div>
       <div className="my-request-table-wrap"><table className="my-request-table"><thead><tr><th>Type</th><th>Request</th><th>Scope / Department</th><th>Submitted</th><th>Last updated</th><th>Status</th><th>Next action</th><th /></tr></thead><tbody>{rows.map((item: any) => <tr key={item.id}><td>{String(item.type || '').replace('_', ' ')}</td><td><b>{item.title}</b><small>{item.id}</small></td><td>{item.department}</td><td>{formatDate(item.submitted_at)}</td><td>{formatDate(item.updated_at)}</td><td><Pill s={item.state} /></td><td><span className="my-request-next">{nextAction(item.state)}</span></td><td><button className="btn btn-sm btn-out" onClick={() => setSelected(item)} type="button">View</button></td></tr>)}</tbody></table></div>
-      {!rows.length && <div className="my-request-empty"><strong>{data.requests.length ? 'No requests match your filters' : 'No requests yet'}</strong><span>{data.requests.length ? 'Clear filters or try another search.' : "You haven't submitted any academic requests."}</span>{!data.requests.length && <button className="btn btn-crimson" onClick={() => go?.('curriculum')} type="button">+ New Request</button>}</div>}
+      {!rows.length && <div className="my-request-empty"><strong>{allRequests.length ? 'No requests match your filters' : 'No requests yet'}</strong><span>{allRequests.length ? 'Clear filters or try another search.' : "You haven't submitted any academic requests."}</span>{!allRequests.length && <button className="btn btn-crimson" onClick={() => setShowMessageModal(true)} type="button">+ New Request</button>}</div>}
     </section>
+    {showMessageModal && <div className="my-request-backdrop" onMouseDown={event => event.target === event.currentTarget && setShowMessageModal(false)}><aside className="my-request-drawer" role="dialog" aria-modal="true" aria-label="Create request for Academic Coordinator"><header><div><span className="my-request-kicker">Request</span><h2>Create request</h2></div><button onClick={() => setShowMessageModal(false)} type="button" aria-label="Close request form">×</button></header><div className="my-request-meta"><div><span>To</span><b>Academic Coordinator</b></div><div><span>Purpose</span><b>Approval request</b></div></div><section><h3>Request details</h3><textarea className="inp" rows={6} value={message} onChange={event => setMessage(event.target.value)} placeholder="Describe the request you want the Academic Coordinator to review..." /></section><footer><button className="btn btn-out" onClick={() => setShowMessageModal(false)} type="button">Cancel</button><button className="btn btn-crimson" disabled={sendingMessage} onClick={sendMessage} type="button">{sendingMessage ? 'Submitting...' : 'Submit request'}</button></footer></aside></div>}
     {selected && <div className="my-request-backdrop" onMouseDown={event => event.target === event.currentTarget && setSelected(null)}><aside className="my-request-drawer" role="dialog" aria-modal="true" aria-label="Request details"><header><div><span className="my-request-kicker">{selected.type}</span><h2>{selected.title}</h2></div><button onClick={() => setSelected(null)} type="button" aria-label="Close request details">×</button></header><div className="my-request-meta"><div><span>Status</span><b>{selected.state}</b></div><div><span>Department</span><b>{selected.department}</b></div><div><span>Submitted</span><b>{formatDate(selected.submitted_at)}</b></div><div><span>Updated</span><b>{formatDate(selected.updated_at)}</b></div></div><section><h3>Request summary</h3><p>{selected.payload?.rationale || selected.payload?.description || 'No additional request summary provided.'}</p></section><section><h3>Workflow timeline</h3>{selected.events?.length ? selected.events.map((event: any, index: number) => <div className="my-request-event" key={`${event.at}-${index}`}><b>{event.to_state}</b><span>{formatDateTime(event.at)} · {event.actor_id}</span>{event.reason && <small>{event.reason}</small>}</div>) : <p>No workflow events recorded.</p>}</section><footer>{(selected.state === 'DRAFT' || selected.state === 'RETURNED' || selected.state === 'CLARIFICATION_REQUIRED') && <button className="btn btn-crimson" disabled={saving} onClick={() => submit(selected)} type="button">{saving ? 'Saving...' : selected.state === 'DRAFT' ? 'Submit request' : 'Revise & Resubmit'}</button>}{selected.state === 'DRAFT' && <button className="btn btn-out" onClick={() => go?.('curriculum')} type="button">Edit in Curriculum</button>}<button className="btn btn-out" onClick={() => setSelected(null)} type="button">Close</button></footer></aside></div>}
   </div>
 }
@@ -66,4 +136,16 @@ export default function MyRequests({ go }: { go?: (view: string) => void }) {
 function Summary({ label, value, active, onClick }: { label: string; value: number; active: boolean; onClick: () => void }) { return <button className={`my-request-summary-card ${active ? 'active' : ''}`} onClick={onClick} type="button"><span>{label}</span><b>{value}</b><small>View requests</small></button> }
 function formatDate(value: string | null | undefined) { return value ? new Date(value).toLocaleDateString() : '—' }
 function formatDateTime(value: string | null | undefined) { return value ? new Date(value).toLocaleString() : 'Unknown time' }
+function normalizeWorkflowState(state: string | null | undefined) {
+  const normalized = String(state || '').toUpperCase()
+  if (normalized === 'UNDER_REVIEW') return 'UNDER_REVIEW'
+  if (normalized === 'REVIEWED') return 'UNDER_REVIEW'
+  if (normalized === 'ESCALATED') return 'ESCALATED'
+  if (normalized === 'APPROVED') return 'APPROVED'
+  if (normalized === 'EXECUTED') return 'IMPLEMENTED'
+  if (normalized === 'REJECTED') return 'REJECTED'
+  if (normalized === 'SUBMITTED') return 'SUBMITTED'
+  if (normalized === 'DRAFT') return 'DRAFT'
+  return normalized || 'SUBMITTED'
+}
 function nextAction(state: string) { if (state === 'DRAFT') return 'Edit / Submit'; if (['RETURNED', 'CLARIFICATION_REQUIRED'].includes(state)) return 'Revise & Resubmit'; if (['APPROVED', 'IMPLEMENTED'].includes(state)) return 'View implementation'; if (state === 'REJECTED') return 'View reason'; return 'Awaiting reviewer' }

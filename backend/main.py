@@ -719,52 +719,123 @@ def _ensure_roll_number_student_login(s, requested_username, student):
 
 @app.post("/api/auth/login")
 def login(body: LoginIn, s=Depends(db)):
-    # IDs and email-style usernames should be convenient to type.  Preserve the
-    # stored username but compare case-insensitively at authentication time.
-    # The shared demo student account is the documented login name, while older
-    # databases may still have the roll-number alias bound to the same row.
+    # IDs and email-style usernames should be convenient to type.
+    # Preserve the typed username, but allow aliases such as
+    # "professor" -> "aarav_kulkarni".
+
     requested_username = (body.username or "").strip().lower()
-    normalized_username = requested_username
+
+    # Login alias
+    login_username = (
+        "aarav_kulkarni"
+        if requested_username == "professor"
+        else requested_username
+    )
+
+    normalized_username = login_username
+
     if normalized_username:
         normalized_username = normalized_username.replace("-", "_").replace(" ", "_")
         normalized_username = re.sub(r"[^a-z0-9_]", "_", normalized_username)
         normalized_username = re.sub(r"_+", "_", normalized_username).strip("_")
 
-    u = s.query(User).filter(func.lower(User.username) == requested_username).first()
-    if not u and normalized_username and normalized_username != requested_username:
-        u = s.query(User).filter(func.lower(User.username) == normalized_username).first()
+    # Search using actual database username
+    u = s.query(User).filter(
+        func.lower(User.username) == login_username
+    ).first()
+
+    if not u and normalized_username and normalized_username != login_username:
+        u = s.query(User).filter(
+            func.lower(User.username) == normalized_username
+        ).first()
+
     if not u and normalized_username:
         compact_username = normalized_username.replace("_", "")
         u = s.query(User).filter(
             func.replace(func.lower(User.username), "_", "") == compact_username
         ).first()
+
+    # Student demo fallback
     if not u and requested_username == "student":
-        u = s.query(User).filter(func.lower(User.username) == "25ece072").first()
+        u = s.query(User).filter(
+            func.lower(User.username) == "25ece072"
+        ).first()
+
+    # Roll-number student login
     if not u and requested_username != "student":
-        student = s.query(D.Student).filter(func.lower(D.Student.roll_no) == requested_username).first()
-        u = _ensure_roll_number_student_login(s, requested_username, student)
+        student = s.query(D.Student).filter(
+            func.lower(D.Student.roll_no) == requested_username
+        ).first()
+
+        u = _ensure_roll_number_student_login(
+            s,
+            requested_username,
+            student
+        )
+
+    # Password verification
     if not u or u.password_hash != pwhash(body.password):
         raise HTTPException(401, "Invalid credentials")
+
+    # Professor demo account verification
     if requested_username == "professor" and demo_data_enabled():
         professor = s.query(User).filter(
-            User.username == "aarav_kulkarni", User.status == "active"
+            func.lower(User.username) == "aarav_kulkarni",
+            User.status == "active"
         ).first()
+
         if not professor:
-            raise HTTPException(503, "Professor demo account is unavailable")
+            raise HTTPException(
+                503,
+                "Professor demo account is unavailable"
+            )
+
         u = professor
+
     elif body.demo_context:
-        raise HTTPException(422, "Invalid demo login context")
+        raise HTTPException(
+            422,
+            "Invalid demo login context"
+        )
+
     o = office(u.office_n)
-    tok = issue_token(u.id, u.tenant_id, u.office_n, u.role, u.scope_level,
-                      u.scope_ref, "mfa" if u.mfa_enabled else "password")
+
+    tok = issue_token(
+        u.id,
+        u.tenant_id,
+        u.office_n,
+        u.role,
+        u.scope_level,
+        u.scope_ref,
+        "mfa" if u.mfa_enabled else "password"
+    )
+
     p = s.query(Person).get(u.person_id)
+
     active_delegations = active_delegations_for(s, u.id)
-    write_audit(s, u.id, p.name if p else u.username, u.office_n, "auth.login",
-                "session", "", "active", "login ok")
+
+    write_audit(
+        s,
+        u.id,
+        p.name if p else u.username,
+        u.office_n,
+        "auth.login",
+        "session",
+        "",
+        "active",
+        "login ok"
+    )
+
     return {
         "token": tok,
-        "user": _user_payload(u, p, o, active_delegations=active_delegations),
-        "active_delegation": active_delegations[0] if active_delegations else None,
+        "user": _user_payload(
+            u,
+            p,
+            o,
+            active_delegations=active_delegations
+        ),
+        "active_delegation":
+            active_delegations[0] if active_delegations else None,
         "active_delegations": active_delegations,
     }
 
@@ -1039,7 +1110,8 @@ def _workflow_stage_offices(proc, stage):
                ("hr", {24, 25}), ("purchase", {32}), ("procurement", {32}),
                ("maintenance", {29}), ("system admin", {28}), ("security admin", {28}),
                ("store", {33}), ("warden", {30}), ("transport", {31}),
-               ("admissions", {15}), ("exam", {16}), ("hod", {10}), ("chairman", {1}))
+               ("admissions", {15}), ("exam", {16}), ("hod", {10}),
+               ("academic coordinator", {17}), ("chairman", {1}))
     stage_offices = set()
     for alternative in label.split("/"):
         for token, offices in mapping:
@@ -1402,7 +1474,7 @@ def _wf_payload(s, wf, proc):
     return {
         "id": wf.id, "process_key": wf.process_key, "label": wf.label,
         "office_n": wf.office_n, "title": wf.title, "state": wf.state,
-        "amount": wf.amount, "initiator": wf.initiator_name,
+        "amount": wf.amount, "initiator_id": wf.initiator_id, "initiator": wf.initiator_name,
         "current_stage": wf.current_stage, "escalated": wf.escalated,
         "scope_level": wf.scope_level,
         "scope_ref": getattr(wf, "scope_ref", "") or "",
@@ -1511,37 +1583,24 @@ def _visible_page_numbers(page: int, total_pages: int):
 @app.get("/api/workflows")
 def list_workflows(scope: str = "all", ctx=Depends(non_front_office), s=Depends(db)):
     q = s.query(WorkflowInstance).filter(WorkflowInstance.tenant_id == ctx.get("tenant_id", TENANT))
-    pending_states = ["submitted", "under_review", "reviewed", "escalated"]
     if scope == "mine":
         q = q.filter(WorkflowInstance.initiator_id == ctx["sub"])
         rows = q.order_by(desc(WorkflowInstance.updated_at)).limit(100).all()
         rows = (q.filter(WorkflowInstance.initiator_id == ctx["sub"])
                 .order_by(desc(WorkflowInstance.updated_at)).limit(100).all())
     elif scope == "inbox":
-        own_rows = (q.filter(WorkflowInstance.office_n == ctx["office_n"],
-                             WorkflowInstance.state.in_(pending_states))
-                     .order_by(desc(WorkflowInstance.updated_at)).all())
-        if ctx["office_n"] in (3, 4):
-            fee_rows = (q.filter(WorkflowInstance.process_key == "fee_structure",
-                                 WorkflowInstance.state.in_(pending_states))
-                        .order_by(desc(WorkflowInstance.updated_at)).all())
-            own_rows = list({row.id: row for row in [*own_rows, *fee_rows]}.values())
+        candidates = q.order_by(desc(WorkflowInstance.updated_at)).limit(250).all()
+        rows = [row for row in candidates if _workflow_visible_to(row, _workflow_process(row.process_key), ctx)]
         delegated = active_delegations_for(s, ctx["sub"])
-        if not delegated:
-            rows = own_rows[:100]
-        else:
-            candidate_rows = (s.query(WorkflowInstance)
-                              .filter(WorkflowInstance.state.in_(pending_states))
-                              .order_by(desc(WorkflowInstance.updated_at)).limit(220).all())
-            seen = {row.id for row in own_rows}
-            rows = list(own_rows)
-            for wf in candidate_rows:
+        if delegated:
+            seen = {row.id for row in rows}
+            for wf in candidates:
                 if wf.id in seen:
                     continue
                 if _delegation_matches_workflow(delegated, wf, ctx.get("scope_level", "individual")):
                     rows.append(wf)
                     seen.add(wf.id)
-            rows = sorted(rows, key=lambda item: item.updated_at or item.created_at, reverse=True)[:100]
+        rows = sorted(rows, key=lambda item: item.updated_at or item.created_at, reverse=True)[:100]
     else:
         candidates = q.order_by(desc(WorkflowInstance.updated_at)).limit(250).all()
         rows = [row for row in candidates if _workflow_visible_to(row, _workflow_process(row.process_key), ctx)][:100]
