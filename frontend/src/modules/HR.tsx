@@ -2,8 +2,8 @@ import { useState, useEffect } from 'react'
 import { api } from '../api'
 import { PageHead, Spinner, DecisionToast } from './kit'
 
-export default function HR({ caps }: { caps: any }) {
-  const [tab, setTab] = useState<'leave' | 'jobs' | 'payroll'>('leave')
+export default function HR({ caps, initialTab = 'leave' }: { caps: any, initialTab?: 'leave' | 'jobs' | 'payroll' }) {
+  const [tab, setTab] = useState<'leave' | 'jobs' | 'payroll'>(initialTab)
   const [leave, setLeave] = useState<any>(null)
   const [jobs, setJobs] = useState<any>(null)
   const [payrollRuns, setPayrollRuns] = useState<any>(null)
@@ -15,6 +15,7 @@ export default function HR({ caps }: { caps: any }) {
     api.jobs().then(setJobs).catch(() => {})
     api.payrollRuns().then(setPayrollRuns).catch(() => setPayrollRuns({ runs: [] }))
   }
+  useEffect(() => { setTab(initialTab) }, [initialTab])
   useEffect(() => { load() }, [])
 
   async function decide(id: string, action: string) {
@@ -63,9 +64,12 @@ export default function HR({ caps }: { caps: any }) {
 
   if (!leave) return <Spinner />
 
+  const pageTitle = tab === 'jobs' ? 'Recruitment & Vacancies' : tab === 'payroll' ? 'Payroll' : 'Leave Management'
+  const pageSub = tab === 'jobs' ? 'Open positions, hiring status, and vacancy pipeline.' : tab === 'payroll' ? 'Payroll runs, payments, and status updates.' : 'Leave lifecycle, approvals, and team availability.'
+
   return (
     <div className="fade-in">
-      <PageHead title="Human Resources" sub="Leave lifecycle, recruitment, and payroll" />
+      <PageHead title={pageTitle} sub={pageSub} />
       <div className="tabs">
         <button className={`tab ${tab === 'leave' ? 'on' : ''}`} onClick={() => setTab('leave')}>Leave requests</button>
         <button className={`tab ${tab === 'jobs' ? 'on' : ''}`} onClick={() => setTab('jobs')}>Openings</button>

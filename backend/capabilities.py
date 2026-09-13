@@ -82,7 +82,7 @@ OFFICE_MODULES = {
     1:  ["governance", "analytics", "finance", "hr", "integrations", "approvals"], # Chairman
     2:  ["governance", "analytics", "finance", "approvals"],                       # Vice Chairman
     3:  ["analytics", "academics", "finance", "hr", "approvals"],                  # Campus Head
-    4:  ["my_schedule", "analytics", "academics", "students", "admissions", "attendance", "examinations", "finance", "rollover", "hr", "procurement", "assets", "hostel", "transport", "grievance", "approvals"],  # Principal: branch oversight views
+    4:  ["my_schedule", "analytics", "academics", "students", "admissions", "attendance", "examinations", "finance", "rollover", "hr", "procurement", "assets", "hostel", "transport", "grievance", "approvals", "principal_at_risk", "principal_compliance", "principal_examinations", "principal_approval_history", "principal_escalations"],  # Principal: branch oversight views
     5:  ["academics", "students", "attendance", "examinations", "approvals"],      # Vice Principal
         6: ["academics", "students", "examinations", "rollover", "research", "academic_calendar", "approvals"],        # Dean Academics
     7:  ["hr", "procurement", "assets", "finance", "approvals"],                   # Dean Administration
@@ -187,6 +187,11 @@ MODULE_ACTIONS = {
     "governance":   {"view": "view", "publish_policy": "publish", "edit_dashboard": "edit"},
     "admin":        {"view": "view", "configure": "configure"},
     "approvals":    {"view": "view", "approve": "approve", "reject": "reject"},
+    "principal_at_risk": {"view": "view"},
+    "principal_compliance": {"view": "view"},
+    "principal_examinations": {"view": "view"},
+    "principal_approval_history": {"view": "view"},
+    "principal_escalations": {"view": "view"},
 }
 
 
@@ -212,7 +217,7 @@ ACTION_OFFICE_ALLOW = {
     ("academics", "create_program"): {6, 10, 17},     # Academic programme master owners
     ("academics", "create_course"): {6, 10, 17},      # Curriculum owners
     ("academics", "assign_faculty"): {6, 10, 17},
-    ("academics", "manage_timetable"): {43},
+    ("academics", "manage_timetable"): {17, 43},
     ("academics", "create_task"): {10, 11, 12, 13, 14, 17},
     ("academics", "edit_task"): {10, 11, 12, 13, 14, 17},
     ("academics", "publish_task"): {10, 11, 12, 13, 14, 17},

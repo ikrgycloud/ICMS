@@ -108,6 +108,23 @@ export default function Transport({ caps }: { caps: any }) {
   return isDriver ? <DriverDashboard /> : <TransportManager />;
 }
 
+export function PrincipalTransport({ caps: _caps }: { caps?: any }) {
+  const [data, setData] = useState<any>(null)
+  useEffect(() => { api.transport().then(setData).catch(() => {}) }, [])
+  if (!data) return <Spinner />
+  const routes = data.routes || []
+  return <div className="fade-in principal-transport">
+    <PageHead title="Transport" sub="Routes, vehicles and seat occupancy" />
+    <div className="card principal-transport-card"><div className="tbl-scroll"><table className="tbl"><thead><tr><th>Route</th><th>Stops</th><th>Vehicle</th><th>Seats</th></tr></thead><tbody>{routes.map((route: any) => {
+      const seats = Number(route.seats || 0)
+      const taken = Number(route.taken || 0)
+      const occupancy = seats ? Math.min(100, Math.max(0, (taken / seats) * 100)) : 0
+      const stopCount = Array.isArray(route.stops) ? route.stops.length : Number(route.stops || 0)
+      return <tr key={route.id}><td><b>{route.name}</b></td><td className="hint">{stopCount}</td><td className="mono">{route.vehicle || route.vehicle_no || '—'}</td><td><span className="fill-bar"><span style={{ width: `${occupancy}%` }} /></span> {taken}/{seats}</td></tr>
+    })}</tbody></table>{!routes.length && <div className="principal-empty"><b>No transport routes found.</b><p>There are no active routes in the authorised campus.</p></div>}</div></div>
+  </div>
+}
+
 export function TransportOverview({
   caps,
   go,

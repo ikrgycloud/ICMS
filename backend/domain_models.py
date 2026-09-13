@@ -559,6 +559,25 @@ class AttendanceCorrectionRequest(Base):
     applied_by = Column(String, default="")
 
 
+class AttendanceCondonationRequest(Base):
+    __tablename__ = "attendance_condonation_requests"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    student_id = Column(String, ForeignKey("students.id"), index=True)
+    section_id = Column(String, ForeignKey("sections.id"), index=True)
+    attendance_percent = Column(Float, default=0)
+    shortage_percent = Column(Float, default=0)
+    reason = Column(Text, default="")
+    requested_by = Column(String, ForeignKey("users.id"), index=True)
+    workflow_id = Column(String, ForeignKey("workflow_instances.id"), unique=True, index=True)
+    status = Column(String, default="submitted", index=True)
+    decided_by = Column(String, default="")
+    decided_at = Column(DateTime, nullable=True)
+    invoice_id = Column(String, ForeignKey("fee_invoices.id"), nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Assessment(Base):
     __tablename__ = "assessments"
     id = Column(String, primary_key=True)
@@ -1780,6 +1799,7 @@ class FacultyAllocation(Base):
     __tablename__ = "faculty_allocations"
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
+    offering_id = Column(String, ForeignKey("course_offerings.id"), nullable=True, index=True)
     section_id = Column(String, ForeignKey("sections.id"), index=True)
     faculty_person_id = Column(String, nullable=False, index=True)
     term = Column(String, index=True)
@@ -1842,6 +1862,58 @@ class AcademicQualityReview(Base):
 class QualityEffectivenessMeasurement(Base):
     __tablename__ = "quality_effectiveness_measurements"
     id = Column(String, primary_key=True); tenant_id = Column(String, index=True); review_id = Column(String, ForeignKey("academic_quality_reviews.id"), index=True); measure = Column(Text); result = Column(Text); value = Column(Float, nullable=True); measured_by = Column(String); measured_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ComplianceRequirement(Base):
+    """Campus-owned compliance item visible to the responsible Principal."""
+    __tablename__ = "compliance_requirements"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True, nullable=False)
+    campus = Column(String, index=True, default="")
+    reference_code = Column(String, index=True, unique=True, nullable=False)
+    title = Column(String, nullable=False)
+    description = Column(Text, default="")
+    category = Column(String, default="")
+    responsible_department = Column(String, default="")
+    priority = Column(String, default="normal")
+    status = Column(String, default="OPEN", index=True)
+    due_date = Column(Date, nullable=True)
+    evidence_reference = Column(Text, default="")
+    created_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class EscalationRecord(Base):
+    __tablename__ = "escalation_records"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True, nullable=False)
+    campus = Column(String, index=True, default="")
+    source_type = Column(String, index=True, default="")
+    source_ref = Column(String, index=True, default="")
+    title = Column(String, nullable=False)
+    reason = Column(Text, default="")
+    priority = Column(String, default="normal", index=True)
+    destination_office_n = Column(Integer, nullable=False)
+    status = Column(String, default="DRAFT", index=True)
+    created_by = Column(String, index=True, nullable=False)
+    received_by = Column(String, default="")
+    resolved_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class EscalationEvent(Base):
+    __tablename__ = "escalation_events"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True, nullable=False)
+    escalation_id = Column(String, ForeignKey("escalation_records.id"), index=True, nullable=False)
+    actor_id = Column(String, nullable=False)
+    event_type = Column(String, nullable=False)
+    reason = Column(Text, default="")
+    previous_status = Column(String, default="")
+    new_status = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class CorrectiveAction(Base):
@@ -2555,6 +2627,9 @@ class Complaint(Base):
     detail = Column(Text, default="")
     status = Column(String, default="open")      # open/investigating/resolved
     severity = Column(String, default="normal")
+    decision = Column(String, default="")
+    decided_by = Column(String, default="")
+    decided_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

@@ -575,3 +575,21 @@ def faculty_course_registrations(ctx=Depends(auth), s=Depends(db)):
     sections = {row.id: row for row in s.query(D.Section).filter(D.Section.id.in_([item.section_id for item in rows])).all()} if rows else {}
     courses = {row.id: row for row in s.query(D.Course).all()}
     return {"registrations": [{"id": row.id, "student": students.get(row.student_id).name if students.get(row.student_id) else "", "roll_no": students.get(row.student_id).roll_no if students.get(row.student_id) else "", "section": f"{courses.get(sections.get(row.section_id).course_id).code if sections.get(row.section_id) and courses.get(sections.get(row.section_id).course_id) else 'Course'} {sections.get(row.section_id).section_code if sections.get(row.section_id) else ''}".strip(), "status": row.status} for row in rows]}
+
+
+@router.post("/faculty/course-registrations/{enrollment_id}/escalate")
+def escalate_course_registration(enrollment_id: str, ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") != 5:
+        raise HTTPException(403, "Only Vice Principal may escalate course registration")
+    enrollment = s.query(D.Enrollment).filter(D.Enrollment.id == enrollment_id, D.Enrollment.tenant_id == ctx["tenant_id"], D.Enrollment.status == "requested").first()
+    if not enrollment:
+        raise HTTPException(404, "Requested enrollment not found")
+    existing = s.query(WorkflowInstance).filter(WorkflowInstance.source_type == "enrollment", WorkflowInstance.source_id == enrollment.id, WorkflowInstance.state.in_(("submitted", "under_review", "reviewed", "escalated"))).first()
+    if existing:
+        raise HTTPException(409, "Registration already has an active escalation")
+    student = s.get(D.Student, enrollment.student_id)
+    workflow = WorkflowInstance(id=uid(), tenant_id=ctx["tenant_id"], process_key="course_registration", label="Course registration exception", office_n=36, title=f"Course registration for {student.name if student else enrollment.student_id}", state="under_review", current_stage=4, scope_level="campus", scope_ref=student.campus if student else ctx.get("scope_ref", ""), version_no=1, initiator_id=ctx["sub"], initiator_name=ctx["sub"], source_type="enrollment", source_id=enrollment.id)
+    s.add(workflow); s.commit()
+    notify(s, "user_4", "Course registration escalation", workflow.title, severity="action")
+    write_audit(s, ctx["sub"], ctx["sub"], ctx["office_n"], "registration.escalate", f"enrollment:{enrollment.id}", "requested", "under_review", workflow.id)
+    return {"workflow_id": workflow.id, "enrollment_id": enrollment.id, "status": workflow.state}

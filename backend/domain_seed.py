@@ -2865,6 +2865,25 @@ def _bind_portal_accounts(s):
                 candidate.school_id = candidate.school_id or dep.school_id
                 candidate.program_id = candidate.program_id or "prog_cse_btech"
 
+    # Timetable Coordinator is a department-scoped academic actor and must be
+    # linked to a real staff profile so timetable planning APIs can resolve the
+    # actor's department hierarchy instead of treating the login as global.
+    timetable_login = _user("timetable_coordinator")
+    if timetable_login and "CSE" in dept_ids:
+        dep = s.query(D.Department).filter(D.Department.code == "CSE").first()
+        if dep:
+            timetable_login.scope_ref = dep.id
+            timetable_login.scope_level = "department"
+            candidate = (s.query(D.StaffMember)
+                         .filter(D.StaffMember.dept_id == dep.id,
+                                 (D.StaffMember.user_id == None) | (D.StaffMember.user_id == timetable_login.id))
+                         .order_by(D.StaffMember.date_joined).first())
+            if candidate:
+                candidate.user_id = timetable_login.id
+                candidate.office_n = 43
+                candidate.school_id = candidate.school_id or dep.school_id
+                candidate.program_id = candidate.program_id or "prog_cse_btech"
+
     s.commit()
 
 
@@ -4006,7 +4025,7 @@ def _seed_admissions_phase5(s):
         if state in {"FINAL_APPROVAL_PENDING","READY_TO_ADMIT","ENROLLED"}:
             workflow=s.get(WorkflowInstance,f"workflow_{app_id}")
             if not workflow:
-                workflow=WorkflowInstance(id=f"workflow_{app_id}",tenant_id=TENANT,process_key="student_admission",label="Final admission",office_n=15,title=f"Final admission {app.application_no}",state="submitted" if state=="FINAL_APPROVAL_PENDING" else "approved",initiator_id="u_admissions",initiator_name="Admissions",current_stage=1,scope_level="campus");s.add(workflow)
+                workflow=WorkflowInstance(id=f"workflow_{app_id}",tenant_id=TENANT,process_key="student_admission",label="Final admission",office_n=15,title=f"Final admission {app.application_no}",state="under_review" if state=="FINAL_APPROVAL_PENDING" else "approved",initiator_id="u_admissions",initiator_name="Admissions",current_stage=3 if state=="FINAL_APPROVAL_PENDING" else 4,scope_level="campus",scope_ref=app.campus,source_type="application",source_id=app.id);s.add(workflow)
             s.flush()
             if not s.get(D.AdmissionWorkflowLink,f"link_{app_id}"): s.add(D.AdmissionWorkflowLink(id=f"link_{app_id}",tenant_id=TENANT,application_id=app.id,workflow_id=f"workflow_{app_id}",purpose="final_admission",status="active"))
         if state == "ENROLLED":

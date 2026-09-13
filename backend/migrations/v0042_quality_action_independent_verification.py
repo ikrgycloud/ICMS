@@ -14,7 +14,7 @@ def upgrade(engine):
         # the Dean's verification queue.
         conn.execute(text("UPDATE corrective_actions SET state = 'EVIDENCE_SUBMITTED', verified_by = '', verification_result = '' WHERE state = 'VERIFIED' AND owner_id <> '' AND verified_by = owner_id"))
         if inspector.has_table("academic_quality_reviews"):
-            conn.execute(text("UPDATE academic_quality_reviews r SET state = 'ACTIONS_IN_PROGRESS' WHERE state <> 'CLOSED' AND EXISTS (SELECT 1 FROM corrective_actions a WHERE a.review_id = r.id AND a.state <> 'VERIFIED')"))
+            conn.execute(text("UPDATE academic_quality_reviews SET state = 'ACTIONS_IN_PROGRESS' WHERE state <> 'CLOSED' AND EXISTS (SELECT 1 FROM corrective_actions a WHERE a.review_id = academic_quality_reviews.id AND a.state <> 'VERIFIED')"))
 
 
 def downgrade(engine):

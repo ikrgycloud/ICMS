@@ -12,8 +12,18 @@ const LEVEL_NAMES: Record<number, string> = {
   7: "Administrative units",
   8: "Support & operations",
 };
+const PRINCIPAL_LEVEL_NAMES: Record<number, string> = {
+  1: "Governance & Apex",
+  2: "Executive Leadership",
+  3: "Campus Leadership",
+  4: "Institution Heads",
+  5: "Deputy / Associate",
+  6: "Academic Units",
+  7: "Administrative Units",
+  8: "Support & Operations",
+};
 
-export default function Directory() {
+export default function Directory({ user }: { user?: any }) {
   const [offices, setOffices] = useState<any[]>([]),
     [q, setQ] = useState(""),
     [level, setLevel] = useState("ALL"),
@@ -64,6 +74,7 @@ export default function Directory() {
     [filtered],
   );
   if (loading) return <Spinner />;
+  if (user?.office_n === 4) return <PrincipalDirectory offices={offices} />;
   return (
     <div className="fade-in directory-page">
       <div className="page-head directory-head">
@@ -218,6 +229,31 @@ export default function Directory() {
       )}
     </div>
   );
+}
+
+function PrincipalDirectory({ offices }: { offices: any[] }) {
+  const [q, setQ] = useState('')
+  const [selected, setSelected] = useState<any>(null)
+  const filtered = offices.filter(office => office.name.toLowerCase().includes(q.toLowerCase()) || (office.purpose || '').toLowerCase().includes(q.toLowerCase()))
+  const byLevel: Record<number, any[]> = {}
+  filtered.forEach(office => { (byLevel[office.level] = byLevel[office.level] || []).push(office) })
+  return <div className="fade-in directory-page principal-directory">
+    <div className="page-head"><h1>Office Directory</h1><p>All 40 offices across 8 authority levels, {offices.reduce((total, office) => total + office.roles, 0)} internal roles. Each office reports upward per the org chart.</p></div>
+    <div className="directory-search"><span aria-hidden="true">⌕</span><input className="inp" placeholder="Search offices..." value={q} onChange={event => setQ(event.target.value)} /></div>
+    <div className="directory-levels">{Object.keys(byLevel).map(Number).sort((a, b) => a - b).map(level => { const rows = byLevel[level]; const roles = rows.reduce((total, row) => total + row.roles, 0); return <section className="directory-level" key={level}><header className="directory-level-head"><span className="directory-level-badge" style={{ background: '#8f1736' }}>L{level}</span><div><h2>{PRINCIPAL_LEVEL_NAMES[level]}</h2><p>{rows.length} {rows.length === 1 ? 'Office' : 'Offices'} · {roles} {roles === 1 ? 'Role' : 'Roles'}</p></div></header><div className="directory-office-grid">{rows.map(office => <button className="directory-office-card" type="button" key={office.n} onClick={() => setSelected(office)}><div className="directory-office-top"><span className="directory-office-number">Office {office.n}</span><span className="directory-role-count">{office.roles} {office.roles === 1 ? 'role' : 'roles'}</span></div><strong>{office.name}</strong><p>{office.purpose}</p><span className="directory-office-level">{PRINCIPAL_LEVEL_NAMES[level]}</span></button>)}</div></section>})}</div>
+    {!filtered.length && <div className="principal-empty">No offices match your search.</div>}
+    {selected && <PrincipalOfficeModal n={selected.n} onClose={() => setSelected(null)} />}
+  </div>
+}
+
+function PrincipalOfficeModal({ n, onClose }: { n: number; onClose: () => void }) {
+  const [office, setOffice] = useState<any>(null)
+  useEffect(() => { api.office(n).then(setOffice).catch(() => {}) }, [n])
+  return <div className="modal-bg" onClick={onClose}><div className="modal principal-directory-modal" onClick={event => event.stopPropagation()}>{!office ? <div style={{ padding: 50 }}><Spinner /></div> : <><div className="modal-h"><div><div className="directory-modal-title"><span className="lvl-badge" style={{ background: '#8f1736' }}>L{office.level}</span><h3>{office.name}</h3></div><p className="directory-modal-purpose">{office.purpose}</p></div><button className="modal-x" onClick={onClose} aria-label="Close office details">×</button></div><div className="modal-b directory-modal-body"><PrincipalSection title={`Internal roles · ${office.internal_roles.length}`}><div className="directory-role-chips">{office.internal_roles.map((role: string) => <span className="tag" key={role}>{role}</span>)}</div></PrincipalSection><PrincipalSection title="Functionalities"><ul className="bullet-list">{office.functionalities.map((item: string) => <li key={item}>{item}</li>)}</ul></PrincipalSection><PrincipalSection title="Workflows"><ul className="bullet-list">{office.workflows.map((item: string) => <li key={item}>{item}</li>)}</ul></PrincipalSection><PrincipalSection title="Modules"><div className="directory-module-chips">{office.modules.map((item: string) => <span className="tag" key={item}>{item}</span>)}</div></PrincipalSection><div className="directory-modal-meta"><PrincipalSection title="Scope"><span className="mono">{office.scope}</span></PrincipalSection><PrincipalSection title="Reports to"><span>{office.reports_to}</span></PrincipalSection></div></div></>}</div></div>
+}
+
+function PrincipalSection({ title, children }: { title: string; children: any }) {
+  return <section className="directory-block"><h3>{title}</h3>{children}</section>
 }
 function Metric({ n, label, sub, accent }: any) {
   return (

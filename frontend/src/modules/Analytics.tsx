@@ -3,7 +3,46 @@ import { api } from '../api'
 import { PageHead, Spinner, money, Kpis } from './kit'
 
 export default function Analytics({ user, go }: { user: any; go?: (view: string) => void }) {
-  return user?.office_n === 6 ? <DeanPerformanceResults go={go} /> : <GenericAnalytics />
+  if (user?.office_n === 4) return <PrincipalAnalytics />
+  else return user?.office_n === 6 ? <DeanPerformanceResults go={go} /> : <GenericAnalytics />
+}
+
+function PrincipalAnalytics() {
+  const [data, setData] = useState<any>(null)
+  const [year, setYear] = useState('')
+  const [semester, setSemester] = useState('')
+
+  useEffect(() => {
+    api.principalOverview(year, semester).then(setData).catch(() => {})
+  }, [year, semester])
+
+  if (!data) return <Spinner />
+  const performance = data.performance || {}
+  const kpis = data.kpis || {}
+  const filters = data.filters || {}
+  const bands = performance.bands || {}
+
+  return <div className="fade-in principal-operations principal-analytics">
+    <PageHead title="Reports & Analytics" sub="Campus-scoped academic and operational reporting." />
+    <div className="operations-filter principal-analytics-filter">
+      <label>Academic Year<select className="select" value={year || filters.selected_year || ''} onChange={event => setYear(event.target.value)}>{(filters.academic_years || []).map((value: string) => <option key={value}>{value}</option>)}</select></label>
+      <label>Semester<select className="select" value={semester} onChange={event => setSemester(event.target.value)}><option value="">All Semesters</option>{(filters.student_semesters || []).map((value: number) => <option key={value} value={value}>Semester {value}</option>)}</select></label>
+    </div>
+    <div className="operations-kpis">
+      <Metric label="Students" value={kpis.students} />
+      <Metric label="Average CGPA" value={performance.average_cgpa} />
+      <Metric label="Pass rate" value={performance.pass_rate == null ? '—' : `${performance.pass_rate}%`} />
+      <Metric label="At risk" value={kpis.risk_students} />
+    </div>
+    <section className="card card-pad">
+      <div className="card-h"><h3>Academic performance</h3><span className="hint">Selected academic year and semester</span></div>
+      <div className="grid-3"><Metric label="Distinction" value={bands.distinction || 0} /><Metric label="First class" value={bands.first || 0} /><Metric label="Second class" value={bands.second || 0} /></div>
+    </section>
+  </div>
+}
+
+function Metric({ label, value }: { label: string; value: any }) {
+  return <div className="operations-metric"><span>{label}</span><b>{value ?? '—'}</b></div>
 }
 
 function GenericAnalytics() {

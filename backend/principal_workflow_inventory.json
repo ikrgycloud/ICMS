@@ -1,0 +1,175 @@
+{
+  "timestamp": "D:\\Projects\\ICMS_Latest\\backend",
+  "total_workflows": 12,
+  "principal_final_approver_count": 9,
+  "principal_escalation_target_count": 3,
+  "workflows": [
+    {
+      "process_key": "fee_structure",
+      "label": "Fee structure approval",
+      "chain": [
+        "Finance Manager",
+        "Principal / Campus Head"
+      ],
+      "escalation": "Chairman",
+      "principal_stage": 2,
+      "principal_is_final": true,
+      "principal_is_escalation": false
+    },
+    {
+      "process_key": "student_admission",
+      "label": "Student admission",
+      "chain": [
+        "Applicant",
+        "Admissions Office",
+        "Admissions Dir.",
+        "Principal/Registrar"
+      ],
+      "escalation": "VC",
+      "principal_stage": 4,
+      "principal_is_final": true,
+      "principal_is_escalation": false
+    },
+    {
+      "process_key": "attendance_correction",
+      "label": "Attendance correction",
+      "chain": [
+        "Faculty",
+        "Class Coordinator",
+        "HOD",
+        "Vice Principal"
+      ],
+      "escalation": "",
+      "principal_stage": 4,
+      "principal_is_final": true,
+      "principal_is_escalation": false
+    },
+    {
+      "process_key": "faculty_leave",
+      "label": "Faculty leave",
+      "chain": [
+        "Faculty",
+        "HOD",
+        "Vice Principal",
+        "Principal"
+      ],
+      "escalation": "VC",
+      "principal_stage": 4,
+      "principal_is_final": true,
+      "principal_is_escalation": false
+    },
+    {
+      "process_key": "fee_waiver",
+      "label": "Fee waiver / scholarship",
+      "chain": [
+        "Student",
+        "Finance Office",
+        "Finance Mgr",
+        "CFO/Principal"
+      ],
+      "escalation": "VC",
+      "principal_stage": 4,
+      "principal_is_final": true,
+      "principal_is_escalation": false
+    },
+    {
+      "process_key": "purchase_request",
+      "label": "Purchase request \u00e2\u2020\u2019 PO",
+      "chain": [
+        "Any office",
+        "Purchase Office",
+        "Procurement Mgr",
+        "CFO/Principal"
+      ],
+      "escalation": "VC",
+      "principal_stage": 4,
+      "principal_is_final": true,
+      "principal_is_escalation": false
+    },
+    {
+      "process_key": "transport_allocation",
+      "label": "Transport allocation",
+      "chain": [
+        "Student",
+        "Route Coord.",
+        "Transport Mgr",
+        "Principal"
+      ],
+      "escalation": "VC",
+      "principal_stage": 4,
+      "principal_is_final": true,
+      "principal_is_escalation": false
+    },
+    {
+      "process_key": "student_grievance",
+      "label": "Student grievance",
+      "chain": [
+        "Student",
+        "Grievance Office",
+        "Dean Student Affairs",
+        "Principal"
+      ],
+      "escalation": "VC",
+      "principal_stage": 4,
+      "principal_is_final": true,
+      "principal_is_escalation": false
+    },
+    {
+      "process_key": "course_registration",
+      "label": "Course registration",
+      "chain": [
+        "Student",
+        "Faculty Advisor",
+        "HOD",
+        "Vice Principal",
+        "Principal"
+      ],
+      "escalation": "Principal",
+      "principal_stage": 5,
+      "principal_is_final": true,
+      "principal_is_escalation": true
+    },
+    {
+      "process_key": "marks_submission",
+      "label": "Marks submission",
+      "chain": [
+        "Faculty",
+        "Evaluation Coord.",
+        "HOD",
+        "Controller of Exams"
+      ],
+      "escalation": "Principal",
+      "principal_stage": null,
+      "principal_is_final": false,
+      "principal_is_escalation": true
+    },
+    {
+      "process_key": "hostel_allocation",
+      "label": "Hostel allocation",
+      "chain": [
+        "Student",
+        "Warden",
+        "Chief Warden",
+        "Hostel Dir."
+      ],
+      "escalation": "Principal",
+      "principal_stage": null,
+      "principal_is_final": false,
+      "principal_is_escalation": true
+    },
+    {
+      "process_key": "placement",
+      "label": "Internship / placement",
+      "chain": [
+        "Student/Recruiter",
+        "Placement Officer",
+        "Placement Mgr",
+        "Placement Dir."
+      ],
+      "escalation": "Principal",
+      "principal_stage": null,
+      "principal_is_final": false,
+      "principal_is_escalation": true
+    }
+  ]
+}

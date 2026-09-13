@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { HiOutlineAcademicCap, HiOutlineBanknotes, HiOutlineBookOpen, HiOutlineCalendarDays, HiOutlineChartBarSquare, HiOutlineCheckBadge, HiOutlineClipboardDocumentList, HiOutlineClock, HiOutlineCreditCard, HiOutlineDocumentCheck, HiOutlineDocumentCurrencyRupee, HiOutlineDocumentText, HiOutlineExclamationTriangle, HiOutlineFolder, HiOutlineGift, HiOutlineHome, HiOutlineLifebuoy, HiOutlineQueueList, HiOutlineScale, HiOutlineShieldCheck, HiOutlineSquares2X2, HiOutlineUserGroup, HiOutlineUserPlus, HiOutlineUsers } from 'react-icons/hi2'
+import { HiOutlineAcademicCap, HiOutlineArchiveBox, HiOutlineBanknotes, HiOutlineBookOpen, HiOutlineBriefcase, HiOutlineBuildingOffice2, HiOutlineCalendarDays, HiOutlineChartBarSquare, HiOutlineCheckBadge, HiOutlineClipboardDocumentList, HiOutlineClock, HiOutlineCreditCard, HiOutlineDocumentCheck, HiOutlineDocumentCurrencyRupee, HiOutlineDocumentText, HiOutlineExclamationTriangle, HiOutlineFolder, HiOutlineGift, HiOutlineHome, HiOutlineLifebuoy, HiOutlineQueueList, HiOutlineScale, HiOutlineShieldCheck, HiOutlineSquares2X2, HiOutlineUserGroup, HiOutlineUserPlus, HiOutlineUsers, HiOutlineWrenchScrewdriver } from 'react-icons/hi2'
 import { api, getUser, logout, saveSession } from './api'
 import Workflows from './views/Workflows'
 import Delegations from './views/Delegations'
@@ -28,16 +28,16 @@ import CoursesSubjects from './modules/CoursesSubjects'
 import Attendance from './modules/Attendance'
 import Examinations from './modules/Examinations'
 import Admissions from './modules/Admissions'
-import Finance from './modules/Finance'
+import Finance, { PrincipalFinance } from './modules/Finance'
 import Library from './modules/Library'
 import HR from './modules/HR'
 import FacultyStaff from './modules/FacultyStaff'
 import Assets from './modules/Assets'
 import Hostel from './modules/Hostel'
-import Transport from './modules/Transport'
+import Transport, { PrincipalTransport } from './modules/Transport'
 import Research from './modules/Research'
 import Placements from './modules/Placements'
-import Grievance from './modules/Grievance'
+import Grievance, { PrincipalGrievance } from './modules/Grievance'
 import Governance from './modules/Governance'
 import DeanAcademicsDashboard from './modules/DeanAcademicsDashboard'
 import DeanAcademicWorkspaces from './modules/DeanAcademicWorkspaces'
@@ -49,6 +49,7 @@ import ChairmanDelegation from './modules/ChairmanDelegation'
 import AdminPanel from './modules/AdminPanel'
 import Analytics from './modules/Analytics'
 import Procurement from './modules/Procurement'
+import Facilities from './modules/Facilities'
 import Integrations from './modules/Integrations'
 import StudentHome from './personas/StudentHome'
 import { AcademicNotices, StudentAttendanceView, StudentCalendarView, StudentCoursesView, StudentCurriculumExecution, StudentExaminationsView, StudentFeesView, StudentLibraryView, StudentScoresView } from './personas/StudentViews'
@@ -79,6 +80,12 @@ import DeanAdministration from './modules/DeanAdministration'
 import SpecialistQueue from './modules/SpecialistQueue'
 import { PageHead } from './modules/kit'
 import AccountantReport from './modules/AccountantReport'
+import PrincipalDashboard from './modules/PrincipalDashboard'
+import PrincipalAtRisk from './modules/PrincipalAtRisk'
+import PrincipalCompliance from './modules/PrincipalCompliance'
+import PrincipalExaminations from './modules/PrincipalExaminations'
+import PrincipalExaminationOversight from './modules/PrincipalExaminationOversight'
+import { ApprovalHistory, Escalations, PrincipalApprovals, PrincipalWorkflows } from './views/PrincipalWorkflowViews'
 
 const LEVEL_COLORS: Record<number, string> = {
   1: '#d92d3a',
@@ -139,19 +146,14 @@ const CHAIRMAN_DISPLAY: Record<string, { label: string; group: string }> = {
 // Entries without a matching capability remain visible but disabled, so the UI does
 // not imply that an unavailable backend workflow can be opened.
 const PRINCIPAL_NAV = [
-  ['Workspace', 'Dashboard', 'overview'], ['Workspace', 'My Schedule', 'my_schedule'],
-  ['Academics', 'Curriculum', 'curriculum'],
-  ['Academics', 'Courses & Subjects', 'courses_subjects'], ['Academics', 'Timetable', 'calendar'],
-  ['Academics', 'Academic Performance', 'analytics'],
-  ['Students', 'Students', 'students'], ['Students', 'Admissions', 'admissions'], ['Students', 'Attendance', 'attendance'],
-  ['Students', 'Performance', 'analytics'], ['Students', 'Student Welfare', 'grievance'], ['Students', 'Discipline & Grievances', 'grievance'],
-  ['Examination', 'Exams', 'examinations'],
-  ['People & Workforce', 'Faculty & Staff', 'faculty_staff'], ['People & Workforce', 'Leave', 'leave'], ['People & Workforce', 'Recruitment / Vacancies', 'recruitment'],
-  ['Finance & Operations', 'Finance', 'finance'], ['Finance & Operations', 'Procurement', 'procurement'], ['Finance & Operations', 'Facilities & Maintenance', 'assets'],
-  ['Finance & Operations', 'Assets', 'assets'], ['Finance & Operations', 'Hostel', 'hostel'], ['Finance & Operations', 'Transport', 'transport'],
-  ['Approvals & Workflow', 'My Approvals', 'approvals'], ['Approvals & Workflow', 'Escalations', 'workflows'], ['Approvals & Workflow', 'Workflows', 'workflows'], ['Approvals & Workflow', 'Delegation', 'delegation'],
+  ['Academic / People', 'Principal', 'overview'], ['Academic / People', 'At-Risk Students', 'at_risk_students'], ['Academic / People', 'Faculty & Staff', 'faculty_staff'], ['Academic / People', 'Leave', 'leave'], ['Academic / People', 'Recruitment & Vacancies', 'recruitment'],
+  ['Academic / People', 'Academic Setup', 'academic_catalog'], ['Academic / People', 'Examinations', 'principal_examinations'],
+  ['Finance & Operations', 'Finance', 'finance'], ['Finance & Operations', 'Procurement', 'procurement'], ['Finance & Operations', 'Facilities & Maintenance', 'facilities'],
+  ['Finance & Operations', 'Assets & Inventory', 'assets'], ['Finance & Operations', 'Hostel', 'hostel'], ['Finance & Operations', 'Transport', 'transport'],
+  ['Approvals & Workflow', 'My Approvals', 'approvals'], ['Approvals & Workflow', 'Approval History', 'approval_history'], ['Approvals & Workflow', 'Workflows', 'workflows'], ['Approvals & Workflow', 'Escalations', 'escalations'], ['Approvals & Workflow', 'Delegation', 'delegation'],
+  ['Governance & Risk', 'Grievance & Discipline', 'grievance'], ['Governance & Risk', 'Accreditation & Compliance', 'compliance'],
   ['Audit & Reporting', 'Audit', 'audit'], ['Audit & Reporting', 'Reports', 'analytics'],
-  ['Reference', 'Directory', 'directory'], ['Reference', 'Authority & Permissions', 'matrices'],
+  ['Reference', 'Directory', 'directory'], ['Reference', 'Authority & Permissions', 'permissions'],
 ] as const
 
 // Faculty offices share the same functional modules, but need the focused
@@ -297,7 +299,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
       || (user?.office_n === 6 && ['courses_subjects', 'decision_inbox', 'dean_programs', 'dean_academic_operations', 'dean_academic_quality', 'dean_timetable', 'dean_allocation', 'dean_risk', 'dean_reports', 'analytics'].includes(view))
       || ([10, 17].includes(user?.office_n) && view === 'source_allocation')
       || (user?.office_n === 7 && view.startsWith('administration_'))
-      || ([3, 4].includes(user?.office_n) && PRINCIPAL_NAV.some(([, , key]) => key === view))
+      || (user?.office_n === 4 && PRINCIPAL_NAV.some(([, , key]) => key === view))
       || (user?.persona === 'faculty' && FACULTY_NAV.some(([, , key]) => key === view))
       || (user?.persona && !['student', 'parent', 'faculty'].includes(user.persona) && view === 'my_payroll')
       || (user?.office_n === 23 && ['finance_fees', 'finance_payments', 'finance_students', 'finance_payroll'].includes(view))
@@ -378,7 +380,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
 
   const color = LEVEL_COLORS[user.level] || '#c9a24a'
   const chairmanShell = user.office_n === 1
-  const principalShell = [3, 4].includes(user.office_n)
+  const principalShell = user.office_n === 4
   const deanAcademicsShell = user.office_n === 6
   const deanAdministrationShell = user.office_n === 7
   const transportOfficeShell = user.office_n === 31
@@ -406,7 +408,6 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const coordinatorGroupKeys = [...new Set(COORDINATOR_NAV.map(([group]) => group))]
   const principalGroups = PRINCIPAL_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
     const source = displayModules.find((module: any) => module.key === key)
-      || (user.office_n === 4 && key === 'courses_subjects' ? displayModules.find((module: any) => module.key === 'academics') : undefined)
       || (user.office_n === 4 && key === 'faculty_staff' ? { key, label, group, enabled: true } : undefined)
     ;(out[group] = out[group] || []).push({ key, label, group, source, enabled: true })
     return out
@@ -652,6 +653,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'program_proposals':
       return <DeanPrograms />
     case 'overview':
+      if (user.office_n === 4) return <PrincipalDashboard user={user} go={go} />
       if (user.office_n === 6) return <DeanAcademicsDashboard go={go} />
       if (user.office_n === 7) return <DeanAdministration mode="dashboard" />
       if (user.office_n === 17) return <AcademicCoordinatorCenter onNavigate={go} />
@@ -683,10 +685,16 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       if (user.persona === 'student') return <StudentHome user={user} go={go} />
       if (user.persona === 'faculty') return <FacultyStudents />
       return <Students caps={caps} />
+    case 'principal_at_risk':
+    case 'at_risk_students':
+      return user.office_n === 4 ? <PrincipalAtRisk /> : <div className="empty">This Principal workspace is not available for this role.</div>
+    case 'academic_catalog':
+      return <CoursesSubjects />
+    case 'facilities':
+      return <Facilities />
     case 'mentoring':
       return user.persona === 'faculty' ? <FacultyMentoring /> : <Students caps={caps} />
     case 'academics':
-      if (user.office_n === 10) return <DeanAcademicWorkspaces initialTab="action" />
       if ([6, 17].includes(user.office_n)) return <DeanAcademicWorkspaces />
       if (user.persona === 'faculty') return <FacultyCourses go={go} />
       if (user.persona === 'student') return <StudentCoursesView />
@@ -715,7 +723,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'coordinator_course_offerings':
       return <AcademicCoordinatorOfferings />
     case 'coordinator_sections':
-      return <AcademicCoordinatorTimetable user={user} />
+      return <AcademicCoordinatorTimetable />
     case 'coordinator_conflicts':
       return <AcademicCoordinatorConflicts onNavigate={go} />
     case 'coordinator_notices':
@@ -736,6 +744,10 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       if (user.persona === 'student') return <StudentExaminationsView go={go} />
       if (user.persona === 'faculty') return <FacultyExaminations />
       return <Examinations caps={caps} />
+    case 'principal_examinations':
+      return user.office_n === 4 ? <PrincipalExaminationOversight /> : <div className="empty">This Principal workspace is not available for this role.</div>
+    case 'principal_compliance':
+      return user.office_n === 4 ? <PrincipalCompliance go={go} /> : <div className="empty">This Principal workspace is not available for this role.</div>
     case 'assessments':
       return user.persona === 'faculty' ? <FacultyAssessments go={go} /> : <Examinations caps={caps} />
     case 'assignments':
@@ -762,6 +774,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'finance':
       if (user.persona === 'student') return <StudentFeesView />
       if (user.persona === 'parent') return <ParentHome user={user} />
+      if (user.office_n === 4) return <PrincipalFinance caps={caps} />
       return <Finance caps={caps} user={user} onOpenApprovals={() => go('approvals')} />
     case 'accountant_report':
       return user.office_n === 23 ? <AccountantReport /> : <Analytics user={user} go={go} />
@@ -779,7 +792,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'faculty_staff':
       return <FacultyStaff />
     case 'leave':
-      return user.persona === 'faculty' ? <FacultyLeave /> : <HR caps={caps} />
+      return user.persona === 'faculty' ? <FacultyLeave /> : <HR caps={caps} initialTab="leave" />
     case 'digital_id':
       return user.persona === 'faculty' ? <FacultyDigitalId /> : <div className="empty">Digital ID is not available for this role.</div>
     case 'coordination':
@@ -789,7 +802,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'course_registrations':
       return <FacultyConditionalView kind="registrations" />
     case 'recruitment':
-      return <HR caps={caps} />
+      return <HR caps={caps} initialTab="jobs" />
     case 'procurement':
       if (user.office_n === 32) return <SpecialistQueue title="Procurement Requisitions" />
       return <Procurement caps={caps} />
@@ -820,18 +833,35 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'hostel':
       return <Hostel caps={caps} />
     case 'transport':
+      if (user.office_n === 4) return <PrincipalTransport caps={caps} />
       return <Transport caps={caps} />
     case 'research':
       return <Research caps={caps} />
     case 'placements':
       return <Placements caps={caps} />
     case 'grievance':
-      return <Grievance caps={caps} />
+      return user.office_n === 4 ? <PrincipalGrievance caps={caps} /> : <Grievance caps={caps} />
     case 'governance':
       return <Governance user={user} />
     case 'admin':
       return <AdminPanel caps={caps} />
     case 'approvals':
+      return user.office_n === 1
+        ? <ChairmanApprovals user={user} onChange={onChange} />
+        : user.office_n === 4
+          ? <PrincipalApprovals user={user} onChange={onChange} />
+        : <Workflows user={user} onChange={onChange} />
+    case 'workflows':
+      return user.office_n === 4 ? <PrincipalWorkflows user={user} onChange={onChange} /> : user.office_n === 6 ? <MyRequests go={go} /> : <Workflows user={user} onChange={onChange} />
+    case 'principal_approval_history':
+    case 'approval_history':
+      return user.office_n === 4 ? <ApprovalHistory /> : <div className="empty">This Principal workspace is not available for this role.</div>
+    case 'escalations':
+      return user.office_n === 4 ? <Escalations /> : <div className="empty">This Principal workspace is not available for this role.</div>
+    case 'compliance':
+      return user.office_n === 4 ? <PrincipalCompliance go={go} /> : <div className="empty">This Principal workspace is not available for this role.</div>
+    case 'principal_escalations':
+      return user.office_n === 4 ? <Escalations /> : <div className="empty">This Principal workspace is not available for this role.</div>
       if (user.office_n === 1) return <ChairmanApprovals user={user} onChange={onChange} />
       if (user.office_n === 10) return <DecisionInbox />
       return <Workflows user={user} onChange={onChange} />
@@ -840,9 +870,9 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'delegation':
       return user.office_n === 1 ? <ChairmanDelegation user={user} /> : <Delegations user={user} />
     case 'audit':
-      return <AuditView />
+      return <AuditView principal={user.office_n === 4} />
     case 'directory':
-      return <Directory />
+      return <Directory user={user} />
     case 'my_profile':
       return user.persona === 'faculty' ? <FacultyProfile /> : <div className="empty">My Profile is not available for this role.</div>
     case 'matrices':
@@ -914,6 +944,56 @@ function ChevronDownIcon() {
 }
 
 function NavGlyph({ moduleKey, label }: { moduleKey: string, label?: string }) {
+  const principalIcons: Record<string, any> = {
+    overview: HiOutlineHome,
+    at_risk_students: HiOutlineExclamationTriangle,
+    faculty_staff: HiOutlineBuildingOffice2,
+    leave: HiOutlineCalendarDays,
+    recruitment: HiOutlineBriefcase,
+    academic_catalog: HiOutlineAcademicCap,
+    principal_examinations: HiOutlineDocumentCheck,
+    finance: HiOutlineBanknotes,
+    procurement: HiOutlineDocumentCurrencyRupee,
+    facilities: HiOutlineWrenchScrewdriver,
+    assets: HiOutlineArchiveBox,
+    hostel: HiOutlineBuildingOffice2,
+    transport: HiOutlineClock,
+    approvals: HiOutlineCheckBadge,
+    approval_history: HiOutlineDocumentText,
+    workflows: HiOutlineDocumentText,
+    escalations: HiOutlineLifebuoy,
+    delegation: HiOutlineUsers,
+    grievance: HiOutlineExclamationTriangle,
+    compliance: HiOutlineShieldCheck,
+    audit: HiOutlineShieldCheck,
+    analytics: HiOutlineChartBarSquare,
+    directory: HiOutlineUserGroup,
+    permissions: HiOutlineShieldCheck,
+    'Principal': HiOutlineHome,
+    'At-Risk Students': HiOutlineExclamationTriangle,
+    'Faculty & Staff': HiOutlineBuildingOffice2,
+    'Leave': HiOutlineCalendarDays,
+    'Recruitment & Vacancies': HiOutlineBriefcase,
+    'Academic Setup': HiOutlineAcademicCap,
+    'Examinations': HiOutlineDocumentCheck,
+    'Finance': HiOutlineBanknotes,
+    'Procurement': HiOutlineDocumentCurrencyRupee,
+    'Facilities & Maintenance': HiOutlineWrenchScrewdriver,
+    'Assets & Inventory': HiOutlineArchiveBox,
+    'Hostel': HiOutlineBuildingOffice2,
+    'Transport': HiOutlineClock,
+    'My Approvals': HiOutlineCheckBadge,
+    'Approval History': HiOutlineDocumentText,
+    'Workflows': HiOutlineDocumentText,
+    'Escalations': HiOutlineLifebuoy,
+    'Delegation': HiOutlineUsers,
+    'Grievance & Discipline': HiOutlineExclamationTriangle,
+    'Accreditation & Compliance': HiOutlineShieldCheck,
+    'Audit': HiOutlineShieldCheck,
+    'Reports': HiOutlineChartBarSquare,
+    'Directory': HiOutlineUserGroup,
+    'Authority & Permissions': HiOutlineShieldCheck,
+  }
   const admissionIcons: Record<string, any> = {
     'Overview': HiOutlineSquares2X2,
     'Admission Cycles': HiOutlineCalendarDays,
@@ -962,6 +1042,8 @@ function NavGlyph({ moduleKey, label }: { moduleKey: string, label?: string }) {
     'Reports': HiOutlineChartBarSquare,
     'Calendar': HiOutlineCalendarDays,
   }
+  const PrincipalIcon = label ? principalIcons[label] : principalIcons[moduleKey]
+  if (PrincipalIcon) return <PrincipalIcon />
   const AdmissionIcon = label ? admissionIcons[label] : null
   if (AdmissionIcon) return <AdmissionIcon />
   switch (moduleKey) {

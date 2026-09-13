@@ -59,3 +59,20 @@ class WorkflowStageAccessTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as error:
             get_workflow("fee_request", {**self.ctx, "tenant_id": "other"}, self.session)
         self.assertEqual(error.exception.status_code, 404)
+
+    def test_stale_decision_is_rejected(self):
+        with self.assertRaises(HTTPException) as error:
+            decide_workflow(DecideWF(workflow_id="fee_request", action="approve", expected_version=0), self.ctx, self.session)
+        self.assertEqual(error.exception.status_code, 409)
+
+    def test_return_transitions_without_advancing_stage(self):
+        result = decide_workflow(DecideWF(workflow_id="fee_request", action="return", expected_version=1), self.ctx, self.session)
+        self.assertEqual(result["workflow"]["state"], "returned")
+        self.assertEqual(result["workflow"]["current_stage"], 1)
+
+    def test_principal_cannot_open_other_campus_workflow(self):
+        self.session.get(WorkflowInstance, "fee_request").scope_ref = "North Campus"
+        self.session.commit()
+        with self.assertRaises(HTTPException) as error:
+            get_workflow("fee_request", {**self.ctx, "scope_ref": "Main Campus"}, self.session)
+        self.assertEqual(error.exception.status_code, 403)

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { Spinner, Empty } from './ui'
 
-export default function AuditView() {
+export default function AuditView({ principal = false }: { principal?: boolean }) {
   const [rows, setRows] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [verify, setVerify] = useState<any>(null)
@@ -27,7 +27,7 @@ export default function AuditView() {
   const normalizedQuery = query.trim().toLowerCase()
   const filteredRows = rows.filter(e => {
     const matchesOutcome = outcome === 'ALL' || e.outcome === outcome
-    const matchesQuery = !normalizedQuery || [e.actor, e.action, e.reason, e.outcome, e.hash].join(' ').toLowerCase().includes(normalizedQuery)
+    const matchesQuery = !normalizedQuery || [e.actor, e.action, e.reason, e.outcome, e.hash, e.campus].join(' ').toLowerCase().includes(normalizedQuery)
     return matchesOutcome && matchesQuery
   })
   const count = (value: string) => rows.filter(e => e.outcome === value).length
@@ -63,13 +63,14 @@ export default function AuditView() {
           <div className="tbl-scroll">
             {filteredRows.length === 0 ? <Empty icon="LOG" text={rows.length ? 'No audit entries match these filters.' : 'No audit entries yet. Decisions will be recorded here as workflows run.'} /> : (
               <table className="tbl">
-                <thead><tr><th>#</th><th>When</th><th>Actor</th><th>Action</th><th>Outcome</th><th>Reason</th><th>Hash</th></tr></thead>
+                <thead><tr><th>#</th><th>When</th><th>Actor</th>{principal && <th>Campus</th>}<th>Action</th><th>Outcome</th><th>Reason</th><th>Hash</th></tr></thead>
                 <tbody>
                   {filteredRows.map((e, i) => (
                     <tr key={e.id}>
                       <td className="mono" style={{ color: 'var(--txt-mute)' }}>{rows.length - i}</td>
                       <td className="mono" style={{ fontSize: 11.5 }}>{new Date(e.at).toLocaleString()}</td>
                       <td>{e.actor}</td>
+                      {principal && <td>{e.campus || 'Not assigned'}</td>}
                       <td><span className="mono" style={{ fontSize: 12 }}>{e.action}</span></td>
                       <td><span className="mono" style={{ fontWeight: 700, fontSize: 12, color: outColor(e.outcome) }}>{e.outcome}</span></td>
                       <td style={{ color: 'var(--txt-soft)', fontSize: 12.5, maxWidth: 260 }}>{e.reason}</td>

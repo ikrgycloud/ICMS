@@ -541,6 +541,14 @@ class CorrectionDecisionIn(BaseModel):
     comment: str = ""
 
 
+class AttendanceCondonationIn(BaseModel):
+    student_id: str
+    section_id: str
+    attendance_percent: float
+    reason: str
+    amount: float = 0
+
+
 def _validate_correction_request(s, ctx, record, requested_status, reason):
     if ctx["office_n"] not in {11, 12, 13, 14}:
         raise HTTPException(403, "Only teaching faculty may request an attendance correction")
@@ -641,6 +649,45 @@ def decide_attendance_correction_request(s, correction_id: str, action_value: st
     row.updated_at = datetime.utcnow(); wf.updated_at = datetime.utcnow(); s.commit()
     write_audit(s, ctx["sub"], who, ctx["office_n"], "attendance.correction.decide", f"correction:{row.id}", before, row.status, comment or f"{row.original_status} -> {row.requested_status}")
     return row
+
+
+@router.post("/attendance/condonation")
+def create_attendance_condonation(body: AttendanceCondonationIn, ctx=Depends(auth), s=Depends(db)):
+    if ctx.get("office_n") != 10:
+        raise HTTPException(403, "Only the HOD may recommend attendance condonation")
+    if not body.reason.strip() or body.attendance_percent >= 75:
+        raise HTTPException(422, "Condonation requires a shortage and a reason")
+    student = s.query(D.Student).filter(D.Student.id == body.student_id, D.Student.tenant_id == ctx["tenant_id"]).first()
+    section = s.query(D.Section).filter(D.Section.id == body.section_id, D.Section.tenant_id == ctx["tenant_id"]).first()
+    if not student or not section:
+        raise HTTPException(404, "Student or section not found")
+    existing = s.query(D.AttendanceCondonationRequest).filter(
+        D.AttendanceCondonationRequest.student_id == student.id,
+        D.AttendanceCondonationRequest.section_id == section.id,
+        D.AttendanceCondonationRequest.status.in_({"submitted", "under_review", "APPROVED"}),
+    ).first()
+    if existing:
+        raise HTTPException(409, "An active condonation request already exists")
+    wf = WorkflowInstance(
+        id=uid(), tenant_id=ctx["tenant_id"], process_key="attendance_condonation",
+        label="Attendance condonation", office_n=10,
+        title=f"Attendance condonation for {student.name}", state="submitted",
+        amount=body.amount, initiator_id=ctx["sub"], initiator_name=actor_name(s, ctx),
+        current_stage=1, scope_level="campus", scope_ref=student.campus,
+        version_no=1, source_type="attendance_condonation",
+    )
+    request = D.AttendanceCondonationRequest(
+        id=uid(), tenant_id=ctx["tenant_id"], student_id=student.id,
+        section_id=section.id, attendance_percent=body.attendance_percent,
+        shortage_percent=max(0, 75 - body.attendance_percent), reason=body.reason.strip(),
+        requested_by=ctx["sub"], workflow_id=wf.id,
+    )
+    wf.source_id = request.id
+    s.add(wf); s.add(request); s.commit()
+    notify(s, "user_4", "Attendance condonation approval", wf.title, severity="action")
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"],
+                "attendance.condonation.submit", f"condonation:{request.id}", "", "submitted", body.reason)
+    return {"request_id": request.id, "workflow_id": wf.id, "status": request.status}
 
 
 @router.post("/attendance/corrections/{correction_id}/decide")
