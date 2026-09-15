@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { HiOutlineAcademicCap, HiOutlineBanknotes, HiOutlineCalendarDays, HiOutlineChartBarSquare, HiOutlineCheckBadge, HiOutlineClipboardDocumentList, HiOutlineCreditCard, HiOutlineDocumentCheck, HiOutlineDocumentCurrencyRupee, HiOutlineGift, HiOutlineLifebuoy, HiOutlineQueueList, HiOutlineScale, HiOutlineSquares2X2, HiOutlineUserGroup, HiOutlineUserPlus, HiOutlineUsers } from 'react-icons/hi2'
+import { HiOutlineAcademicCap, HiOutlineArchiveBox, HiOutlineArrowPathRoundedSquare, HiOutlineBanknotes, HiOutlineBookOpen, HiOutlineBriefcase, HiOutlineBuildingLibrary, HiOutlineBuildingOffice2, HiOutlineCalculator, HiOutlineCalendarDays, HiOutlineChartBarSquare, HiOutlineChatBubbleLeftRight, HiOutlineCheckBadge, HiOutlineClipboardDocumentCheck, HiOutlineClipboardDocumentList, HiOutlineCog6Tooth, HiOutlineComputerDesktop, HiOutlineCreditCard, HiOutlineDocumentChartBar, HiOutlineDocumentCheck, HiOutlineDocumentMagnifyingGlass, HiOutlineDocumentText, HiOutlineEnvelope, HiOutlineExclamationTriangle, HiOutlineFolder, HiOutlineGift, HiOutlineHome, HiOutlineIdentification, HiOutlineInbox, HiOutlineLifebuoy, HiOutlineMegaphone, HiOutlinePencilSquare, HiOutlinePresentationChartLine, HiOutlineQueueList, HiOutlineRectangleGroup, HiOutlineRocketLaunch, HiOutlineScale, HiOutlineShieldCheck, HiOutlineShoppingCart, HiOutlineSquares2X2, HiOutlineTableCells, HiOutlineTicket, HiOutlineTruck, HiOutlineUserCircle, HiOutlineUserGroup, HiOutlineUserPlus, HiOutlineUsers, HiOutlineWrenchScrewdriver } from 'react-icons/hi2'
 import { api, getUser, logout, saveSession } from './api'
 import Workflows from './views/Workflows'
 import Delegations from './views/Delegations'
@@ -17,33 +17,51 @@ import AcademicRollover from './modules/AcademicRollover'
 import Students from './modules/Students'
 import Academics from './modules/Academics'
 import AcademicCoordinatorCenter from './modules/AcademicCoordinatorCenter'
+import AcademicCoordinatorConflicts from './modules/AcademicCoordinatorConflicts'
+import AcademicCoordinatorOfferings from './modules/AcademicCoordinatorOfferings'
+import AcademicCoordinatorTimetable from './modules/AcademicCoordinatorTimetable'
+import HodTimetableReview from './modules/HodTimetableReview'
+import VicePrincipalAcademicApprovals from './modules/VicePrincipalAcademicApprovals'
+import TimetableChanges from './modules/TimetableChanges'
 import Curriculum from './modules/Curriculum'
+import AcademicCoordinatorNotices from './modules/AcademicCoordinatorNotices'
+import AcademicCoordinatorCurriculumExecution from './modules/AcademicCoordinatorCurriculumExecution'
+import AcademicCoordinatorReports from './modules/AcademicCoordinatorReports'
 import CoursesSubjects from './modules/CoursesSubjects'
 import Attendance from './modules/Attendance'
 import Examinations from './modules/Examinations'
 import Admissions from './modules/Admissions'
-import Finance from './modules/Finance'
+import Finance, { PrincipalFinance } from './modules/Finance'
 import Library from './modules/Library'
 import HR from './modules/HR'
 import FacultyStaff from './modules/FacultyStaff'
 import Assets from './modules/Assets'
 import Hostel from './modules/Hostel'
-import Transport from './modules/Transport'
+import Transport, { PrincipalTransport } from './modules/Transport'
 import Research from './modules/Research'
 import Placements from './modules/Placements'
-import Grievance from './modules/Grievance'
+import Grievance, { PrincipalGrievance } from './modules/Grievance'
 import Governance from './modules/Governance'
+import DeanAcademicsDashboard from './modules/DeanAcademicsDashboard'
+import DeanAcademicWorkspaces from './modules/DeanAcademicWorkspaces'
+import DeanPrograms from './modules/DeanPrograms'
+import DecisionInbox from './modules/DecisionInbox'
+import MyRequests from './modules/MyRequests'
 import ChairmanApprovals from './modules/ChairmanApprovals'
 import ChairmanDelegation from './modules/ChairmanDelegation'
 import AdminPanel from './modules/AdminPanel'
 import Analytics from './modules/Analytics'
 import Procurement from './modules/Procurement'
+import Facilities from './modules/Facilities'
 import Integrations from './modules/Integrations'
 import StudentHome from './personas/StudentHome'
-import { StudentAttendanceView, StudentCalendarView, StudentCoursesView, StudentExaminationsView, StudentFeesView, StudentLibraryView, StudentScoresView } from './personas/StudentViews'
+import StudentRegistration from './personas/StudentRegistration'
+import { AcademicNotices, StudentAttendanceView, StudentCalendarView, StudentCoursesView, StudentCurriculumExecution, StudentExaminationsView, StudentFeesView, StudentLibraryView, StudentScoresView } from './personas/StudentViews'
+import FacultyCourseOfferings from './personas/FacultyCourseOfferings'
 import FacultyHome from './personas/FacultyHome'
 import AssociateProfessorHome from './personas/AssociateProfessorHome'
 import FacultySchedule from './personas/FacultySchedule'
+import FacultyProfile from './personas/FacultyProfile'
 import FacultyExaminations from './personas/FacultyExaminations'
 import { FacultyAssignments, StudentAssignments } from './personas/AssignmentViews'
 import FacultyCommunication from './personas/FacultyCommunication'
@@ -53,6 +71,7 @@ import FacultyLeave from './personas/FacultyLeave'
 import FacultyPayroll from './personas/FacultyPayroll'
 import FacultyAssessments from './personas/FacultyAssessments'
 import FacultyAttendance from './personas/FacultyAttendance'
+import FacultyAttendanceCorrections from './personas/FacultyAttendanceCorrections'
 import FacultyMarks from './personas/FacultyMarks'
 import FacultyMentoring from './personas/FacultyMentoring'
 import FacultyStudents from './personas/FacultyStudents'
@@ -82,7 +101,17 @@ import HodDepartmentAudit from './personas/HodDepartmentAudit'
 import HodMyLeave from './personas/HodMyLeave'
 import HodDigitalId from './personas/HodDigitalId'
 import HodResearchIqac from './personas/HodResearchIqac'
+import ApplicantPortal from './admissions/ApplicantPortal'
+import DeanAdministration from './modules/DeanAdministration'
+import SpecialistQueue from './modules/SpecialistQueue'
 import { PageHead } from './modules/kit'
+import AccountantReport from './modules/AccountantReport'
+import PrincipalDashboard from './modules/PrincipalDashboard'
+import PrincipalAtRisk from './modules/PrincipalAtRisk'
+import PrincipalCompliance from './modules/PrincipalCompliance'
+import PrincipalExaminations from './modules/PrincipalExaminations'
+import PrincipalExaminationOversight from './modules/PrincipalExaminationOversight'
+import { ApprovalHistory, Escalations, PrincipalApprovals, PrincipalWorkflows } from './views/PrincipalWorkflowViews'
 
 const LEVEL_COLORS: Record<number, string> = {
   1: '#d92d3a',
@@ -96,6 +125,37 @@ const LEVEL_COLORS: Record<number, string> = {
 }
 
 const GROUP_ORDER = ['Workspace', 'Academics', 'Services', 'Operations', 'Platform', 'Authority', 'Reference']
+const DEAN_ACADEMICS_NAV = [
+  ['Workspace', 'Overview', 'overview'],
+  ['Academic Governance', 'Programs', 'dean_programs'], ['Academic Governance', 'Curriculum', 'curriculum'], ['Academic Governance', 'Courses', 'courses_subjects'], ['Academic Governance', 'Academic Committees', 'dean_committees'],
+  ['Academic Operations', 'Academic Calendar', 'academic_calendar'], ['Academic Operations', 'Faculty Allocation', 'dean_allocation'], ['Academic Operations', 'Timetable Readiness', 'dean_timetable'],
+  ['Academic Operations', 'Academic Rollover', 'rollover'],
+  ['Academic Operations', 'Timetable Changes', 'timetable_changes'],
+  ['Quality & Monitoring', 'Performance & Results', 'analytics'], ['Quality & Monitoring', 'Academic Risk', 'dean_risk'], ['Quality & Monitoring', 'Corrective Actions', 'dean_corrective'], ['Quality & Monitoring', 'Outcomes', 'dean_outcomes'], ['Quality & Monitoring', 'Next-Semester Planning', 'dean_planning'],
+  ['Authority', 'My Approvals', 'decision_inbox'], ['Authority', 'My Requests', 'workflows'],
+  ['Reports', 'Reports & Analytics', 'dean_reports'], ['Reports', 'Audit', 'audit'],
+  ['Reference', 'Directory', 'directory'],
+] as const
+
+// These routes are used by dashboard cards and notifications. They deliberately
+// do not appear in the sidebar: each opens the relevant contextual workspace.
+const DEAN_ACADEMICS_CONTEXT_ROUTES: Record<string, { label: string; key: string; actions: Record<string, never> }> = {
+  dean_timetable: { label: 'Academic Operations', key: 'dean_academic_operations', actions: {} },
+  dean_allocation: { label: 'Academic Operations', key: 'dean_academic_operations', actions: {} },
+  dean_risk: { label: 'Academic Quality', key: 'dean_academic_quality', actions: {} },
+  dean_committees: { label: 'Academic Governance', key: 'dean_committees', actions: {} },
+  dean_corrective: { label: 'Quality & Monitoring', key: 'dean_corrective', actions: {} },
+  dean_outcomes: { label: 'Quality & Monitoring', key: 'dean_outcomes', actions: {} },
+  dean_planning: { label: 'Quality & Monitoring', key: 'dean_planning', actions: {} },
+}
+const DEAN_ADMINISTRATION_NAV = [
+  ['Overview', 'Overview', 'administration_dashboard'],
+  // Every item has its own view identity. Reusing a key here makes every
+  // matching button active, and makes unrelated workspaces indistinguishable.
+  ['School Administration', 'Administrative Plan', 'administration_plans'], ['School Administration', 'Resources & Facilities', 'administration_resources'], ['School Administration', 'Workforce', 'administration_workforce'], ['School Administration', 'Budget', 'administration_budget'], ['School Administration', 'Procurement & Assets', 'administration_procurement_assets'],
+  ['Authority', 'My Reviews', 'administration_reviews'], ['Authority', 'My Requests', 'administration_requests'],
+  ['Reports', 'Reports & Analytics', 'administration_reports'], ['Reports', 'Audit', 'audit'], ['Reference', 'Directory', 'directory'],
+] as const
 const CHAIRMAN_GROUP_ORDER = ['Governance', 'Institution', 'Strategy & Insights', 'Support']
 const CHAIRMAN_DISPLAY: Record<string, { label: string; group: string }> = {
   overview: { label: 'Overview', group: 'Governance' },
@@ -118,32 +178,27 @@ const CHAIRMAN_DISPLAY: Record<string, { label: string; group: string }> = {
 // Entries without a matching capability remain visible but disabled, so the UI does
 // not imply that an unavailable backend workflow can be opened.
 const PRINCIPAL_NAV = [
-  ['Workspace', 'Dashboard', 'overview'], ['Workspace', 'My Schedule', 'my_schedule'],
-  ['Academics', 'Academic Calendar', 'academic_calendar'], ['Academics', 'Curriculum', 'curriculum'],
-  ['Academics', 'Courses & Subjects', 'courses_subjects'], ['Academics', 'Timetable', 'calendar'],
-  ['Academics', 'Academic Performance', 'analytics'],
-  ['Students', 'Students', 'students'], ['Students', 'Admissions', 'admissions'], ['Students', 'Attendance', 'attendance'],
-  ['Students', 'Performance', 'analytics'], ['Students', 'Student Welfare', 'grievance'], ['Students', 'Discipline & Grievances', 'grievance'],
-  ['Examination', 'Exams', 'examinations'],
-  ['People & Workforce', 'Faculty & Staff', 'faculty_staff'], ['People & Workforce', 'Leave', 'leave'], ['People & Workforce', 'Recruitment / Vacancies', 'recruitment'],
-  ['Finance & Operations', 'Finance', 'finance'], ['Finance & Operations', 'Procurement', 'procurement'], ['Finance & Operations', 'Facilities & Maintenance', 'assets'],
-  ['Finance & Operations', 'Assets', 'assets'], ['Finance & Operations', 'Hostel', 'hostel'], ['Finance & Operations', 'Transport', 'transport'],
-  ['Approvals & Workflow', 'My Approvals', 'approvals'], ['Approvals & Workflow', 'Escalations', 'workflows'], ['Approvals & Workflow', 'Workflows', 'workflows'], ['Approvals & Workflow', 'Delegation', 'delegation'],
+  ['Academic / People', 'Principal', 'overview'], ['Academic / People', 'At-Risk Students', 'at_risk_students'], ['Academic / People', 'Faculty & Staff', 'faculty_staff'], ['Academic / People', 'Leave', 'leave'], ['Academic / People', 'Recruitment & Vacancies', 'recruitment'],
+  ['Academic / People', 'Academic Setup', 'academic_catalog'], ['Academic / People', 'Academic Calendar', 'academic_calendar'], ['Academic / People', 'Examinations', 'principal_examinations'],
+  ['Finance & Operations', 'Finance', 'finance'], ['Finance & Operations', 'Procurement', 'procurement'], ['Finance & Operations', 'Facilities & Maintenance', 'facilities'],
+  ['Finance & Operations', 'Assets & Inventory', 'assets'], ['Finance & Operations', 'Hostel', 'hostel'], ['Finance & Operations', 'Transport', 'transport'],
+  ['Approvals & Workflow', 'My Approvals', 'approvals'], ['Approvals & Workflow', 'Approval History', 'approval_history'], ['Approvals & Workflow', 'Workflows', 'workflows'], ['Approvals & Workflow', 'Escalations', 'escalations'], ['Approvals & Workflow', 'Delegation', 'delegation'],
+  ['Governance & Risk', 'Grievance & Discipline', 'grievance'], ['Governance & Risk', 'Accreditation & Compliance', 'compliance'],
   ['Audit & Reporting', 'Audit', 'audit'], ['Audit & Reporting', 'Reports', 'analytics'],
-  ['Reference', 'Directory', 'directory'], ['Reference', 'Authority & Permissions', 'matrices'],
+  ['Reference', 'Directory', 'directory'], ['Reference', 'Authority & Permissions', 'permissions'],
 ] as const
 
 // Faculty offices share the same functional modules, but need the focused
 // teaching workspace described by the Professor Office information layout.
 // A link is only interactive when its backing module is authorised.
 const FACULTY_NAV = [
-  ['Workspace', 'Overview', 'overview'], ['Workspace', 'My Schedule', 'my_schedule'], ['Workspace', 'Messages', 'messages'],
-  ['Teaching & Academics', 'My Sections', 'academics'], ['Teaching & Academics', 'Attendance', 'attendance'], ['Teaching & Academics', 'Assignments', 'assignments'],
+  ['Workspace', 'Overview', 'overview'], ['Workspace', 'My Schedule', 'my_schedule'], ['Workspace', 'Messages', 'messages'], ['Workspace', 'Academic Calendar', 'academic_calendar'],
+  ['Teaching & Academics', 'My Sections', 'academics'], ['Teaching & Academics', 'Course Offerings', 'faculty_course_offerings'], ['Teaching & Academics', 'Attendance', 'attendance'], ['Teaching & Academics', 'Assignments', 'assignments'],
   ['Teaching & Academics', 'Assessments & Marks', 'assessments'], ['Teaching & Academics', 'Marks', 'marks_entry'], ['Teaching & Academics', 'Examinations', 'examinations'],
   ['Teaching & Academics', 'Course Materials', 'course_materials'], ['Teaching & Academics', 'Mentoring & Advisees', 'mentoring'], ['Teaching & Academics', 'Research & Guidance', 'research'],
   ['Communication', 'Announcements', 'announcements'],
-  ['Self Service', 'My Profile', 'directory'], ['Self Service', 'Digital ID', 'digital_id'], ['Self Service', 'Leave & Requests', 'leave'], ['Self Service', 'Payroll', 'payroll'],
-  ['Workflow', 'My Requests', 'workflows'],
+  ['Self Service', 'My Profile', 'my_profile'], ['Self Service', 'Digital ID', 'digital_id'], ['Self Service', 'Leave & Requests', 'leave'], ['Self Service', 'Payroll', 'payroll'],
+  ['Workflow', 'Attendance Correction Reviews', 'attendance_corrections'], ['Workflow', 'My Requests', 'workflows'],
 ] as const
 
 const FACULTY_ACTIVE_LABEL: Record<string, string> = {
@@ -169,46 +224,47 @@ const HOD_NAV = [
 const COORDINATOR_NAV = [
   ['Workspace', 'Overview', 'overview'],
   ['Academic planning', 'Academic Calendar', 'academic_calendar'], ['Academic planning', 'Curriculum Execution', 'curriculum'],
-  ['scheduling', 'Course Offerings', 'coordinator_course_offerings'], ['scheduling', 'Sections & Timetable', 'coordinator_sections'], ['scheduling', 'Conflict Center', 'coordinator_conflicts'],
+  ['Academic planning', 'Academic Rollover', 'rollover'],
+  ['scheduling', 'Course Offerings', 'coordinator_course_offerings'], ['scheduling', 'Sections & Timetable', 'coordinator_sections'], ['scheduling', 'Faculty Allocation', 'source_allocation'], ['scheduling', 'Conflict Center', 'coordinator_conflicts'],
+  ['scheduling', 'Timetable Changes', 'timetable_changes'],
   ['coordination', 'Academic Notices', 'coordinator_notices'],
-  ['authority', 'My Reviews', 'rollover'], ['authority', 'My Requests', 'coordinator_requests'],
-  ['reports', 'Academic Operations Reports', 'coordinator_reports'], ['reports', 'Audit', 'audit'],
+  ['authority', 'Approvals', 'coordinator_approvals'], ['authority', 'Requests', 'coordinator_requests'],
+  ['reports', 'Reports', 'coordinator_reports'], ['reports', 'Audit', 'audit'],
   ['reference', 'Directory', 'directory'],
 ] as const
 
 const DIRECTOR_ADMISSIONS_NAV = [
   ['Overview', 'Overview', 'overview'],
-  ['Admissions Planning', 'Admission Cycles', 'director_cycles'], ['Admissions Planning', 'Programs & Intake', 'director_programs'], ['Admissions Planning', 'Quotas', 'director_quotas'],
-  ['Applications', 'All Applications', 'director_applications'], ['Applications', 'Corrections', 'director_corrections'], ['Applications', 'Document Verification', 'director_document_verification'], ['Applications', 'Document Status', 'director_documents'],
-  ['Eligibility & Selection', 'Eligibility Queue', 'director_eligibility'], ['Eligibility & Selection', 'Eligibility Rules', 'director_rules'], ['Eligibility & Selection', 'Merit & Rankings', 'director_merit'], ['Eligibility & Selection', 'Counselling', 'director_counselling'],
-  ['Seat Management', 'Seat Pools', 'director_seat_pools'], ['Seat Management', 'Seat Allocation', 'director_allocation'], ['Seat Management', 'Waitlist', 'director_waitlist'],
-  ['Offers', 'Offer Recommendations', 'director_recommendations'], ['Offers', 'Approval Inbox', 'approvals'], ['Offers', 'Issued Offers', 'director_offers'], ['Offers', 'Offer Status', 'director_offer_status'],
-  ['Applicant Finance', 'Finance Status', 'director_finance'], ['Applicant Finance', 'Invoices & Challans', 'director_invoices'], ['Applicant Finance', 'Payment Status', 'director_payment_status'], ['Applicant Finance', 'Accounts Verification', 'director_accounts'], ['Applicant Finance', 'Finance Clearance', 'director_clearance'],
-  ['Final Admission', 'Final Approval', 'director_final_approval'], ['Final Admission', 'Ready to Admit', 'director_ready'], ['Final Admission', 'Enrollment Queue', 'director_enrollment_queue'], ['Final Admission', 'Student Conversion', 'director_conversion'], ['Final Admission', 'Enrollment Status', 'director_enrollment'],
-  ['Special Admissions', 'Scholarship Admissions', 'director_scholarship'], ['Special Admissions', 'International Admissions', 'director_international'],
-  ['Applicant Support', 'Application Status', 'director_applications'], ['Applicant Support', 'Helpdesk / Support', 'workflows'],
-  ['Reports', 'Reports', 'director_reports'], ['Calendar', 'Calendar', 'calendar'],
+  ['1. Setup', 'Admission Cycles & Intake', 'director_cycles'],
+  ['1. Setup', 'Eligibility Evaluation', 'director_eligibility'],
+  ['2. Applicant Journey', 'Applications', 'director_applications'],
+  ['3. Review & Verification', 'Review Queue', 'director_review'], ['3. Review & Verification', 'Corrections', 'director_corrections'], ['3. Review & Verification', 'Document Status', 'director_documents'],
+  ['4. Eligibility & Quota', 'Eligibility Rules', 'director_rules'], ['4. Eligibility & Quota', 'Quotas', 'director_quotas'],
+  ['5. Merit & Allocation', 'Assessment, Merit & Seats', 'director_merit'], ['5. Merit & Allocation', 'Seat Pools', 'director_seat_pools'], ['5. Merit & Allocation', 'Counselling & Waitlist', 'director_counselling'],
+  ['6. Offers & Finance', 'Offer Approval & Status', 'director_offers'], ['6. Offers & Finance', 'Finance Clearance', 'director_finance'],
+  ['7. Enrollment & Student Account', 'Re-submitted Corrections', 'director_resubmitted_corrections'],
+  ['8. Monitoring', 'Admission Reports', 'director_reports'],
 ] as const
 
 const DIRECTOR_TAB: Record<string, string> = {
   director_cycles: 'cycles', director_programs: 'program_intake', director_quotas: 'quotas',
   director_applications: 'applications', director_review: 'review', director_corrections: 'corrections', director_document_verification: 'review', director_documents: 'document_status',
-  director_eligibility: 'eligibility', director_rules: 'rules', director_assessments: 'decisions', director_merit: 'decisions', director_counselling: 'counselling', director_seat_pools: 'seatpools', director_allocation: 'decisions', director_waitlist: 'waitlist', director_recommendations: 'offers', director_offers: 'issued_offers',
+  director_eligibility: 'eligibility', director_rules: 'rules', director_assessments: 'decisions', director_merit: 'decisions', director_counselling: 'counselling', director_seat_pools: 'seatpools', director_allocation: 'decisions', director_waitlist: 'waitlist', director_recommendations: 'offers', director_offers: 'offers',
   director_ready: 'ready_to_admit', director_enrollment_queue: 'enrollment_queue', director_conversion: 'student_conversion', director_enrollment: 'enrollment_status', director_finance: 'finance_status', director_invoices: 'invoices_challans', director_payment_status: 'payment_status', director_accounts: 'accounts_verification', director_clearance: 'clearance_status',
-  director_final_approval: 'final_approval',
+  director_final_approval: 'resubmitted_corrections', director_resubmitted_corrections: 'resubmitted_corrections',
   director_offer_status: 'offers', director_scholarship: 'eligibility', director_international: 'applications', director_reports: 'reports',
 }
 
 const ADMISSION_MANAGER_NAV = [
   ['Overview', 'Overview', 'overview'],
-  ['Admissions Planning', 'Admission Cycles', 'manager_cycles'], ['Admissions Planning', 'Programs & Intake', 'manager_programs'], ['Admissions Planning', 'Quotas', 'manager_quotas'],
-  ['Applications', 'All Applications', 'manager_applications'], ['Applications', 'Corrections', 'manager_corrections'], ['Applications', 'Document Status', 'manager_documents'],
-  ['Eligibility & Selection', 'Eligibility Queue', 'manager_eligibility'], ['Eligibility & Selection', 'Eligibility Rules', 'manager_rules'], ['Eligibility & Selection', 'Assessments & Merit', 'manager_assessments'], ['Eligibility & Selection', 'Counselling', 'manager_counselling'],
-  ['Seat Management', 'Seat Pools', 'manager_seat_pools'], ['Seat Management', 'Allocation', 'manager_allocation'], ['Seat Management', 'Waitlist', 'manager_waitlist'],
-  ['Offers', 'Offer Recommendations', 'manager_recommendations'], ['Offers', 'Offer Status', 'manager_offers'],
-  ['Applicant Finance', 'Finance Status', 'manager_finance'], ['Applicant Finance', 'Invoices & Challans', 'manager_invoices'], ['Applicant Finance', 'Clearance Status', 'manager_clearance'],
-  ['Final Admission', 'Ready to Admit', 'manager_ready'], ['Final Admission', 'Enrollment Status', 'manager_enrollment'],
-  ['Reports', 'Reports', 'manager_reports'], ['Calendar', 'Calendar', 'calendar'],
+  ['1. Setup', 'Admission Cycles & Intake', 'manager_cycles'],
+  ['1. Setup', 'Eligibility Evaluation', 'manager_eligibility'],
+  ['2. Applicant Journey', 'Applications', 'manager_applications'],
+  ['3. Review & Verification', 'Review Queue', 'manager_review'], ['3. Review & Verification', 'Corrections', 'manager_corrections'], ['3. Review & Verification', 'Document Status', 'manager_documents'],
+  ['4. Eligibility & Quota', 'Eligibility Rules', 'manager_rules'], ['4. Eligibility & Quota', 'Quotas', 'manager_quotas'],
+  ['5. Merit & Allocation', 'Assessment, Merit & Seats', 'manager_assessments'], ['5. Merit & Allocation', 'Seat Pools', 'manager_seat_pools'], ['5. Merit & Allocation', 'Counselling & Waitlist', 'manager_counselling'],
+  ['6. Offers & Finance', 'Offer Approval & Status', 'manager_offers'], ['6. Offers & Finance', 'Finance Clearance', 'manager_finance'],
+  ['8. Monitoring', 'Admission Reports', 'manager_reports'],
 ] as const
 
 const ADMISSION_MANAGER_TAB: Record<string, string> = {
@@ -216,21 +272,28 @@ const ADMISSION_MANAGER_TAB: Record<string, string> = {
   manager_applications: 'applications', manager_review: 'review', manager_corrections: 'corrections', manager_documents: 'document_status',
   manager_eligibility: 'eligibility', manager_rules: 'rules', manager_assessments: 'decisions', manager_counselling: 'counselling',
   manager_seat_pools: 'seatpools', manager_allocation: 'decisions', manager_waitlist: 'waitlist',
-  manager_recommendations: 'recommendations', manager_offers: 'issued_offers',
+  manager_recommendations: 'offers', manager_offers: 'offers',
   manager_finance: 'finance_status', manager_invoices: 'invoices_challans', manager_clearance: 'clearance_status',
-  manager_ready: 'ready_to_admit', manager_enrollment: 'enrollment_status', manager_reports: 'reports',
+  manager_enrollment: 'enrollment_status', manager_reports: 'reports',
 }
 
 export default function App({ onLogout }: { onLogout: () => void }) {
   const [user, setUser] = useState<any>(getUser())
   const [ws, setWs] = useState<any>(null)
-  const [view, setView] = useState(() => getUser()?.office_n === 31 ? 'transport' : 'overview')
+  const [view, setView] = useState(() => {
+    const currentUser = getUser()
+    if (currentUser?.office_n === 31) return 'transport'
+    if (currentUser?.office_n === 23) return 'overview'
+    return 'overview'
+  })
   const [sideOpen, setSideOpen] = useState(false)
   const [notifs, setNotifs] = useState<any>({ notifications: [], unread: 0 })
+  const [approvalCount, setApprovalCount] = useState(0)
   const [showNotif, setShowNotif] = useState(false)
   const [showRoles, setShowRoles] = useState(false)
   const [switching, setSwitching] = useState(false)
   const [collapsedDirectorGroups, setCollapsedDirectorGroups] = useState<Record<string, boolean>>({})
+  const [collapsedDeanGroups, setCollapsedDeanGroups] = useState<Record<string, boolean>>({})
 
   function loadWs() {
     api.workspace().then(setWs).catch(() => {})
@@ -240,22 +303,69 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     api.notifications().then(setNotifs).catch(() => {})
   }
 
+  function loadApprovalCount() {
+    if (user?.office_n === 6) api.governanceInbox().then((result: any) => setApprovalCount(Number(result.summary?.pending ?? result.count ?? 0))).catch(() => {})
+  }
+
   useEffect(() => {
-    api.me().then(r => setUser(r.user)).catch(() => {})
+    api.me().then(r => {
+      const nextUser = r.user
+      setUser(nextUser)
+      if (nextUser?.office_n === 31) setView('transport')
+      else if (nextUser?.office_n === 23) setView('finance')
+      else setView('overview')
+
+      if ([10, 17].includes(nextUser?.office_n) && window.location.hash && window.location.hash !== '#overview') {
+        window.location.hash = 'overview'
+      }
+    }).catch(() => {})
     loadWs()
     loadNotifs()
+    loadApprovalCount()
     const timer = setInterval(loadNotifs, 20000)
-    return () => clearInterval(timer)
+    const approvalTimer = setInterval(loadApprovalCount, 20000)
+    const approvalUpdated = () => loadApprovalCount()
+    window.addEventListener('icms:approval-updated', approvalUpdated)
+    return () => { clearInterval(timer); clearInterval(approvalTimer); window.removeEventListener('icms:approval-updated', approvalUpdated) }
   }, [])
+
+  useEffect(() => {
+    const hashView = window.location.hash.replace(/^#/, '')
+    if (hashView && hashView !== view) {
+      setView(hashView)
+    }
+  }, [])
+
+  useEffect(() => {
+    const hashView = window.location.hash.replace(/^#/, '')
+    if (hashView !== view) {
+      window.location.hash = view || 'overview'
+    }
+  }, [view])
 
   useEffect(() => {
     if (!ws?.modules?.length) return
     // Faculty & Staff is a Principal-specific presentation of the authorised
-    // HR module.  It has its own route so that the list/profile experience is
+    // HR module. It has its own route so that the list/profile experience is
     // retained when opened from the dashboard KPI or the Principal sidebar.
-    const virtualModule = ([3, 4].includes(user?.office_n) && PRINCIPAL_NAV.some(([, , key]) => key === view))
+    const virtualModule =
+      (user?.office_n === 4 && ['faculty_staff', 'curriculum', 'courses_subjects'].includes(view))
+      // The Dean shell has role-specific destinations that intentionally reuse
+      // the governed academic workspace.  They are valid routes even though
+      // they are not returned as generic workspace modules by the API.
+      || (user?.office_n === 6 && ['courses_subjects', 'decision_inbox', 'dean_programs', 'dean_academic_operations', 'dean_academic_quality', 'dean_timetable', 'dean_allocation', 'dean_risk', 'dean_committees', 'dean_corrective', 'dean_outcomes', 'dean_planning', 'dean_reports', 'analytics'].includes(view))
+      || ([10, 17].includes(user?.office_n) && view === 'source_allocation')
+      || (user?.office_n === 10 && view === 'hod_course_offerings')
+      || (user?.office_n === 10 && view === 'hod_timetable_review')
+      || (user?.office_n === 5 && view === 'vp_academic_approvals')
+      || ([10, 17, 41].includes(user?.office_n) && view === 'program_proposals')
+      || ([5, 6, 10, 17].includes(user?.office_n) && view === 'timetable_changes')
+      || (user?.office_n === 7 && view.startsWith('administration_'))
+      || (user?.office_n === 4 && PRINCIPAL_NAV.some(([, , key]) => key === view))
       || (user?.persona === 'faculty' && FACULTY_NAV.some(([, , key]) => key === view))
       || (user?.office_n === 10 && HOD_NAV.some(([, , key]) => key === view || (key === 'hod_reviews' && view.startsWith('hod_reviews_'))))
+      || (user?.persona && !['student', 'parent', 'faculty'].includes(user.persona) && view === 'my_payroll')
+      || (user?.office_n === 23 && ['finance_fees', 'finance_payments', 'finance_students', 'finance_payroll'].includes(view))
       || (user?.persona === 'student' && ['assignments', 'course_materials'].includes(view))
       || view.startsWith('director_') || view.startsWith('manager_') || view.startsWith('coordinator_')
     // Finance is a student self-service destination even though students do
@@ -275,7 +385,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
       const next = await api.switchRole(role)
       saveSession(next.token, next.user)
       setUser(next.user)
-      setView(next.user?.office_n === 31 ? 'transport' : 'overview')
+      setView(next.user?.office_n === 31 ? 'transport' : next.user?.office_n === 23 ? 'finance' : 'overview')
       loadWs()
     } catch (error) {
       // Keep the current session if the switch fails.
@@ -301,12 +411,49 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     () => {
       const modules = rawModules
       .filter((module: any) => !(user?.persona === 'student' && module.key === 'students'))
+      .filter((module: any) => !([31, 35].includes(user?.office_n) && module.key === 'my_payroll'))
       // Finance Manager works only with fee operations and fee-approval tasks.
       // Governance matrices and generic administration screens are not part of this portal.
       .filter((module: any) => user?.office_n !== 22 || ['overview', 'finance', 'rollover', 'approvals', 'audit'].includes(module.key))
-      .map((module: any) => ({ ...module, ...displayMeta(user, module) }))
+      .filter((module: any) => module && module.key)
+      .map((module: any) => {
+        if (user?.office_n === 10 && module.key === 'workflows') {
+          return { ...module, label: 'Requests', actions: module.actions || {}, ...displayMeta(user, module) }
+        }
+        return { ...module, actions: module.actions || {}, ...displayMeta(user, module) }
+      })
       if (user?.persona === 'student' && !modules.some((module: any) => module.key === 'finance')) {
         modules.push({ key: 'finance', label: 'Fees & Payments', group: 'Student Services', enabled: true })
+      }
+      if (user?.persona === 'student' && !modules.some((module: any) => module.key === 'course_registrations')) {
+        modules.push({ key: 'course_registrations', label: 'Course Registration', group: 'Academics', enabled: true })
+      }
+      if ([5, 6, 10, 17].includes(Number(user?.office_n)) && !modules.some((module: any) => module.key === 'timetable_changes')) {
+        modules.push({ key: 'timetable_changes', label: user?.office_n === 17 ? 'Timetable Changes' : 'Timetable Changes Requiring Review', group: 'Academics', enabled: true })
+      }
+      // These are governed source workspaces, not Dean-only workspaces.  The
+      // API already authorizes their respective source roles; keep the entry
+      // points visible so an authorized proposer can actually create, submit,
+      // and resubmit work through the production UI.
+      if ([10, 17, 41].includes(Number(user?.office_n)) && !modules.some((module: any) => module.key === 'program_proposals')) {
+        modules.push({ key: 'program_proposals', label: 'Programme Proposals', group: 'Academics', enabled: true })
+      }
+      if ([10, 17].includes(Number(user?.office_n)) && !modules.some((module: any) => module.key === 'source_allocation')) {
+        modules.push({ key: 'source_allocation', label: 'Faculty Allocation', group: 'Academics', enabled: true })
+      }
+      // HODs own departmental requirements, while offering creation remains
+      // exclusively with the Academic Coordinator.
+      if (Number(user?.office_n) === 10 && !modules.some((module: any) => module.key === 'hod_course_offerings')) {
+        modules.push({ key: 'hod_course_offerings', label: 'Course Offerings', group: 'Academics', enabled: true })
+      }
+      if (Number(user?.office_n) === 10 && !modules.some((module: any) => module.key === 'hod_timetable_review')) {
+        modules.push({ key: 'hod_timetable_review', label: 'Sections & Timetable', group: 'Academics', enabled: true })
+      }
+      if (Number(user?.office_n) === 5 && !modules.some((module: any) => module.key === 'vp_academic_approvals')) {
+        modules.push({ key: 'vp_academic_approvals', label: 'Academic Approvals', group: 'Authority', enabled: true })
+      }
+      if (![31, 35].includes(user?.office_n) && user?.persona && !['student', 'parent', 'faculty'].includes(user.persona) && !modules.some((module: any) => module.key === 'my_payroll')) {
+        modules.push({ key: 'my_payroll', label: 'My Payroll', group: 'Self Service', enabled: true })
       }
       return modules
     },
@@ -317,9 +464,15 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     return <div className="center-load"><div className="spinner" /></div>
   }
 
+  if (user.persona === 'applicant') {
+    return <ApplicantPortal authenticated onBack={doLogout} />
+  }
+
   const color = LEVEL_COLORS[user.level] || '#c9a24a'
   const chairmanShell = user.office_n === 1
-  const principalShell = [3, 4].includes(user.office_n)
+  const principalShell = user.office_n === 4
+  const deanAcademicsShell = user.office_n === 6
+  const deanAdministrationShell = user.office_n === 7
   const transportOfficeShell = user.office_n === 31
   const facultyShell = user.persona === 'faculty'
   const hodShell = user.office_n === 10
@@ -346,11 +499,22 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const coordinatorGroupKeys = [...new Set(COORDINATOR_NAV.map(([group]) => group))]
   const principalGroups = PRINCIPAL_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
     const source = displayModules.find((module: any) => module.key === key)
-      || (user.office_n === 4 && key === 'courses_subjects' ? displayModules.find((module: any) => module.key === 'academics') : undefined)
       || (user.office_n === 4 && key === 'faculty_staff' ? { key, label, group, enabled: true } : undefined)
     ;(out[group] = out[group] || []).push({ key, label, group, source, enabled: true })
     return out
   }, {})
+  const deanGroups = DEAN_ACADEMICS_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
+    const source = displayModules.find((module: any) => module.key === key) || { key, actions: {} }
+    ;(out[group] = out[group] || []).push({ key, label, group, source, enabled: true })
+    return out
+  }, {})
+  const deanGroupKeys = [...new Set(DEAN_ACADEMICS_NAV.map(([group]) => group))]
+  const deanAdministrationGroups = DEAN_ADMINISTRATION_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
+    const source = displayModules.find((module: any) => module.key === key) || { key, actions: {} }
+    ;(out[group] = out[group] || []).push({ key, label, group, source, enabled: true })
+    return out
+  }, {})
+  const deanAdministrationGroupKeys = [...new Set(DEAN_ADMINISTRATION_NAV.map(([group]) => group))]
   const facultyGroups = FACULTY_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
     const source = displayModules.find((module: any) => module.key === key)
     // Professor workspace pages have their own role-specific screens.  They
@@ -385,10 +549,28 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     : admissionsOperationsShell
     ? Object.values(activeAdmissionsGroups).flat().find((module: any) => module.key === view)
     : undefined) || sidebarModules.find((module: any) => module.key === view) || sidebarModules[0]
+  const current = (
+    deanAcademicsShell
+      ? Object.values(deanGroups).flat().find((module: any) => module.key === view) || DEAN_ACADEMICS_CONTEXT_ROUTES[view]
+      : deanAdministrationShell
+        ? Object.values(deanAdministrationGroups).flat().find((module: any) => module.key === view)
+        : coordinatorShell
+          ? Object.values(coordinatorGroups).flat().find((module: any) => module.key === view)
+          : facultyShell
+            ? Object.values(facultyGroups).flat().find((module: any) => module.key === view)
+            : admissionsOperationsShell
+              ? Object.values(activeAdmissionsGroups).flat().find((module: any) => module.key === view)
+              : undefined
+  ) || sidebarModules.find((module: any) => module.key === view) || sidebarModules[0]
   const campusHeader = user.scope_level === 'campus' ? user.scope_ref : ''
+  const isDeanNavActive = (moduleKey: string) =>
+    view === moduleKey
+    || (moduleKey === 'dean_academic_operations' && ['dean_timetable', 'dean_allocation'].includes(view))
+    || (moduleKey === 'dean_academic_quality' && view === 'dean_risk')
 
   return (
     <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''} ${facultyShell ? 'faculty-shell' : ''} ${hodShell ? 'hod-shell' : ''} ${directorAdmissionsShell ? 'director-admissions-shell' : ''} ${admissionManagerShell ? 'admission-manager-shell' : ''}`}>
+    <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''} ${facultyShell ? 'faculty-shell' : ''} ${deanAcademicsShell ? 'dean-academics-shell' : ''} ${deanAdministrationShell ? 'dean-administration-shell' : ''} ${directorAdmissionsShell ? 'director-admissions-shell' : ''} ${admissionManagerShell ? 'admission-manager-shell' : ''}`}>
       <aside className={`sidebar ${sideOpen ? 'open' : ''}`}>
         <div className="brand">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -422,13 +604,28 @@ export default function App({ onLogout }: { onLogout: () => void }) {
                     setSideOpen(false)
                   }}
                   title={(principalShell || facultyShell || admissionsOperationsShell || hodShell) && !module.enabled ? 'This module is not available for your current role' : module.label}
+          {(coordinatorShell ? coordinatorGroupKeys : deanAcademicsShell ? deanGroupKeys : deanAdministrationShell ? deanAdministrationGroupKeys : principalShell ? Object.keys(principalGroups) : facultyShell ? Object.keys(facultyGroups) : admissionsOperationsShell ? activeAdmissionsGroupKeys : groupKeys).map(group => (
+            <div key={group}>
+              {deanAcademicsShell || deanAdministrationShell || admissionsOperationsShell ? <button className="side-sec director-nav-group" onClick={() => (deanAcademicsShell || deanAdministrationShell) ? setCollapsedDeanGroups(current => ({ ...current, [group]: !current[group] })) : setCollapsedDirectorGroups(current => ({ ...current, [group]: !current[group] }))} type="button">{group}<span>{((deanAcademicsShell || deanAdministrationShell) ? collapsedDeanGroups[group] : collapsedDirectorGroups[group]) ? '+' : '−'}</span></button> : <div className="side-sec">{group}</div>}
+              {((!deanAcademicsShell && !deanAdministrationShell && !admissionsOperationsShell) || ((deanAcademicsShell || deanAdministrationShell) ? !collapsedDeanGroups[group] : !collapsedDirectorGroups[group])) && ((coordinatorShell ? coordinatorGroups[group] : deanAcademicsShell ? deanGroups[group] : deanAdministrationShell ? deanAdministrationGroups[group] : principalShell ? principalGroups[group] : facultyShell ? facultyGroups[group] : admissionsOperationsShell ? activeAdmissionsGroups[group] : groups[group]) || []).map((module: any) => (
+                <button
+                  key={(deanAcademicsShell || deanAdministrationShell || coordinatorShell || principalShell || facultyShell || admissionsOperationsShell) ? `${group}-${module.label}` : module.key}
+                  className={`nav-item ${(coordinatorShell ? view === module.key : deanAcademicsShell ? isDeanNavActive(module.key) : view === module.key) && (!(deanAcademicsShell || deanAdministrationShell || coordinatorShell || principalShell || facultyShell || admissionsOperationsShell) || module.enabled) ? 'on' : ''} ${((principalShell || facultyShell || admissionsOperationsShell) && !module.enabled) ? 'nav-item-disabled' : ''}`}
+                  onClick={() => {
+                    setView(module.key)
+                    setSideOpen(false)
+                  }}
+                  title={module.label}
                   type="button"
                 >
                   <span className="ico">
-                    <NavGlyph moduleKey={module.backingKey || module.key} label={admissionsOperationsShell ? module.label : undefined} />
+                    <NavGlyph moduleKey={module.backingKey || module.key} label={module.label} />
                   </span>
                   <span className="nav-label">{module.label}</span>
-                  {module.key === 'workflows' && notifs.unread > 0 && (
+                  {module.key === 'decision_inbox' && deanAcademicsShell && approvalCount > 0 && (
+                    <span className="badge">{approvalCount}</span>
+                  )}
+                  {module.key === 'workflows' && !deanAcademicsShell && notifs.unread > 0 && (
                     <span className="badge">{notifs.unread}</span>
                   )}
                 </button>
@@ -588,8 +785,17 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     if (ADMISSION_MANAGER_TAB[view]) return <Admissions caps={caps} initialTab={ADMISSION_MANAGER_TAB[view]} sidebarNavigation />
   }
   switch (view) {
+    case 'decision_inbox':
+      return <DecisionInbox />
+    case 'dean_programs':
+      return <DeanPrograms />
+    case 'program_proposals':
+      return <DeanPrograms />
     case 'overview':
       if (user.office_n === 10) return <HodOverview user={user} go={go} />
+      if (user.office_n === 4) return <PrincipalDashboard user={user} go={go} />
+      if (user.office_n === 6) return <DeanAcademicsDashboard go={go} />
+      if (user.office_n === 7) return <DeanAdministration mode="dashboard" />
       if (user.office_n === 17) return <AcademicCoordinatorCenter onNavigate={go} />
       if (user.office_n === 15 && user.active_role === 'Director of Admissions') return <DirectorAdmissionsDashboard user={user} go={go} />
       if (user.persona === 'student') return <StudentHome user={user} go={go} />
@@ -606,49 +812,104 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'messages':
       return <FacultyCommunication mode="messages" />
     case 'announcements':
-      return <FacultyCommunication mode="announcements" />
+      return <AcademicNotices />
     case 'academic_calendar':
       return <AcademicCalendar user={user} caps={caps} />
     case 'rollover':
-      return <AcademicRollover user={user} />
+      return <AcademicRollover />
     case 'integrations':
       return <Integrations caps={caps} />
     case 'analytics':
-      return <Analytics user={user} />
+      return <Analytics user={user} go={go} />
     case 'students':
       if (user.persona === 'student') return <StudentHome user={user} go={go} />
       if (user.persona === 'faculty') return <FacultyStudents />
       return <Students caps={caps} />
+    case 'principal_at_risk':
+    case 'at_risk_students':
+      return user.office_n === 4 ? <PrincipalAtRisk /> : <div className="empty">This Principal workspace is not available for this role.</div>
+    case 'academic_catalog':
+      return <CoursesSubjects />
+    case 'facilities':
+      return <Facilities />
     case 'mentoring':
       return user.persona === 'faculty' ? <FacultyMentoring /> : <Students caps={caps} />
     case 'academics':
+      if ([6, 17].includes(user.office_n)) return <DeanAcademicWorkspaces />
       if (user.persona === 'faculty') return <FacultyCourses go={go} />
       if (user.persona === 'student') return <StudentCoursesView />
-      return <Academics caps={caps} />
+      return <Academics caps={caps} go={go} />
+    case 'source_allocation':
+      return <DeanAcademicWorkspaces initialTab="allocation" sourceMode={user.office_n === 17} />
+    case 'dean_academic_operations':
+      return <DeanAcademicWorkspaces initialTab="readiness" />
+    case 'dean_academic_quality':
+      return <DeanAcademicWorkspaces initialTab="risk" />
+    case 'dean_timetable':
+      return <DeanAcademicWorkspaces initialTab="readiness" />
+    case 'dean_allocation':
+      return <DeanAcademicWorkspaces initialTab="allocation" />
+    case 'dean_risk':
+      return <DeanAcademicWorkspaces initialTab="risk" />
+    case 'dean_committees':
+      return <DeanAcademicWorkspaces initialTab="committee" />
+    case 'dean_corrective':
+      return <DeanAcademicWorkspaces initialTab="action" />
+    case 'dean_outcomes':
+      return <DeanAcademicWorkspaces initialTab="outcomes" />
+    case 'dean_planning':
+      return <DeanAcademicWorkspaces initialTab="planning" />
+    case 'dean_reports':
+      return <DeanAcademicWorkspaces initialTab="reports" />
     case 'curriculum':
-      return <Curriculum />
+      if (user.persona === 'student') return <StudentCurriculumExecution />
+      return user.office_n === 17 ? <AcademicCoordinatorCurriculumExecution onNavigate={go} /> : <Curriculum />
+    case 'faculty_course_offerings':
+      return <FacultyCourseOfferings />
     case 'courses_subjects':
       return <CoursesSubjects />
     case 'coordinator_course_offerings':
-      return <CoordinatorPage title="Course Offerings" sub="Plan and monitor the courses offered in the current academic cycle." action="Create course offering" />
+      return <AcademicCoordinatorOfferings />
+    case 'hod_course_offerings':
+      return user.office_n === 10
+        ? <Academics caps={caps} go={go} initialTab="offerings" offeringWorkspace />
+        : <div className="empty">This HOD workspace is not available for this role.</div>
+    case 'hod_timetable_review':
+      return user.office_n === 10
+        ? <HodTimetableReview />
+        : <div className="empty">This HOD timetable workspace is not available for this role.</div>
+    case 'vp_academic_approvals':
+      return user.office_n === 5
+        ? <VicePrincipalAcademicApprovals />
+        : <div className="empty">This Vice Principal workspace is not available for this role.</div>
     case 'coordinator_sections':
-      return <Academics caps={caps} />
+      return <AcademicCoordinatorTimetable />
+    case 'timetable_changes':
+      return <TimetableChanges />
     case 'coordinator_conflicts':
-      return <CoordinatorPage title="Conflict Center" sub="Review scheduling conflicts and route each issue to the responsible academic office." action="Review conflicts" />
+      return <AcademicCoordinatorConflicts onNavigate={go} />
     case 'coordinator_notices':
-      return <CoordinatorPage title="Academic Notices" sub="Prepare, publish, and track notices for the academic community." action="Create notice" />
+      return [6, 17].includes(Number(user.office_n)) ? <AcademicCoordinatorNotices /> : <Academics caps={caps} />
+    case 'coordinator_approvals':
+      return <DecisionInbox />
     case 'coordinator_requests':
-      return <CoordinatorPage title="My Requests" sub="Track requests raised by the Academic Coordinator and their approval status." action="Create request" />
+      return <MyRequests go={go} />
     case 'coordinator_reports':
-      return <CoordinatorPage title="Academic Operations Reports" sub="Review readiness, timetable coverage, curriculum execution, and delivery metrics." action="Export report" />
+      return [6, 17].includes(user.office_n) ? <AcademicCoordinatorReports onNavigate={go} /> : <Analytics user={user} />
     case 'attendance':
       if (user.persona === 'faculty') return <FacultyAttendance />
       if (user.persona === 'student') return <StudentAttendanceView />
       return <Attendance caps={caps} />
+    case 'attendance_corrections':
+      return user.persona === 'faculty' ? <FacultyAttendanceCorrections /> : <div className="empty">Attendance correction reviews are not available for this role.</div>
     case 'examinations':
       if (user.persona === 'student') return <StudentExaminationsView go={go} />
       if (user.persona === 'faculty') return <FacultyExaminations />
       return <Examinations caps={caps} />
+    case 'principal_examinations':
+      return user.office_n === 4 ? <PrincipalExaminationOversight /> : <div className="empty">This Principal workspace is not available for this role.</div>
+    case 'principal_compliance':
+      return user.office_n === 4 ? <PrincipalCompliance go={go} /> : <div className="empty">This Principal workspace is not available for this role.</div>
     case 'assessments':
       return user.persona === 'faculty' ? <FacultyAssessments go={go} /> : <Examinations caps={caps} />
     case 'assignments':
@@ -664,22 +925,36 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <Examinations caps={caps} />
     case 'admissions':
       return <Admissions caps={caps} />
+    case 'finance_fees':
+      return <Finance caps={caps} user={user} onOpenApprovals={() => go('approvals')} initialTab="fees" />
+    case 'finance_payments':
+      return <Finance caps={caps} user={user} onOpenApprovals={() => go('approvals')} initialTab="payments" />
+    case 'finance_students':
+      return <Finance caps={caps} user={user} onOpenApprovals={() => go('approvals')} initialTab="students" />
+    case 'finance_payroll':
+      return <Finance caps={caps} user={user} onOpenApprovals={() => go('approvals')} initialTab="payroll" />
     case 'finance':
       if (user.persona === 'student') return <StudentFeesView />
       if (user.persona === 'parent') return <ParentHome user={user} />
+      if (user.office_n === 4) return <PrincipalFinance caps={caps} />
       return <Finance caps={caps} user={user} onOpenApprovals={() => go('approvals')} />
+    case 'accountant_report':
+      return user.office_n === 23 ? <AccountantReport /> : <Analytics user={user} go={go} />
     case 'library':
       if (user.persona === 'student') return <StudentLibraryView />
       return <Library caps={caps} />
     case 'hr':
+      if (user.office_n === 24) return <SpecialistQueue title="HR Staffing Requests" />
       if (user.persona === 'faculty') return <FacultyPayroll />
-      return <HR caps={caps} />
+      return <HR caps={caps} user={user} />
     case 'payroll':
-      return user.persona === 'faculty' ? <FacultyPayroll /> : <HR caps={caps} />
+      return user.persona === 'faculty' ? <FacultyPayroll /> : <HR caps={caps} user={user} />
+    case 'my_payroll':
+      return <FacultyPayroll />
     case 'faculty_staff':
       return <FacultyStaff />
     case 'leave':
-      return user.persona === 'faculty' ? <FacultyLeave /> : <HR caps={caps} />
+      return user.persona === 'faculty' ? <FacultyLeave /> : <HR caps={caps} user={user} initialTab="leave" />
     case 'digital_id':
       return user.persona === 'faculty' ? <FacultyDigitalId /> : <div className="empty">Digital ID is not available for this role.</div>
     case 'coordination':
@@ -687,23 +962,48 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'academic_risk':
       return <FacultyConditionalView kind="risk" />
     case 'course_registrations':
+      if (user.persona === 'student') return <StudentRegistration />
       return <FacultyConditionalView kind="registrations" />
     case 'recruitment':
-      return <HR caps={caps} />
+      return <HR caps={caps} initialTab="jobs" />
     case 'procurement':
+      if (user.office_n === 32) return <SpecialistQueue title="Procurement Requisitions" />
       return <Procurement caps={caps} />
+    case 'administration_dashboard':
+      return <DeanAdministration mode="dashboard" />
+    case 'administration_plans':
+      return <DeanAdministration mode="plans" />
+    case 'administration_requirements':
+      return <DeanAdministration mode="requirements" />
+    case 'administration_resources':
+      return <DeanAdministration mode="requirements" workspaceTitle="Resources & Facilities" categoryFilter="FACILITIES" />
+    case 'administration_workforce':
+      return <DeanAdministration mode="requirements" workspaceTitle="Workforce" categoryFilter="WORKFORCE" />
+    case 'administration_budget':
+      return <DeanAdministration mode="requirements" workspaceTitle="Budget" categoryFilter="BUDGET" />
+    case 'administration_procurement_assets':
+      return <DeanAdministration mode="requirements" workspaceTitle="Procurement & Assets" categoryFilter="PROCUREMENT,ASSETS" />
+    case 'administration_requests':
+      return <DeanAdministration mode="requests" />
+    case 'administration_reviews':
+      return <DeanAdministration mode="reviews" />
+    case 'administration_reports':
+      return <DeanAdministration mode="reports" />
     case 'assets':
+      if (user.office_n === 29) return <SpecialistQueue title="Facilities Work Orders" />
+      if (user.office_n === 27) return <SpecialistQueue title="IT Service Requests" />
       return <Assets caps={caps} />
     case 'hostel':
       return <Hostel caps={caps} />
     case 'transport':
+      if (user.office_n === 4) return <PrincipalTransport caps={caps} />
       return <Transport caps={caps} />
     case 'research':
       return <Research caps={caps} />
     case 'placements':
       return <Placements caps={caps} />
     case 'grievance':
-      return <Grievance caps={caps} />
+      return user.office_n === 4 ? <PrincipalGrievance caps={caps} /> : <Grievance caps={caps} />
     case 'governance':
       return <Governance user={user} />
     case 'admin':
@@ -711,15 +1011,28 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'approvals':
       return user.office_n === 1
         ? <ChairmanApprovals user={user} onChange={onChange} />
+        : user.office_n === 4
+          ? <PrincipalApprovals user={user} onChange={onChange} />
         : <Workflows user={user} onChange={onChange} />
     case 'workflows':
-      return <Workflows user={user} onChange={onChange} />
+      return user.office_n === 4 ? <PrincipalWorkflows user={user} onChange={onChange} /> : user.office_n === 6 ? <MyRequests go={go} /> : <Workflows user={user} onChange={onChange} />
+    case 'principal_approval_history':
+    case 'approval_history':
+      return user.office_n === 4 ? <ApprovalHistory /> : <div className="empty">This Principal workspace is not available for this role.</div>
+    case 'escalations':
+      return user.office_n === 4 ? <Escalations /> : <div className="empty">This Principal workspace is not available for this role.</div>
+    case 'compliance':
+      return user.office_n === 4 ? <PrincipalCompliance go={go} /> : <div className="empty">This Principal workspace is not available for this role.</div>
+    case 'principal_escalations':
+      return user.office_n === 4 ? <Escalations /> : <div className="empty">This Principal workspace is not available for this role.</div>
     case 'delegation':
       return user.office_n === 1 ? <ChairmanDelegation user={user} /> : <Delegations user={user} />
     case 'audit':
-      return <AuditView />
+      return <AuditView principal={user.office_n === 4} />
     case 'directory':
-      return <Directory />
+      return <Directory user={user} />
+    case 'my_profile':
+      return user.persona === 'faculty' ? <FacultyProfile /> : <div className="empty">My Profile is not available for this role.</div>
     case 'matrices':
       return <Matrices />
     case 'permissions':
@@ -741,7 +1054,7 @@ function CoordinatorPage({ title, sub, action }: { title: string; sub: string; a
     <main className="page-wrap fade-in">
       <PageHead title={title} sub={sub} />
       <section className="card" style={{ marginTop: 20 }}>
-        <div className="card-h"><div><h2>{title}</h2><p>This coordinator workspace has its own route, active state, and workflow.</p></div><button className="btn btn-crimson" type="button">{action}</button></div>
+        <div className="card-h"><div><h2>{title}</h2><p>This coordinator workspace has its own route, active state, and workflow.</p></div><button className="btn btn-crimson" type="button" onClick={() => window.location.reload()}>{action}</button></div>
         <div className="empty" style={{ padding: '48px 20px' }}>No {title.toLowerCase()} items are waiting for action.</div>
       </section>
     </main>
@@ -789,119 +1102,144 @@ function ChevronDownIcon() {
 }
 
 function NavGlyph({ moduleKey, label }: { moduleKey: string, label?: string }) {
-  const admissionIcons: Record<string, any> = {
+  // Labels are deliberately the first lookup. Several role-specific routes share
+  // a backing module (for example Admissions), but still need a distinct visual
+  // affordance for each destination in the sidebar.
+  const labelIcons: Record<string, any> = {
     'Overview': HiOutlineSquares2X2,
+    'Principal': HiOutlineHome,
+    'Dashboard': HiOutlineSquares2X2,
+    'My Schedule': HiOutlineCalendarDays,
+    'Messages': HiOutlineEnvelope,
+    'Announcements': HiOutlineMegaphone,
+    'My Sections': HiOutlineTableCells,
+    'Course Offerings': HiOutlineBookOpen,
+    'Attendance': HiOutlineClipboardDocumentCheck,
+    'Assignments': HiOutlineClipboardDocumentList,
+    'Assessments': HiOutlineCalculator,
+    'Assessments & Marks': HiOutlineCalculator,
+    'Marks': HiOutlinePencilSquare,
+    'Marks Entry': HiOutlinePencilSquare,
+    'Course Materials': HiOutlineFolder,
+    'Mentoring & Advisees': HiOutlineUserCircle,
+    'Research & Guidance': HiOutlineRocketLaunch,
+    'My Profile': HiOutlineUserCircle,
+    'Digital ID': HiOutlineIdentification,
+    'Leave & Requests': HiOutlineCalendarDays,
+    'Leave': HiOutlineCalendarDays,
+    'Leave Requests': HiOutlineCalendarDays,
+    'Payroll': HiOutlineBanknotes,
+    'My Payroll': HiOutlineBanknotes,
+    'Attendance Correction Reviews': HiOutlineClipboardDocumentCheck,
+    'My Requests': HiOutlineInbox,
+    'Requests': HiOutlineInbox,
+    'Approvals': HiOutlineCheckBadge,
+    'My Approvals': HiOutlineCheckBadge,
+    'Academic Approvals': HiOutlineCheckBadge,
+    'Approval History': HiOutlineDocumentText,
+    'Workflows': HiOutlineArrowPathRoundedSquare,
+    'Escalations': HiOutlineLifebuoy,
+    'Delegation': HiOutlineUsers,
+    'Academic Calendar': HiOutlineCalendarDays,
+    'Academic Rollover': HiOutlineArrowPathRoundedSquare,
+    'Curriculum': HiOutlineRectangleGroup,
+    'Curriculum Execution': HiOutlineRectangleGroup,
+    'Programs': HiOutlineAcademicCap,
+    'Programme Proposals': HiOutlineAcademicCap,
+    'Courses': HiOutlineBookOpen,
+    'Academic Setup': HiOutlineAcademicCap,
+    'Academic Committees': HiOutlineUserGroup,
+    'Faculty Allocation': HiOutlineUsers,
+    'Sections & Timetable': HiOutlineTableCells,
+    'Timetable Readiness': HiOutlineTableCells,
+    'Timetable Changes': HiOutlineCalendarDays,
+    'Timetable Changes Requiring Review': HiOutlineCalendarDays,
+    'Conflict Center': HiOutlineExclamationTriangle,
+    'Academic Notices': HiOutlineMegaphone,
+    'Academic Operations': HiOutlineTableCells,
+    'Performance & Results': HiOutlinePresentationChartLine,
+    'Academic Risk': HiOutlineExclamationTriangle,
+    'Corrective Actions': HiOutlineClipboardDocumentCheck,
+    'Outcomes': HiOutlineChartBarSquare,
+    'Next-Semester Planning': HiOutlineRocketLaunch,
+    'Reports': HiOutlineDocumentChartBar,
+    'Reports & Analytics': HiOutlineDocumentChartBar,
+    'Audit': HiOutlineShieldCheck,
+    'Directory': HiOutlineUserGroup,
+    'Authority & Permissions': HiOutlineShieldCheck,
+    'Settings': HiOutlineCog6Tooth,
+    'Academic Governance': HiOutlineBuildingLibrary,
+    'Academic Quality': HiOutlinePresentationChartLine,
+    'Administrative Plan': HiOutlineClipboardDocumentList,
+    'Resources & Facilities': HiOutlineWrenchScrewdriver,
+    'Workforce': HiOutlineUsers,
+    'Budget': HiOutlineBanknotes,
+    'Procurement & Assets': HiOutlineShoppingCart,
+    'My Reviews': HiOutlineDocumentMagnifyingGlass,
+    'Administration Requests': HiOutlineInbox,
+    'At-Risk Students': HiOutlineExclamationTriangle,
+    'Faculty & Staff': HiOutlineBuildingOffice2,
+    'Recruitment & Vacancies': HiOutlineBriefcase,
+    'Examinations': HiOutlineDocumentCheck,
+    'Finance': HiOutlineBanknotes,
+    'Finance & Resources': HiOutlineBanknotes,
+    'Procurement': HiOutlineShoppingCart,
+    'Facilities & Maintenance': HiOutlineWrenchScrewdriver,
+    'Assets & Inventory': HiOutlineArchiveBox,
+    'Hostel': HiOutlineBuildingOffice2,
+    'Transport': HiOutlineTruck,
+    'Grievance & Discipline': HiOutlineScale,
+    'Accreditation & Compliance': HiOutlineShieldCheck,
+    'Governance': HiOutlineBuildingLibrary,
+    'Institution': HiOutlineBuildingOffice2,
+    'Strategic Initiatives': HiOutlineRocketLaunch,
+    'Communications': HiOutlineChatBubbleLeftRight,
     'Admission Cycles': HiOutlineCalendarDays,
-    'Programs & Intake': HiOutlineAcademicCap,
-    'Quotas': HiOutlineUsers,
-    'All Applications': HiOutlineClipboardDocumentList,
-    'Corrections': HiOutlineDocumentCheck,
-    'Document Verification': HiOutlineDocumentCheck,
-    'Document Status': HiOutlineClipboardDocumentList,
-    'Eligibility Queue': HiOutlineScale,
-    'Eligibility Rules': HiOutlineScale,
-    'Merit & Rankings': HiOutlineChartBarSquare,
-    'Assessments & Merit': HiOutlineChartBarSquare,
-    'Counselling': HiOutlineUserGroup,
+    'Admission Cycles & Intake': HiOutlineCalendarDays,
+    'Applications': HiOutlineClipboardDocumentList,
+    'Review Queue': HiOutlineDocumentCheck,
+    'Corrections': HiOutlinePencilSquare,
+    'Document Status': HiOutlineDocumentMagnifyingGlass,
+    'Eligibility Evaluation': HiOutlineScale,
+    'Eligibility Rules': HiOutlineClipboardDocumentCheck,
+    'Quotas': HiOutlineUserGroup,
+    'Assessment, Merit & Seats': HiOutlineChartBarSquare,
     'Seat Pools': HiOutlineQueueList,
-    'Seat Allocation': HiOutlineQueueList,
-    'Allocation': HiOutlineQueueList,
-    'Waitlist': HiOutlineUsers,
-    'Offer Recommendations': HiOutlineGift,
-    'Approval Inbox': HiOutlineCheckBadge,
-    'Issued Offers': HiOutlineGift,
-    'Offer Status': HiOutlineGift,
-    'Finance Status': HiOutlineBanknotes,
-    'Invoices & Challans': HiOutlineDocumentCurrencyRupee,
-    'Payment Status': HiOutlineCreditCard,
-    'Accounts Verification': HiOutlineDocumentCheck,
-    'Finance Clearance': HiOutlineCheckBadge,
-    'Clearance Status': HiOutlineCheckBadge,
-    'Final Approval': HiOutlineCheckBadge,
-    'Ready to Admit': HiOutlineUserPlus,
-    'Enrollment Queue': HiOutlineQueueList,
-    'Student Conversion': HiOutlineUserPlus,
-    'Enrollment Status': HiOutlineAcademicCap,
-    'Scholarship Admissions': HiOutlineGift,
-    'International Admissions': HiOutlineUsers,
-    'Application Status': HiOutlineClipboardDocumentList,
-    'Helpdesk / Support': HiOutlineLifebuoy,
-    'Reports': HiOutlineChartBarSquare,
+    'Counselling & Waitlist': HiOutlineChatBubbleLeftRight,
+    'Offer Approval & Status': HiOutlineGift,
+    'Finance Clearance': HiOutlineCreditCard,
+    'Re-submitted Corrections': HiOutlineClipboardDocumentCheck,
+    'Admission Reports': HiOutlineChartBarSquare,
     'Calendar': HiOutlineCalendarDays,
   }
-  const AdmissionIcon = label ? admissionIcons[label] : null
-  if (AdmissionIcon) return <AdmissionIcon />
-  switch (moduleKey) {
-    case 'frontdesk_dashboard':
-    case 'frontdesk_visitors':
-    case 'frontdesk_verify':
-    case 'frontdesk_appointments':
-    case 'frontdesk_helpdesk':
-    case 'frontdesk_calls':
-    case 'frontdesk_directory':
-    case 'frontdesk_delegations':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="8" r="3" /><path d="M5 21a7 7 0 0 1 14 0M4 4h16v16H4z" /></svg>
-    case 'overview':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 11.5 12 5l8 6.5V20a1 1 0 0 1-1 1h-4.5v-6h-5v6H5a1 1 0 0 1-1-1v-8.5Z" /></svg>
-    case 'calendar':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M8 3v4M16 3v4M3 10h18" /><path d="M8 14h3M13 14h3M8 18h3" /></svg>
-    case 'academic_calendar':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="3" y="4" width="18" height="17" rx="2" /><path d="M7 2v4M17 2v4M3 9h18" /><path d="M7 13h10M7 17h6" /></svg>
-    case 'governance':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 4 5 7v5c0 4.2 2.9 7.9 7 8.9 4.1-1 7-4.7 7-8.9V7l-7-3Z" /><path d="M9.5 12 11 13.5l3.5-4" /></svg>
-    case 'approvals':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M7 4h7l5 5v11a1 1 0 0 1-1 1H7a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" /><path d="M14 4v5h5M9 14l2 2 4-4" /></svg>
-    case 'delegation':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="8" cy="8" r="3" /><circle cx="16" cy="16" r="3" /><path d="M10.5 10.5 13.5 13.5M5 18a4 4 0 0 1 6 0M13 6a4 4 0 0 1 6 0" /></svg>
-    case 'audit':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M11 5h8M11 9h8M11 13h5" /><path d="M6 4H4a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h2" /><path d="m8 17 2 2 4-4" /></svg>
-    case 'directory':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 20h16" /><path d="M7 20V8l5-3 5 3v12" /><path d="M9 11h.01M15 11h.01M9 15h.01M15 15h.01" /></svg>
-    case 'finance':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M7 5h9M7 9h7M9 5c0 6 5 4 5 9 0 2-2 4-5 4" /></svg>
-    case 'analytics':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 20h16" /><path d="M7 16V9M12 16V5M17 16v-3" /></svg>
-    case 'hr':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="7" r="3.5" /><path d="M5 20a7 7 0 0 1 14 0" /></svg>
-    case 'integrations':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m9 12 3-3 3 3" /><path d="m9 16 3-3 3 3" /><path d="M5 7h4M15 17h4M4 12h4M16 12h4" /></svg>
-    case 'workflows':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 7h11M4 12h16M4 17h9" /><circle cx="18" cy="7" r="2" /><circle cx="9" cy="17" r="2" /></svg>
-    case 'matrices':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 4h16v16H4z" /><path d="M4 10h16M10 4v16" /></svg>
-    case 'students':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m3 8 9-4 9 4-9 4-9-4Z" /><path d="M7 10v4c0 1.7 2.2 3 5 3s5-1.3 5-3v-4" /></svg>
-    case 'academics':
-    case 'curriculum':
-    case 'courses_subjects':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v18H6.5A2.5 2.5 0 0 0 4 23V5.5Z" /><path d="M12 3v18" /></svg>
-    case 'attendance':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m5 12 4 4 10-10" /></svg>
-    case 'examinations':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M7 4h10l3 3v13H7a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" /><path d="M15 4v3h3M9 13h6M9 17h4" /></svg>
-    case 'scores':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 20h16" /><path d="M7 16V9M12 16V5M17 16v-3" /><path d="M6 8 9 5l3 3 4-4 2 2" /></svg>
-    case 'admissions':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 3v18M3 12h18" /></svg>
-    case 'library':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M6 4h12v16H6z" /><path d="M9 4v16" /></svg>
-    case 'hostel':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 20h16M6 20V9l6-4 6 4v11M10 13h4M10 17h4" /></svg>
-    case 'transport':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="4" y="5" width="16" height="11" rx="2" /><path d="M8 16v3M16 16v3M4 11h16" /><circle cx="8" cy="19" r="1" /><circle cx="16" cy="19" r="1" /></svg>
-    case 'grievance':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M8 20h8M12 17v3M6 5h12l-1 8H7L6 5Z" /><path d="M9 9h6" /></svg>
-    case 'research':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="10" cy="10" r="5" /><path d="m14 14 6 6" /></svg>
-    case 'placements':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 20h16" /><path d="M7 16V9M12 16V5M17 16v-3" /><path d="m6 8 3-3 3 3 4-4 2 2" /></svg>
-    case 'procurement':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="m4 7 8-4 8 4-8 4-8-4Z" /><path d="M4 7v10l8 4 8-4V7" /></svg>
-    case 'assets':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="M8 9h8M8 13h5" /></svg>
-    case 'admin':
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" /><path d="M19.4 15a1 1 0 0 0 .2 1.1l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V20a2 2 0 1 1-4 0v-.2a1 1 0 0 0-.6-.9 1 1 0 0 0-1.1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H4a2 2 0 1 1 0-4h.2a1 1 0 0 0 .9-.6 1 1 0 0 0-.2-1.1l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1 1 0 0 0 1.1.2 1 1 0 0 0 .6-.9V4a2 2 0 1 1 4 0v.2a1 1 0 0 0 .6.9 1 1 0 0 0 1.1-.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1 1 0 0 0-.2 1.1 1 1 0 0 0 .9.6H20a2 2 0 1 1 0 4h-.2a1 1 0 0 0-.9.6Z" /></svg>
-    default:
-      return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="12" r="8" /></svg>
+  const keyIcons: Record<string, any> = {
+    frontdesk_dashboard: HiOutlineSquares2X2, frontdesk_visitors: HiOutlineUserGroup,
+    frontdesk_verify: HiOutlineTicket, frontdesk_appointments: HiOutlineCalendarDays,
+    frontdesk_helpdesk: HiOutlineLifebuoy, frontdesk_calls: HiOutlineChatBubbleLeftRight,
+    frontdesk_directory: HiOutlineUserGroup, frontdesk_delegations: HiOutlineUsers,
+    overview: HiOutlineHome, calendar: HiOutlineCalendarDays, academic_calendar: HiOutlineCalendarDays,
+    governance: HiOutlineBuildingLibrary, approvals: HiOutlineCheckBadge, delegation: HiOutlineUsers,
+    audit: HiOutlineShieldCheck, directory: HiOutlineUserGroup, finance: HiOutlineBanknotes,
+    analytics: HiOutlinePresentationChartLine, hr: HiOutlineUsers, integrations: HiOutlineCog6Tooth,
+    workflows: HiOutlineArrowPathRoundedSquare, matrices: HiOutlineTableCells, students: HiOutlineAcademicCap,
+    academics: HiOutlineBookOpen, curriculum: HiOutlineRectangleGroup, courses_subjects: HiOutlineBookOpen,
+    attendance: HiOutlineClipboardDocumentCheck, examinations: HiOutlineDocumentCheck, scores: HiOutlineChartBarSquare,
+    admissions: HiOutlineUserPlus, library: HiOutlineBuildingLibrary, hostel: HiOutlineBuildingOffice2,
+    transport: HiOutlineTruck, decision_inbox: HiOutlineInbox, dean_programs: HiOutlineAcademicCap,
+    dean_timetable: HiOutlineTableCells, dean_allocation: HiOutlineUsers, dean_risk: HiOutlineExclamationTriangle,
+    dean_reports: HiOutlineDocumentChartBar, grievance: HiOutlineScale, research: HiOutlineRocketLaunch,
+    placements: HiOutlineBriefcase, procurement: HiOutlineShoppingCart, assets: HiOutlineComputerDesktop,
+    admin: HiOutlineCog6Tooth, facilities: HiOutlineWrenchScrewdriver, compliance: HiOutlineShieldCheck,
+    permissions: HiOutlineShieldCheck, faculty_staff: HiOutlineBuildingOffice2, recruitment: HiOutlineBriefcase,
+    leave: HiOutlineCalendarDays, academic_catalog: HiOutlineAcademicCap, principal_examinations: HiOutlineDocumentCheck,
+    approval_history: HiOutlineDocumentText, escalations: HiOutlineLifebuoy, course_registrations: HiOutlineClipboardDocumentList,
+    my_schedule: HiOutlineCalendarDays, messages: HiOutlineEnvelope, announcements: HiOutlineMegaphone,
+    assignments: HiOutlineClipboardDocumentList, assessments: HiOutlineCalculator, marks_entry: HiOutlinePencilSquare,
+    course_materials: HiOutlineFolder, mentoring: HiOutlineUserCircle, my_profile: HiOutlineUserCircle,
+    digital_id: HiOutlineIdentification, payroll: HiOutlineBanknotes, my_payroll: HiOutlineBanknotes,
+    rollover: HiOutlineArrowPathRoundedSquare, timetable_changes: HiOutlineCalendarDays,
+    program_proposals: HiOutlineAcademicCap, source_allocation: HiOutlineUsers,
   }
+  const Icon = (label && labelIcons[label]) || keyIcons[moduleKey] || HiOutlineSquares2X2
+  return <Icon />
 }

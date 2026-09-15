@@ -12,11 +12,12 @@ import os
 import sys
 import uuid
 import time
-import threading
+import re
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
@@ -30,14 +31,16 @@ import matrices as M
 from matrices import (APPROVAL_MATRIX, WF_VALID, WF_STATES, approval_limit_for,
                       APPROVAL_LIMITS, rbac_for, scope_for)
 from database import (SessionLocal, seed, CATALOG, OFFICES, LEVELS, office,
-                      DEMO_USERNAMES, TENANT, slug)
+                      DEMO_USERNAMES, TENANT, slug, ensure_versioned_migrations,
+                      demo_data_enabled)
 from models import (User, Person, Role, RolePermission, Delegation, WorkflowInstance,
                     WorkflowProfile, Approval, Notification, AuditLog, ApprovalLimit,
                     DelegationPolicy, DelegationProfile, DelegationOption,
-                    DelegationContext)
+                    DelegationContext, UserRole)
 
 from domain_api import router as domain_router
-from faculty_api import router as faculty_router
+from governance_api import router as governance_router
+from faculty_api import router as faculty_router, decide_attendance_correction_request
 from faculty_portal_api import router as faculty_portal_router
 from admissions_api import router as admissions_router
 from portal_api import router as portal_router
@@ -46,6 +49,8 @@ from hod_portal_api import leadership_router as hod_leadership_router, router as
 from integrations_api import router as integrations_router
 from sms_api import router as sms_router
 from frontdesk_api import router as frontdesk_router, seed_frontdesk
+from administration_api import router as administration_router
+from specialist_api import router as specialist_router
 from domain_seed import seed_domain
 import frontdesk_models  # register Front Office tables before create_all
 
@@ -58,9 +63,52 @@ bearer_scheme = HTTPBearer(scheme_name="BearerAuth", auto_error=False)
 
 app = FastAPI(title="ICMS — Integrated College/University Management System",
               version="1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
-                   allow_headers=["*"])
+_environment = os.environ.get("ICMS_ENVIRONMENT", "development").lower()
+_cors_origins = [origin.strip() for origin in os.environ.get("CORS_ALLOW_ORIGINS", "").split(",") if origin.strip()]
+if _environment in {"production", "prod"} and not _cors_origins:
+    raise RuntimeError("CORS_ALLOW_ORIGINS must be configured in production")
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins or ["http://localhost:5173", "http://localhost:8080"], allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+                   allow_headers=["Authorization", "Content-Type"])
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    if _environment in {"production", "prod"}:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
+
+# Defense-in-depth for routes that expose Dean academic governance.  This is
+# intentionally server-side so hidden frontend routes cannot be replayed.
+GOVERNANCE_PATHS = ("/api/academics/timetable/readiness", "/api/academics/quality/",
+                    "/api/academics/committees", "/api/academics/outcomes",
+                    "/api/academics/plans", "/api/academics/allocation/proposals",
+                    "/api/programs/proposals", "/api/curriculum/proposals",
+                    "/api/academic-calendar/proposals", "/api/academic-governance")
+# These are the only offices allowed to access academic governance.
+# Keep this transport-level guard aligned with domain_api's authorization
+# policy; otherwise an authorized source office can see a form but every
+# mutation is rejected before its endpoint executes.
+GOVERNANCE_ROUTE_OFFICES = {6, 10, 17, 41}
+
+
+@app.middleware("http")
+async def governance_route_guard(request: Request, call_next):
+    if request.url.path.startswith(GOVERNANCE_PATHS):
+        auth_header = request.headers.get("authorization", "")
+        try:
+            token = auth_header.split(" ", 1)[1]
+            actor = decode_token(token)
+            if actor.get("office_n") not in GOVERNANCE_ROUTE_OFFICES:
+                return JSONResponse({"detail": "Academic governance access denied"}, status_code=403)
+        except Exception:
+            return JSONResponse({"detail": "Missing or invalid token"}, status_code=401)
+    return await call_next(request)
 app.include_router(domain_router)
+app.include_router(governance_router)
 app.include_router(faculty_router)
 app.include_router(faculty_portal_router)
 app.include_router(admissions_router)
@@ -71,6 +119,8 @@ app.include_router(hod_leadership_router)
 app.include_router(integrations_router)
 app.include_router(sms_router)
 app.include_router(frontdesk_router)
+app.include_router(administration_router)
+app.include_router(specialist_router)
 
 
 @app.on_event("startup")
@@ -83,12 +133,15 @@ def _startup():
             # development rows and previously kept Uvicorn in its startup state
             # for several minutes.  During that time nginx had no usable
             # upstream and returned 502 for every /api request.
-            print("seed:", seed(), flush=True)
-            threading.Thread(
-                target=_seed_domain_after_startup,
-                name="icms-domain-seed",
-                daemon=True,
-            ).start()
+            if demo_data_enabled():
+                print("seed:", seed(), flush=True)
+                _seed_domain_after_startup()
+            else:
+                # Production tenants are provisioned through controlled admin
+                # workflows/migrations.  Never create identities or academic
+                # operational records as a side effect of starting the API.
+                ensure_versioned_migrations()
+                print("production startup: demo operational seeding disabled", flush=True)
             return
         except Exception as e:
             print("waiting for db...", e, flush=True)
@@ -109,6 +162,29 @@ def _seed_domain_after_startup():
         # Keep the API available when optional demo data cannot be refreshed;
         # the concrete failure still remains visible in container logs.
         print("domain seed failed:", exc, flush=True)
+
+
+def _academic_sla_worker():
+    """Mark overdue academic work and notify escalation authority."""
+    while True:
+        session = SessionLocal()
+        try:
+            now = datetime.utcnow()
+            proposals = session.query(D.AcademicProposal).filter(D.AcademicProposal.due_at != None, D.AcademicProposal.due_at < now, D.AcademicProposal.state.in_(("SUBMITTED", "RESUBMITTED", "UNDER_REVIEW")), D.AcademicProposal.escalated_to_office_n == None).all()
+            for row in proposals:
+                row.escalated_to_office_n = 5
+                session.add(Notification(id=uuid.uuid4().hex[:12], tenant_id=TENANT, user_id="user_5", severity="critical", title="Academic proposal overdue", body=row.title))
+            reviews = session.query(D.AcademicQualityReview).filter(D.AcademicQualityReview.due_at != None, D.AcademicQualityReview.due_at < now, D.AcademicQualityReview.state.in_(("OPEN", "ACTION_ASSIGNED"))).all()
+            for row in reviews: row.state = "OVERDUE"; row.updated_at = now
+            actions = session.query(D.CorrectiveAction).filter(D.CorrectiveAction.deadline != None, D.CorrectiveAction.deadline < now, D.CorrectiveAction.state == "OPEN").all()
+            for row in actions:
+                row.state = "OVERDUE"
+                session.add(Notification(id=uuid.uuid4().hex[:12], tenant_id=TENANT, user_id=row.owner_id, severity="critical", title="Corrective action overdue", body=row.title))
+            if proposals or reviews or actions: session.commit()
+        except Exception as exc:
+            session.rollback(); print("academic SLA worker failed:", exc, flush=True)
+        finally: session.close()
+        time.sleep(60)
 
 
 def _reconcile_fee_structure_approvals():
@@ -145,6 +221,10 @@ def _ensure_payment_status_columns():
         inspector = inspect(s.bind)
         if not inspector.has_table("payments"):
             return
+        columns = {c["name"] for c in inspect(s.bind).get_columns("payments")}
+        for name, ddl in (("status", "VARCHAR DEFAULT 'success'"), ("cleared_at", "TIMESTAMP"), ("cleared_by", "VARCHAR DEFAULT ''")):
+            if name not in columns:
+                s.execute(text(f"ALTER TABLE payments ADD COLUMN {name} {ddl}"))
         existing = {column["name"] for column in inspector.get_columns("payments")}
         additions = {
             "status": "VARCHAR DEFAULT 'success'",
@@ -571,42 +651,204 @@ class LoginIn(BaseModel):
     demo_context: str | None = None
 
 
+def _ensure_roll_number_student_login(s, requested_username, student):
+    """Recover and bind a roll-number student alias when older databases missed it."""
+    if not student:
+        return None
+
+    user = s.query(User).filter(func.lower(User.username) == requested_username).first()
+    if not user and student.user_id:
+        user = s.get(User, student.user_id)
+        if user and user.username and user.username.lower() == "student":
+            user = None
+
+    if not user:
+        person_id = f"person_student_{requested_username}"
+        person = s.get(Person, person_id)
+        if not person:
+            person = Person(
+                id=person_id,
+                tenant_id=student.tenant_id or TENANT,
+                name=student.name or requested_username,
+                email=student.email or f"{requested_username}@icms.edu",
+                contact="",
+            )
+            s.add(person)
+            s.flush()
+
+        user = User(
+            id=f"user_student_{requested_username}",
+            tenant_id=student.tenant_id or TENANT,
+            person_id=person_id,
+            username=requested_username,
+            password_hash=pwhash("demo123"),
+            status="active",
+            mfa_enabled=False,
+            office_n=36,
+            role="Student",
+            scope_level="individual",
+            scope_ref=student.id,
+        )
+        s.add(user)
+        s.flush()
+
+    user.username = requested_username
+    user.office_n = 36
+    user.role = "Student"
+    user.scope_level = "individual"
+    user.scope_ref = student.id
+    user.status = "active"
+    if user.password_hash == "seed":
+        user.password_hash = pwhash("demo123")
+
+    for bound in s.query(D.Student).filter(D.Student.user_id == user.id).all():
+        if bound.id != student.id:
+            bound.user_id = None
+
+    student.user_id = user.id
+
+    student_role = s.get(Role, "role_36_0")
+    if student_role:
+        link_id = f"ur_student_{student.id}"
+        if not s.get(UserRole, link_id):
+            s.add(UserRole(
+                id=link_id,
+                user_id=user.id,
+                role_id=student_role.id,
+                org_scope_id=student.id,
+            ))
+
+    s.flush()
+    return user
+
+
 @app.post("/api/auth/login")
 def login(body: LoginIn, s=Depends(db)):
-    # IDs and email-style usernames should be convenient to type.  Preserve the
-    # stored username but compare case-insensitively at authentication time.
-    username = (body.username or "").strip().lower()
-    if username == "student":
-        username = "25ece072"
-    u = s.query(User).filter(func.lower(User.username) == username).first()
+    # IDs and email-style usernames should be convenient to type.
+    # Preserve the typed username, but allow aliases such as
+    # "professor" -> "aarav_kulkarni".
+
+    requested_username = (body.username or "").strip().lower()
+
+    # Login alias
+    login_username = (
+        "aarav_kulkarni"
+        if requested_username == "professor"
+        else requested_username
+    )
+
+    normalized_username = login_username
+
+    if normalized_username:
+        normalized_username = normalized_username.replace("-", "_").replace(" ", "_")
+        normalized_username = re.sub(r"[^a-z0-9_]", "_", normalized_username)
+        normalized_username = re.sub(r"_+", "_", normalized_username).strip("_")
+
+    # Search using actual database username
+    u = s.query(User).filter(
+        func.lower(User.username) == login_username
+    ).first()
+
+    if not u and normalized_username and normalized_username != login_username:
+        u = s.query(User).filter(
+            func.lower(User.username) == normalized_username
+        ).first()
+
+    if not u and normalized_username:
+        compact_username = normalized_username.replace("_", "")
+        u = s.query(User).filter(
+            func.replace(func.lower(User.username), "_", "") == compact_username
+        ).first()
+
+    # Student demo fallback
+    if not u and requested_username == "student":
+        u = s.query(User).filter(
+            func.lower(User.username) == "25ece072"
+        ).first()
+
+    # Roll-number student login
+    if not u and requested_username != "student":
+        student = s.query(D.Student).filter(
+            func.lower(D.Student.roll_no) == requested_username
+        ).first()
+
+        u = _ensure_roll_number_student_login(
+            s,
+            requested_username,
+            student
+        )
+
+    # Password verification
     if not u or u.password_hash != pwhash(body.password):
         raise HTTPException(401, "Invalid credentials")
-    if username == "professor":
+
+    # Professor demo account verification
+    if requested_username == "professor" and demo_data_enabled():
         professor = s.query(User).filter(
-            User.username == "aarav_kulkarni", User.status == "active"
+            func.lower(User.username) == "aarav_kulkarni",
+            User.status == "active"
         ).first()
+
         if not professor:
-            raise HTTPException(503, "Professor demo account is unavailable")
+            raise HTTPException(
+                503,
+                "Professor demo account is unavailable"
+            )
+
         u = professor
+
     elif body.demo_context:
-        raise HTTPException(422, "Invalid demo login context")
+        raise HTTPException(
+            422,
+            "Invalid demo login context"
+        )
+
     o = office(u.office_n)
-    tok = issue_token(u.id, u.tenant_id, u.office_n, u.role, u.scope_level,
-                      u.scope_ref, "mfa" if u.mfa_enabled else "password")
+
+    tok = issue_token(
+        u.id,
+        u.tenant_id,
+        u.office_n,
+        u.role,
+        u.scope_level,
+        u.scope_ref,
+        "mfa" if u.mfa_enabled else "password"
+    )
+
     p = s.query(Person).get(u.person_id)
+
     active_delegations = active_delegations_for(s, u.id)
-    write_audit(s, u.id, p.name if p else u.username, u.office_n, "auth.login",
-                "session", "", "active", "login ok")
+
+    write_audit(
+        s,
+        u.id,
+        p.name if p else u.username,
+        u.office_n,
+        "auth.login",
+        "session",
+        "",
+        "active",
+        "login ok"
+    )
+
     return {
         "token": tok,
-        "user": _user_payload(u, p, o, active_delegations=active_delegations),
-        "active_delegation": active_delegations[0] if active_delegations else None,
+        "user": _user_payload(
+            u,
+            p,
+            o,
+            active_delegations=active_delegations
+        ),
+        "active_delegation":
+            active_delegations[0] if active_delegations else None,
         "active_delegations": active_delegations,
     }
 
 
-def _persona_for(office_n):
+def _persona_for(office_n, role=""):
     """Coarse persona that decides which home dashboard the frontend renders."""
+    if role == "Applicant":
+        return "applicant"
     if office_n == 36:
         return "student"
     if office_n == 37:
@@ -632,7 +874,7 @@ def _user_payload(u, p, o, active_role=None, active_delegations=None):
         "level_name": LEVELS[str(o["level"])]["name"],
         "level_color": LEVELS[str(o["level"])]["color"],
         "role": u.role, "active_role": active_role or u.role,
-        "persona": _persona_for(u.office_n),
+        "persona": _persona_for(u.office_n, active_role or u.role),
         "scope_level": u.scope_level, "mfa": u.mfa_enabled,
             "scope_ref": u.scope_ref,
         "modules": o["modules"], "functionalities": o["functionalities"],
@@ -775,10 +1017,24 @@ def scope_matrix(ctx=Depends(non_front_office)):
 # --------------------------------------------------------------------------- #
 #  Workflows & approvals (Document §7, §10) — the end-to-end engine            #
 # --------------------------------------------------------------------------- #
+# Principal workflows are decision and monitoring records.  Source-owned
+# requests (procurement, facilities, admissions, HR, and student services)
+# must originate in their accountable module so the workflow carries a real
+# source record which can be reconciled and executed after approval.  A generic
+# Principal-started request would be an orphan and must fail closed.
+PRINCIPAL_INITIATABLE_WORKFLOWS: set[str] = set()
+
+
+def _initiable_workflow_processes(ctx):
+    if ctx.get("office_n") == 4:
+        return [proc for proc in APPROVAL_MATRIX if proc["key"] in PRINCIPAL_INITIATABLE_WORKFLOWS]
+    return APPROVAL_MATRIX
+
+
 @app.get("/api/workflows/processes")
 def workflow_processes(ctx=Depends(non_front_office)):
-    """Processes this office can initiate or participate in."""
-    return {"processes": APPROVAL_MATRIX}
+    """Return only workflow types that the calling office may initiate."""
+    return {"processes": _initiable_workflow_processes(ctx)}
 
 
 PROCESS_CATEGORY_MAP = {
@@ -851,6 +1107,77 @@ STAGE_META = {
 
 def _workflow_process(process_key: str):
     return next((p for p in APPROVAL_MATRIX if p["key"] == process_key), None)
+
+
+def _approval_limit_from_db(s, ctx, process_key):
+    """Approval thresholds are policy data, not a runtime constant."""
+    row = (s.query(ApprovalLimit)
+           .filter(ApprovalLimit.tenant_id == ctx.get("tenant_id", TENANT),
+                   ApprovalLimit.scope_level == ctx.get("scope_level", "campus"),
+                   ApprovalLimit.process == process_key)
+           .first())
+    return row.threshold if row else None
+
+
+def _workflow_stage_offices(proc, stage):
+    """Resolve named legacy matrix stages to offices; unknown labels fail closed."""
+    if not proc or stage < 0 or stage >= len(proc.get("chain", [])):
+        return set()
+    label = proc["chain"][stage].lower()
+    mapping = (("campus head", {3}), ("vice principal", {5}), ("principal", {4}),
+               ("dean", {6, 7, 8, 9}), ("finance", {22}), ("accounts", {23}),
+               ("hr", {24, 25}), ("purchase", {32}), ("procurement", {32}),
+               ("maintenance", {29}), ("system admin", {28}), ("security admin", {28}),
+               ("store", {33}), ("warden", {30}), ("transport", {31}),
+               ("admissions", {15}), ("exam", {16}), ("hod", {10}),
+               ("academic coordinator", {17}), ("chairman", {1}))
+    stage_offices = set()
+    for alternative in label.split("/"):
+        for token, offices in mapping:
+            if token in alternative:
+                stage_offices.update(offices)
+                break
+    return stage_offices
+
+
+def _workflow_visible_to(wf, proc, ctx):
+    if wf.tenant_id != ctx.get("tenant_id", TENANT):
+        return False
+    if ctx.get("office_n") == 4 and ctx.get("scope_level") == "campus":
+        # New workflows carry the source campus explicitly. Legacy rows can
+        # only be treated as campus records when their scope level is campus.
+        if wf.scope_level != "campus":
+            return False
+        if wf.scope_ref and wf.scope_ref != ctx.get("scope_ref"):
+            return False
+    if wf.initiator_id == ctx["sub"] or wf.office_n == ctx["office_n"]:
+        return True
+    return ctx["office_n"] in _workflow_stage_offices(proc, wf.current_stage)
+
+
+def _workflow_actionable_by(wf, proc, ctx):
+    """True only when this actor owns the current, non-terminal review stage.
+
+    Visibility is intentionally broader so users can read their own requests
+    and approval history.  The inbox must not use that broader rule: doing so
+    surfaces old records from the office that started a workflow and invites a
+    decision that the server must reject.
+    """
+    if not _workflow_visible_to(wf, proc, ctx):
+        return False
+    if wf.initiator_id == ctx["sub"]:
+        return False
+    if wf.state not in {"submitted", "under_review", "reviewed", "escalated"}:
+        return False
+    return ctx["office_n"] in _workflow_stage_offices(proc, wf.current_stage)
+
+
+def _workflow_available_actions(wf, proc, ctx):
+    """Server-calculated decision controls for an approval card or modal."""
+    if not ctx or not _workflow_actionable_by(wf, proc, ctx):
+        return []
+    candidates = ("review", "approve", "return", "reject", "escalate")
+    return [action for action in candidates if wf.state in WF_VALID.get(action, [])]
 
 
 def _semester_meta_for_date(dt_value: datetime | None):
@@ -930,7 +1257,7 @@ def _ensure_workflow_profile(
 ):
     profile = s.query(WorkflowProfile).filter(WorkflowProfile.workflow_id == wf.id).first()
     if profile is None:
-        profile = WorkflowProfile(id=f"profile_{wf.id}", tenant_id=TENANT, workflow_id=wf.id)
+        profile = WorkflowProfile(id=f"profile_{wf.id}", tenant_id=wf.tenant_id, workflow_id=wf.id)
         s.add(profile)
     fallback = _semester_meta_for_date(wf.created_at)
     semester_meta = _semester_meta_from_key(semester_key, wf.created_at) if semester_key else fallback
@@ -954,10 +1281,14 @@ def _start_workflow_record(
     semester_key: str = "",
     semester_label: str = "",
     notes: str = "",
+    source_type: str = "",
+    source_id: str = "",
 ):
     proc = _workflow_process(process_key)
     if not proc:
         raise HTTPException(404, "Unknown process")
+    if not any(candidate["key"] == process_key for candidate in _initiable_workflow_processes(ctx)):
+        raise HTTPException(403, "Your role cannot initiate this workflow; submit it through the responsible office")
     clean_title = (title or "").strip()
     if not clean_title:
         raise HTTPException(400, "Describe the request")
@@ -968,10 +1299,12 @@ def _start_workflow_record(
         # Students can still initiate their own requests (create=Limited).
         pass
     wf = WorkflowInstance(
-        id=uid(), tenant_id=TENANT, process_key=proc["key"], label=proc["label"],
+        id=uid(), tenant_id=ctx.get("tenant_id", TENANT), process_key=proc["key"], label=proc["label"],
         office_n=proc["office_n"], title=clean_title, state="submitted",
         amount=amount, initiator_id=u.id, initiator_name=p.name if p else u.username,
-        current_stage=1, scope_level=ctx.get("scope_level", "campus"))
+        current_stage=1, scope_level=ctx.get("scope_level", "campus"),
+        scope_ref=ctx.get("scope_ref", ""), version_no=1,
+        source_type=source_type.strip(), source_id=source_id.strip())
     s.add(wf)
     s.commit()
     _ensure_workflow_profile(s, wf, semester_key=semester_key, semester_label=semester_label, notes=notes)
@@ -986,11 +1319,14 @@ class StartWF(BaseModel):
     process_key: str
     title: str
     amount: float | None = None
+    source_type: str = ""
+    source_id: str = ""
 
 
 @app.post("/api/workflows/start")
 def start_workflow(body: StartWF, ctx=Depends(non_front_office), s=Depends(db)):
-    wf, proc = _start_workflow_record(s, ctx, body.process_key, body.title, body.amount)
+    wf, proc = _start_workflow_record(s, ctx, body.process_key, body.title, body.amount,
+                                      source_type=body.source_type, source_id=body.source_id)
     return _wf_payload(s, wf, proc)
     proc = next((p for p in APPROVAL_MATRIX if p["key"] == body.process_key), None)
     if not proc:
@@ -1024,9 +1360,16 @@ def _notify_stage(s, wf, proc):
         return
     label = proc["chain"][stage]
     recipients = []
-    owner = s.query(User).filter(User.office_n == proc["office_n"]).first()
-    if owner:
-        recipients.append(owner)
+    # The notification must follow the active approval stage, not the office
+    # that originally created the process.  The latter caused Finance-stage
+    # condonation work to be sent back to the HOD.
+    stage_offices = _workflow_stage_offices(proc, stage)
+    if stage_offices:
+        recipients.extend(s.query(User).filter(
+            User.tenant_id == wf.tenant_id,
+            User.status == "active",
+            User.office_n.in_(stage_offices),
+        ).all())
     # Fee structures are prepared by Finance and begin at the Principal/Campus
     # Head review stage.  Surface the request in the actual decision-makers'
     # notification inboxes as well as in their workflow inbox.
@@ -1039,8 +1382,21 @@ def _notify_stage(s, wf, proc):
         if not recipient or recipient.id in seen:
             continue
         seen.add(recipient.id)
-        notify(s, recipient.id, f"Action needed: {proc['label']}",
-               f"{wf.title} - awaiting {label}", severity="action")
+        title = f"Action needed: {proc['label']}"
+        body = f"{wf.title}; workflow {wf.id}; source {wf.source_type}:{wf.source_id} - awaiting {label}"
+        # A retry, reload, or repeated escalation must not fill an approver's
+        # inbox with identical open tasks.  The workflow card is the source of
+        # truth; retain a single unread notification until that task is read or
+        # moves to another stage.
+        already_notified = (s.query(Notification.id)
+                            .filter(Notification.tenant_id == wf.tenant_id,
+                                    Notification.user_id == recipient.id,
+                                    Notification.title == title,
+                                    Notification.body == body,
+                                    Notification.read == False)
+                            .first())
+        if not already_notified:
+            notify(s, recipient.id, title, body, severity="action")
     return
     # Notify the owning office head as a representative approver.
     owner = s.query(User).filter(User.office_n == proc["office_n"]).first()
@@ -1053,31 +1409,49 @@ class DecideWF(BaseModel):
     workflow_id: str
     action: str          # approve / reject / review / escalate / execute
     reason: str = ""
+    expected_version: int | None = None
 
 
 @app.post("/api/workflows/decide")
 def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)):
-    wf = s.query(WorkflowInstance).get(body.workflow_id)
-    if not wf:
+    wf = s.query(WorkflowInstance).filter(WorkflowInstance.id == body.workflow_id).with_for_update().first()
+    if not wf or wf.tenant_id != ctx.get("tenant_id", TENANT):
         raise HTTPException(404, "Workflow not found")
+    if body.expected_version is not None and body.expected_version != (wf.version_no or 1):
+        raise HTTPException(409, "Workflow changed; reload before deciding")
     proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
+    # Attendance corrections have an exact participant resolver (Coordinator,
+    # HOD, then VP) and their final decision updates the original attendance
+    # record.  Do not run this process through office 5's generic delegated
+    # approval profile: the configured reviewer acts in their own authority.
+    if wf.process_key == "attendance_correction":
+        correction = (s.query(D.AttendanceCorrectionRequest)
+                      .filter(D.AttendanceCorrectionRequest.workflow_instance_id == wf.id).first())
+        if not correction:
+            raise HTTPException(409, "Attendance correction workflow is missing its correction request")
+        row = decide_attendance_correction_request(s, correction.id, body.action, body.reason, ctx)
+        refreshed = s.query(WorkflowInstance).get(wf.id)
+        return {"decision": {"outcome": "ALLOW", "reason": "Attendance correction decision recorded", "authority": "Full", "escalate_to": None},
+                "workflow": _wf_payload(s, refreshed, proc, ctx)}
+    stage_offices = _workflow_stage_offices(proc, wf.current_stage)
+    if ctx["office_n"] not in stage_offices:
+        raise HTTPException(403, "Only the current workflow stage owner may act")
     u = s.query(User).get(ctx["sub"])
     p = s.query(Person).get(u.person_id)
     o = office(ctx["office_n"])
 
     # Resolve RBAC authority for this action.
-    verb = "approve" if body.action in ("approve", "execute") else body.action
+    verb = "approve" if body.action in ("approve", "execute", "return") else body.action
     if body.action == "reject":
         verb = "reject"
     rbac = rbac_for(ctx["office_n"], o["level"], verb if verb in VERBS else "approve")
 
     # Approval limit for this process & the actor's scope.
-    limit = approval_limit_for(ctx.get("scope_level", "campus"), wf.process_key) \
-        if proc and proc.get("amount") else None
+    limit = _approval_limit_from_db(s, ctx, wf.process_key) if proc and proc.get("amount") else None
 
     # Run the authority gate (Document §7 steps 8-13).
     dec = authorize(
-        ctx=ctx, action=body.action if body.action in VERBS else "approve",
+        ctx=ctx, action=body.action if body.action in VERBS or body.action == "return" else "approve",
         resource=f"workflow:{wf.process_key}",
         rbac_authority=rbac,
         workflow_state=wf.state,
@@ -1089,9 +1463,14 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
         # Retaining the Finance Manager's university scope here would deny the
         # campus-scoped Principal, including for records submitted before the
         # workflow scope was corrected.
-        target_scope_level="campus" if wf.process_key == "fee_structure" else wf.scope_level,
+        target_scope_level="campus" if wf.process_key in {"fee_structure", "attendance_condonation"} else wf.scope_level,
         escalate_to=proc["escalation"] if proc else None,
     )
+    # A rejected authorization is not a workflow decision.  Fail before any
+    # Approval/audit/outbox row is written, so callers receive an explicit
+    # authorization error and failed attempts cannot masquerade as history.
+    if dec.outcome == DENY:
+        raise HTTPException(403, dec.reason)
 
     # Record the approval decision.
     stage_label = proc["chain"][min(wf.current_stage, len(proc["chain"]) - 1)] if proc else body.action
@@ -1105,6 +1484,8 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
     if dec.outcome == ALLOW:
         if body.action == "reject":
             wf.state = "rejected"
+        elif body.action == "return":
+            wf.state = "returned"
         elif body.action == "execute":
             wf.state = "executed"
         elif body.action == "review":
@@ -1125,17 +1506,11 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
     else:  # DENY
         pass  # state unchanged; decision recorded
 
-    if wf.process_key == "fee_structure":
-        structure = s.query(D.FeeStructure).filter(D.FeeStructure.workflow_id == wf.id).first()
-        if structure:
-            if wf.state == "approved":
-                structure.status = "APPROVED"
-            elif wf.state == "rejected":
-                structure.status = "REJECTED"
-            elif wf.state in ("under_review", "reviewed", "escalated"):
-                structure.status = "UNDER_REVIEW"
-            structure.updated_at = datetime.utcnow()
+    if dec.outcome == ALLOW and body.action in {"approve", "reject", "return"}:
+        from workflow_dispatcher import apply_decision
+        apply_decision(s, wf, body.action, u.id, p.name if p else u.username)
 
+    wf.version_no = (wf.version_no or 1) + 1
     wf.updated_at = datetime.utcnow()
     s.commit()
 
@@ -1151,10 +1526,10 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
     if proc:
         _notify_stage(s, wf, proc)
 
-    return {"decision": dec.as_dict(), "workflow": _wf_payload(s, wf, proc)}
+    return {"decision": dec.as_dict(), "workflow": _wf_payload(s, wf, proc, ctx)}
 
 
-def _wf_payload(s, wf, proc):
+def _wf_payload(s, wf, proc, ctx=None):
     approvals = (s.query(Approval).filter(Approval.workflow_id == wf.id)
                  .order_by(Approval.created_at).all())
     profile = s.query(WorkflowProfile).filter(WorkflowProfile.workflow_id == wf.id).first()
@@ -1170,12 +1545,20 @@ def _wf_payload(s, wf, proc):
     return {
         "id": wf.id, "process_key": wf.process_key, "label": wf.label,
         "office_n": wf.office_n, "title": wf.title, "state": wf.state,
-        "amount": wf.amount, "initiator": wf.initiator_name,
+        "amount": wf.amount, "initiator_id": wf.initiator_id, "initiator": wf.initiator_name,
         "current_stage": wf.current_stage, "escalated": wf.escalated,
         "scope_level": wf.scope_level,
+        "scope_ref": getattr(wf, "scope_ref", "") or "",
+        "version_no": getattr(wf, "version_no", 1) or 1,
+        "available_actions": _workflow_available_actions(wf, proc, ctx),
+        "current_owner": (proc["chain"][wf.current_stage] if proc and 0 <= wf.current_stage < len(proc["chain"]) else ""),
+        "campus": wf.scope_ref if wf.scope_level == "campus" else "",
+        "updated_at": wf.updated_at.isoformat() if wf.updated_at else None,
+        "source_type": getattr(wf, "source_type", "") or "",
+        "source_id": getattr(wf, "source_id", "") or "",
         "request_student": request_student, "correction_id": correction_id,
         "chain": proc["chain"] if proc else [],
-        "escalation": proc["escalation"] if proc else "",
+        "escalation": "" if wf.process_key == "attendance_correction" else (proc["escalation"] if proc else ""),
         "created_at": wf.created_at.isoformat(),
         "profile": {
             "semester_key": profile.semester_key if profile else "",
@@ -1274,52 +1657,44 @@ def _visible_page_numbers(page: int, total_pages: int):
 
 @app.get("/api/workflows")
 def list_workflows(scope: str = "all", ctx=Depends(non_front_office), s=Depends(db)):
-    q = s.query(WorkflowInstance)
-    pending_states = ["submitted", "under_review", "reviewed", "escalated"]
+    q = s.query(WorkflowInstance).filter(WorkflowInstance.tenant_id == ctx.get("tenant_id", TENANT))
     if scope == "mine":
+        q = q.filter(WorkflowInstance.initiator_id == ctx["sub"])
+        rows = q.order_by(desc(WorkflowInstance.updated_at)).limit(100).all()
         rows = (q.filter(WorkflowInstance.initiator_id == ctx["sub"])
                 .order_by(desc(WorkflowInstance.updated_at)).limit(100).all())
     elif scope == "inbox":
-        own_rows = (q.filter(WorkflowInstance.office_n == ctx["office_n"],
-                             WorkflowInstance.state.in_(pending_states))
-                     .order_by(desc(WorkflowInstance.updated_at)).all())
-        if ctx["office_n"] in (3, 4):
-            fee_rows = (q.filter(WorkflowInstance.process_key == "fee_structure",
-                                 WorkflowInstance.state.in_(pending_states))
-                        .order_by(desc(WorkflowInstance.updated_at)).all())
-            own_rows = list({row.id: row for row in [*own_rows, *fee_rows]}.values())
+        candidates = q.order_by(desc(WorkflowInstance.updated_at)).limit(250).all()
+        rows = [row for row in candidates if _workflow_actionable_by(row, _workflow_process(row.process_key), ctx)]
         delegated = active_delegations_for(s, ctx["sub"])
-        if not delegated:
-            rows = own_rows[:100]
-        else:
-            candidate_rows = (s.query(WorkflowInstance)
-                              .filter(WorkflowInstance.state.in_(pending_states))
-                              .order_by(desc(WorkflowInstance.updated_at)).limit(220).all())
-            seen = {row.id for row in own_rows}
-            rows = list(own_rows)
-            for wf in candidate_rows:
+        if delegated:
+            seen = {row.id for row in rows}
+            for wf in candidates:
                 if wf.id in seen:
                     continue
                 if _delegation_matches_workflow(delegated, wf, ctx.get("scope_level", "individual")):
                     rows.append(wf)
                     seen.add(wf.id)
-            rows = sorted(rows, key=lambda item: item.updated_at or item.created_at, reverse=True)[:100]
+        rows = sorted(rows, key=lambda item: item.updated_at or item.created_at, reverse=True)[:100]
     else:
-        rows = q.order_by(desc(WorkflowInstance.updated_at)).limit(100).all()
+        candidates = q.order_by(desc(WorkflowInstance.updated_at)).limit(250).all()
+        rows = [row for row in candidates if _workflow_visible_to(row, _workflow_process(row.process_key), ctx)][:100]
     out = []
     for wf in rows:
         proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
-        out.append(_wf_payload(s, wf, proc))
+        out.append(_wf_payload(s, wf, proc, ctx))
     return {"workflows": out}
 
 
 @app.get("/api/workflows/{wid}")
 def get_workflow(wid: str, ctx=Depends(non_front_office), s=Depends(db)):
     wf = s.query(WorkflowInstance).get(wid)
-    if not wf:
+    if not wf or wf.tenant_id != ctx.get("tenant_id", TENANT):
         raise HTTPException(404, "Not found")
     proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
-    return _wf_payload(s, wf, proc)
+    if not _workflow_visible_to(wf, proc, ctx):
+        raise HTTPException(403, "Workflow is outside your scope")
+    return _wf_payload(s, wf, proc, ctx)
 
 
 class ChairmanStartWF(BaseModel):
@@ -2020,8 +2395,13 @@ def read_notification(nid: str, ctx=Depends(auth), s=Depends(db)):
 # --------------------------------------------------------------------------- #
 @app.get("/api/audit")
 def get_audit(limit: int = 60, ctx=Depends(non_front_office), s=Depends(db)):
-    rows = s.query(AuditLog).order_by(desc(AuditLog.id)).limit(limit).all()
+    rows = (s.query(AuditLog)
+            .filter(AuditLog.tenant_id == ctx.get("tenant_id", TENANT))
+            .order_by(desc(AuditLog.id))
+            .limit(limit)
+            .all())
     return {"entries": [{"id": r.id, "actor": r.actor_name or r.actor, "office_n": r.office_n,
+                         "campus": ctx.get("scope_ref", "") if ctx.get("office_n") == 4 else "",
                          "action": r.action, "entity": r.entity, "new_state": r.new_state,
                          "outcome": r.new_state, "reason": r.reason, "auth_level": r.auth_level,
                          "hash": r.hash, "prev_hash": r.prev_hash,
@@ -2030,7 +2410,10 @@ def get_audit(limit: int = 60, ctx=Depends(non_front_office), s=Depends(db)):
 
 @app.get("/api/audit/verify")
 def verify_audit(ctx=Depends(non_front_office), s=Depends(db)):
-    rows = s.query(AuditLog).order_by(AuditLog.id).all()
+    rows = (s.query(AuditLog)
+            .filter(AuditLog.tenant_id == ctx.get("tenant_id", TENANT))
+            .order_by(AuditLog.id)
+            .all())
     prev = "0" * 64
     broken = None
     for r in rows:
@@ -2049,31 +2432,43 @@ def verify_audit(ctx=Depends(non_front_office), s=Depends(db)):
 # --------------------------------------------------------------------------- #
 @app.get("/api/dashboard")
 def dashboard(ctx=Depends(non_front_office), s=Depends(db)):
+    tenant_id = ctx.get("tenant_id", TENANT)
     o = office(ctx["office_n"])
-    mine = s.query(WorkflowInstance).filter(WorkflowInstance.initiator_id == ctx["sub"]).count()
-    inbox = s.query(WorkflowInstance).filter(
-        WorkflowInstance.office_n == ctx["office_n"],
-        WorkflowInstance.state.in_(["submitted", "under_review", "reviewed", "escalated"])).count()
-    pending = s.query(WorkflowInstance).filter(
-        WorkflowInstance.state.in_(["submitted", "under_review", "reviewed"])).count()
-    approved = s.query(WorkflowInstance).filter(WorkflowInstance.state == "approved").count()
-    escalated = s.query(WorkflowInstance).filter(WorkflowInstance.state == "escalated").count()
-    unread = s.query(Notification).filter(Notification.user_id == ctx["sub"],
-                                          Notification.read == False).count()
+    mine = (s.query(WorkflowInstance)
+            .filter(WorkflowInstance.tenant_id == tenant_id, WorkflowInstance.initiator_id == ctx["sub"]))
+    inbox = (s.query(WorkflowInstance)
+             .filter(WorkflowInstance.tenant_id == tenant_id,
+                     WorkflowInstance.office_n == ctx["office_n"],
+                     WorkflowInstance.state.in_(["submitted", "under_review", "reviewed", "escalated"])))
+    pending = (s.query(WorkflowInstance)
+               .filter(WorkflowInstance.tenant_id == tenant_id,
+                       WorkflowInstance.state.in_(["submitted", "under_review", "reviewed"])))
+    approved = (s.query(WorkflowInstance)
+                .filter(WorkflowInstance.tenant_id == tenant_id,
+                        WorkflowInstance.state == "approved"))
+    escalated = (s.query(WorkflowInstance)
+                .filter(WorkflowInstance.tenant_id == tenant_id,
+                        WorkflowInstance.state == "escalated"))
+    unread = (s.query(Notification)
+              .filter(Notification.tenant_id == tenant_id,
+                      Notification.user_id == ctx["sub"],
+                      Notification.read == False))
     # processes this office owns
     owned = [p for p in APPROVAL_MATRIX if p["office_n"] == ctx["office_n"]]
     return {
         "office": o["name"], "level": o["level"],
-        "kpis": {"my_requests": mine, "inbox": inbox, "pending_all": pending,
-                 "approved": approved, "escalated": escalated, "unread": unread},
+        "kpis": {"my_requests": mine.count(), "inbox": inbox.count(), "pending_all": pending.count(),
+                 "approved": approved.count(), "escalated": escalated.count(), "unread": unread.count()},
         "owned_processes": owned,
-        "workflows_by_state": _wf_state_counts(s),
+        "workflows_by_state": _wf_state_counts(s, tenant_id),
     }
 
 
-def _wf_state_counts(s):
-    rows = s.query(WorkflowInstance.state, func.count(WorkflowInstance.id)).group_by(
-        WorkflowInstance.state).all()
+def _wf_state_counts(s, tenant_id: str | None = None):
+    query = s.query(WorkflowInstance.state, func.count(WorkflowInstance.id)).group_by(WorkflowInstance.state)
+    if tenant_id is not None:
+        query = query.filter(WorkflowInstance.tenant_id == tenant_id)
+    rows = query.all()
     return {state: cnt for state, cnt in rows}
 
 

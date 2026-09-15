@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
-import { api } from '../api'
-import { Modal, PageHead, Spinner } from './kit'
+import { useEffect, useMemo, useState } from "react";
+import { api } from "../api";
+import { Modal, PageHead, Spinner } from "./kit";
 
 const emptyFilters={academicYear:'',program:'',studyYear:'',semester:'',section:'',risk:''}
 export default function Students({ caps: _caps }: { caps?: any }){
@@ -19,9 +19,223 @@ export default function Students({ caps: _caps }: { caps?: any }){
  {mode==='overview'?<Overview s={summary} onList={()=>setMode('list')} onAnalysis={()=>setMode('analysis')}/>:mode==='analysis'?<Analysis s={summary} back={()=>setMode('overview')}/>:<List rows={rows} data={data} q={q} dept={dept} page={page} load={load} setPage={setPage} open={(x:any)=>api.studentProfile(x.id).then(p=>{setProfile(p);setFull(false)})}/>} 
  {profile&&<Modal title={full?'Student 360°':'Student Profile'} onClose={()=>setProfile(null)} footer={!full?<button className="btn btn-crimson" onClick={()=>setFull(true)}>View Full Profile</button>:undefined}><Profile data={profile} full={full}/></Modal>}</div>
 }
-function Metric({n,t}:any){return <div className="students-kpi"><div><span>{t}</span><b>{n}</b></div></div>}
-function Overview({s,onList,onAnalysis}:any){return <div className="students-overview"><section className="card card-pad"><h3>Backlog Status</h3><div className="grid-3"><div className="snap"><span>Students with Current Backlogs</span><b>{s.backlogs}</b></div><div className="snap"><span>No Current Backlog</span><b>{s.no_backlogs}</b></div><button className="btn btn-out" onClick={onAnalysis}>View Backlog Analysis</button></div></section><section className="card card-pad"><h3>Academic & Attendance Coverage</h3><p>Attendance is available for {s.attendance_available} students. Backlog values are derived from published subject outcomes; development sample outcomes are labelled in the profile.</p><button className="btn btn-crimson" onClick={onList}>Browse Student List</button></section></div>}
-function Analysis({s,back}:any){return <div className="card card-pad"><div className="card-h"><h3>Backlog Analysis</h3><button className="btn btn-out" onClick={back}>Back to Overview</button></div><p>Current backlog students: <b>{s.backlogs}</b>. Department × Semester drill-down requires broader published result coverage. Existing development samples are shown only in individual profiles and are not used to fabricate a matrix.</p></div>}
-function List({rows,data,q,dept,page,load,setPage,open}:any){return <div className="students-table-card"><div className="students-table-head"><span>Showing {rows.length?(data.page-1)*data.page_size+1:0}–{Math.min(data.page*data.page_size,data.total)} of {data.total}</span><span>Read-only Principal view</span></div><div className="tbl-scroll"><table className="tbl students-table"><thead><tr><th>Roll No.</th><th>Student</th><th>Program</th><th>Department</th><th>Year</th><th>Semester</th><th>Section</th><th>Attendance</th><th>CGPA</th><th>Current Backlogs</th><th>Backlog Status</th><th>Risk</th><th>Action</th></tr></thead><tbody>{rows.map((x:any)=><tr key={x.id}><td className="mono">{x.roll_no}</td><td><b>{x.name}</b><small>{x.email||'Unavailable'}</small></td><td>{x.program||'Unavailable'}</td><td>{x.department_name||x.dept}</td><td>{Math.ceil(x.semester/2)}</td><td>{x.semester}</td><td>{x.section}</td><td>{x.attendance_pct==null?'Unavailable':`${x.attendance_pct}%`}</td><td>{Number(x.cgpa).toFixed(2)}</td><td>{x.current_backlogs}</td><td>{x.backlog_status}</td><td><Risk x={x}/></td><td><button className="btn btn-out student-view" onClick={()=>open(x)}>View</button></td></tr>)}</tbody></table></div><div className="student-pagination"><button className="btn btn-out" disabled={data.page<=1} onClick={()=>{const n=page-1;setPage(n);load(q,dept,n)}}>Previous</button><span>Page {data.page} of {data.total_pages}</span><button className="btn btn-out" disabled={data.page>=data.total_pages} onClick={()=>{const n=page+1;setPage(n);load(q,dept,n)}}>Next</button></div></div>}
-function Risk({x}:any){const label=x.current_backlogs?'At Risk':x.cgpa<6.5?'Academic Risk':x.attendance_pct!=null&&x.attendance_pct<75?'Attendance Risk':'Normal';return <span className="student-risk warning">{label}</span>}
-function Profile({data,full}:any){const s=data.student;return <div className="calendar-detail"><h3>{s.name}</h3><div className="snap"><span>Roll no. / Status</span><b>{s.roll_no} · {s.status}</b></div><div className="snap"><span>Academic Context</span><b>{s.program||'Unavailable'} · {s.department||'Unavailable'} · Semester {s.semester} · Section {s.section}</b></div><div className="snap"><span>Attendance / CGPA / Current Backlogs</span><b>{s.attendance_pct==null?'Unavailable':`${s.attendance_pct}%`} / {Number(s.cgpa).toFixed(2)} / {s.current_backlogs}</b></div>{full&&<><h4>Academic & Backlog History</h4>{data.backlog_history.length?data.backlog_history.map((x:any)=><div className="snap" key={`${x.subject_code}-${x.attempt}`}><span>{x.subject_code} · attempt {x.attempt} · {x.source}</span><b>{x.outcome}</b></div>):<p>No published subject result history is available.</p>}<h4>Attendance</h4><p>{data.attendance.length?`${data.attendance.length} recorded attendance entries available.`:'No attendance records available.'}</p><h4>Welfare / Discipline & Grievances</h4><p>{data.limitations.welfare}</p></>}</div>}
+function Metric({ n, t }: any) {
+  return (
+    <div className="students-kpi">
+      <div>
+        <span>{t}</span>
+        <b>{n}</b>
+      </div>
+    </div>
+  );
+}
+function Overview({ s, onList, onAnalysis }: any) {
+  return (
+    <div className="students-overview">
+      <section className="card card-pad">
+        <h3>Backlog Status</h3>
+        <div className="grid-3">
+          <div className="snap">
+            <span>Students with Current Backlogs</span>
+            <b>{s.backlogs}</b>
+          </div>
+          <div className="snap">
+            <span>No Current Backlog</span>
+            <b>{s.no_backlogs}</b>
+          </div>
+          <button className="btn btn-out" onClick={onAnalysis}>
+            View Backlog Analysis
+          </button>
+        </div>
+      </section>
+      <section className="card card-pad">
+        <h3>Academic & Attendance Coverage</h3>
+        <p>
+          Attendance is available for {s.attendance_available} students. Backlog
+          values are derived from published subject outcomes; development sample
+          outcomes are labelled in the profile.
+        </p>
+        <button className="btn btn-crimson" onClick={onList}>
+          Browse Student List
+        </button>
+      </section>
+    </div>
+  );
+}
+function Analysis({ s, back }: any) {
+  return (
+    <div className="card card-pad">
+      <div className="card-h">
+        <h3>Backlog Analysis</h3>
+        <button className="btn btn-out" onClick={back}>
+          Back to Overview
+        </button>
+      </div>
+      <p>
+        Current backlog students: <b>{s.backlogs}</b>. Department × Semester
+        drill-down requires broader published result coverage. Existing
+        development samples are shown only in individual profiles and are not
+        used to fabricate a matrix.
+      </p>
+    </div>
+  );
+}
+function List({ rows, data, q, dept, page, load, setPage, open }: any) {
+  return (
+    <div className="students-table-card">
+      <div className="students-table-head">
+        <span>
+          Showing {rows.length ? (data.page - 1) * data.page_size + 1 : 0}–
+          {Math.min(data.page * data.page_size, data.total)} of {data.total}
+        </span>
+        <span>Read-only Principal view</span>
+      </div>
+      <div className="tbl-scroll">
+        <table className="tbl students-table">
+          <thead>
+            <tr>
+              <th>Roll No.</th>
+              <th>Student</th>
+              <th>Program</th>
+              <th>Department</th>
+              <th>Year</th>
+              <th>Semester</th>
+              <th>Section</th>
+              <th>Attendance</th>
+              <th>CGPA</th>
+              <th>Current Backlogs</th>
+              <th>Backlog Status</th>
+              <th>Risk</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((x: any) => (
+              <tr key={x.id}>
+                <td className="mono">{x.roll_no}</td>
+                <td>
+                  <b>{x.name}</b>
+                  <small>{x.email || "Unavailable"}</small>
+                </td>
+                <td>{x.program || "Unavailable"}</td>
+                <td>{x.department_name || x.dept}</td>
+                <td>{Math.ceil(x.semester / 2)}</td>
+                <td>{x.semester}</td>
+                <td>{x.section}</td>
+                <td>
+                  {x.attendance_pct == null
+                    ? "Unavailable"
+                    : `${x.attendance_pct}%`}
+                </td>
+                <td>{Number(x.cgpa).toFixed(2)}</td>
+                <td>{x.current_backlogs}</td>
+                <td>{x.backlog_status}</td>
+                <td>
+                  <Risk x={x} />
+                </td>
+                <td>
+                  <button
+                    className="btn btn-out student-view"
+                    onClick={() => open(x)}
+                  >
+                    View
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="student-pagination">
+        <button
+          className="btn btn-out"
+          disabled={data.page <= 1}
+          onClick={() => {
+            const n = page - 1;
+            setPage(n);
+            load(q, dept, n);
+          }}
+        >
+          Previous
+        </button>
+        <span>
+          Page {data.page} of {data.total_pages}
+        </span>
+        <button
+          className="btn btn-out"
+          disabled={data.page >= data.total_pages}
+          onClick={() => {
+            const n = page + 1;
+            setPage(n);
+            load(q, dept, n);
+          }}
+        >
+          Next
+        </button>
+      </div>
+    </div>
+  );
+}
+function Risk({ x }: any) {
+  const label = x.current_backlogs
+    ? "At Risk"
+    : x.cgpa < 6.5
+      ? "Academic Risk"
+      : x.attendance_pct != null && x.attendance_pct < 75
+        ? "Attendance Risk"
+        : "Normal";
+  return <span className="student-risk warning">{label}</span>;
+}
+function Profile({ data, full }: any) {
+  const s = data.student;
+  return (
+    <div className="calendar-detail">
+      <h3>{s.name}</h3>
+      <div className="snap">
+        <span>Roll no. / Status</span>
+        <b>
+          {s.roll_no} · {s.status}
+        </b>
+      </div>
+      <div className="snap">
+        <span>Academic Context</span>
+        <b>
+          {s.program || "Unavailable"} · {s.department || "Unavailable"} ·
+          Semester {s.semester} · Section {s.section}
+        </b>
+      </div>
+      <div className="snap">
+        <span>Attendance / CGPA / Current Backlogs</span>
+        <b>
+          {s.attendance_pct == null ? "Unavailable" : `${s.attendance_pct}%`} /{" "}
+          {Number(s.cgpa).toFixed(2)} / {s.current_backlogs}
+        </b>
+      </div>
+      {full && (
+        <>
+          <h4>Academic & Backlog History</h4>
+          {data.backlog_history.length ? (
+            data.backlog_history.map((x: any) => (
+              <div className="snap" key={`${x.subject_code}-${x.attempt}`}>
+                <span>
+                  {x.subject_code} · attempt {x.attempt} · {x.source}
+                </span>
+                <b>{x.outcome}</b>
+              </div>
+            ))
+          ) : (
+            <p>No published subject result history is available.</p>
+          )}
+          <h4>Attendance</h4>
+          <p>
+            {data.attendance.length
+              ? `${data.attendance.length} recorded attendance entries available.`
+              : "No attendance records available."}
+          </p>
+          <h4>Welfare / Discipline & Grievances</h4>
+          <p>{data.limitations.welfare}</p>
+        </>
+      )}
+    </div>
+  );
+}

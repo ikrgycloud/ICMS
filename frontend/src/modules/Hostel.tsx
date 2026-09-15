@@ -27,16 +27,17 @@ export default function Hostel({ caps }: { caps: any }) {
         <div className="card-h"><h3>Allocation requests</h3></div>
         <div className="tbl-scroll">
           <table className="tbl">
-            <thead><tr><th>Student</th><th>Status</th><th style={{ textAlign: 'right' }}></th></tr></thead>
+            <thead><tr><th>Applicant / Student</th><th>Academic placement</th><th>Status</th><th style={{ textAlign: 'right' }}></th></tr></thead>
             <tbody>
               {data.requests.map((r: any) => (
                 <tr key={r.id}>
                   <td><b>{r.student}</b></td>
+                  <td>{r.section ? `${r.campus} · Section ${r.section}${r.group ? ` · ${r.group}` : ''}` : 'Awaiting Admission Office allocation'}</td>
                   <td><span className={`pill s-${r.status}`}>{r.status}</span></td>
                   <td style={{ textAlign: 'right' }}><button className="btn btn-sm btn-teal" disabled={!caps.allocate} onClick={() => allocate(r.id)}>Allocate room</button></td>
                 </tr>
               ))}
-              {data.requests.length === 0 && <tr><td colSpan={3}><div className="empty">No pending requests</div></td></tr>}
+              {data.requests.length === 0 && <tr><td colSpan={4}><div className="empty">No pending requests</div></td></tr>}
             </tbody>
           </table>
         </div>

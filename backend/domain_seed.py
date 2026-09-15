@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import func
 
 from database import (SessionLocal, TENANT, engine, DEMO_USERNAMES, CAMPUS_SCOPES,
-                      slug, ensure_additive_schema, ensure_versioned_migrations)
+                      slug, ensure_versioned_migrations)
 from authority import pwhash
 from matrices import APPROVAL_MATRIX
 from models import (Base, Person, Role, User, UserRole, Delegation, DelegationPolicy, DelegationProfile,
@@ -84,6 +84,20 @@ COURSE_BANK = {
         ("HS101", "Technical Communication", 2, 1),
         ("HS201", "Economics", 3, 3),
     ],
+}
+
+# Complete the taught curriculum across both odd and even semesters.  These
+# records are added only when absent, so existing institution-created courses
+# are never overwritten on subsequent application starts.
+EVEN_SEMESTER_COURSE_BANK = {
+    "CSE": [("CS102", "Discrete Mathematics for Computing", 4, 2), ("CS203", "Object-Oriented Programming", 4, 4), ("CS304", "Software Engineering", 3, 6), ("CS406", "Capstone Project", 4, 8)],
+    "ECE": [("EC102", "Network Analysis", 4, 2), ("EC202", "Analog Communications", 4, 4), ("EC302", "Embedded Systems", 3, 6), ("EC402", "Communication Systems Project", 4, 8)],
+    "MEC": [("ME102", "Engineering Drawing", 3, 2), ("ME202", "Manufacturing Processes", 4, 4), ("ME302", "Machine Design", 4, 6), ("ME402", "Mechanical Design Project", 4, 8)],
+    "CIV": [("CE102", "Building Materials", 3, 2), ("CE202", "Concrete Technology", 3, 4), ("CE302", "Transportation Engineering", 4, 6), ("CE402", "Civil Engineering Project", 4, 8)],
+    "EEE": [("EE102", "Electronic Devices", 4, 2), ("EE202", "Control Systems", 4, 4), ("EE302", "Power Electronics", 4, 6), ("EE402", "Electrical Systems Project", 4, 8)],
+    "MAT": [("MA102", "Programming for Mathematics", 3, 2), ("MA202", "Numerical Methods", 4, 4), ("MA302", "Operations Analytics", 3, 6), ("MA402", "Mathematics Computing Project", 4, 8)],
+    "MGT": [("MG102", "Business Communication", 3, 2), ("MG202", "Marketing Management", 3, 4), ("MG302", "Business Analytics", 4, 6), ("MG402", "Management Capstone", 4, 8)],
+    "HSS": [("HS102", "Professional Ethics", 2, 2), ("HS202", "Environmental Studies", 2, 4), ("HS302", "Research Methods", 3, 6), ("HS402", "Social Impact Project", 3, 8)],
 }
 
 DEMO_ATTENDANCE_TODAY = date(2026, 8, 25)
@@ -579,6 +593,23 @@ def _ensure_student_portal_demo_sections(s, dept_id: str):
         course.credits = spec["credits"]
         course.semester = spec["semester"]
         course.description = f"{spec['title']} core course for semester {spec['semester']}."
+        if not course.program_id:
+            program = (s.query(D.Program).filter(D.Program.tenant_id == TENANT,
+                                                 D.Program.dept_id == dept_id)
+                       .order_by(D.Program.id).first())
+            if program:
+                course.program_id = program.id
+
+        offering_id = f"offering_{course.id}_{term.replace('-', '_').lower()}"
+        offering = _ensure(
+            s, D.CourseOffering, offering_id,
+            lambda: D.CourseOffering(
+                id=offering_id, tenant_id=TENANT, course_id=course.id,
+                program_id=course.program_id, academic_year=f"{DEMO_ATTENDANCE_TODAY.year}-{str(DEMO_ATTENDANCE_TODAY.year + 1)[-2:]}",
+                term=term, semester=course.semester, status="Published",
+                created_by="seed", updated_by="seed",
+            ),
+        ) if course.program_id else None
 
         faculty = _ensure(
             s, D.StaffMember, spec["faculty_id"],
@@ -619,6 +650,7 @@ def _ensure_student_portal_demo_sections(s, dept_id: str):
             ),
         )
         section.course_id = course.id
+        section.offering_id = offering.id if offering else None
         section.dept_id = dept_id
         section.term = term
         section.section_code = spec["section_code"]
@@ -1524,6 +1556,76 @@ def _seed_calendar_data(s):
     s.commit()
 
 
+def _seed_dean_dashboard_data(s):
+    """Seed realistic curriculum and timetable readiness records for the Dean view."""
+    sample_course = s.query(D.Course).filter(D.Course.tenant_id == TENANT).order_by(D.Course.code).first()
+    sample_payload = {
+        "course_id": "",
+        "dept_id": sample_course.dept_id if sample_course else "",
+        "code": f"{sample_course.code}-REV" if sample_course else "ACAD-REV",
+        "title": sample_course.title if sample_course else "Academic Curriculum Revision",
+        "credits": sample_course.credits if sample_course else 3,
+        "semester": sample_course.semester if sample_course else 1,
+        "regulation": sample_course.regulation if sample_course else "R2023",
+        "course_type": sample_course.course_type if sample_course else "Core",
+        "category": sample_course.category if sample_course else "Professional Core",
+        "ltp": sample_course.ltp if sample_course else "3-0-0",
+        "prerequisite": sample_course.prerequisite if sample_course else "",
+        "description": "Seeded curriculum revision for Dean approval.",
+    }
+    curriculum_specs = [
+        ("dean_curriculum_approved", "B.Tech curriculum revision approved", "APPROVED", 12),
+        ("dean_curriculum_review", "B.Sc curriculum refresh for review", "SUBMITTED", 8),
+        ("dean_curriculum_returned", "M.Tech elective basket revision", "RETURNED", -4),
+        ("dean_curriculum_overdue", "Common first-year curriculum mapping", "SUBMITTED", -18),
+    ]
+    departments = s.query(D.Department).filter(D.Department.tenant_id == TENANT).all()
+    department_id = departments[0].id if departments else None
+    now = datetime.utcnow()
+    for proposal_id, title, state, due_days in curriculum_specs:
+        proposal = s.get(D.AcademicProposal, proposal_id)
+        payload = {**sample_payload, "title": title, "seed": True}
+        if proposal is None:
+            proposal = D.AcademicProposal(
+                id=proposal_id, tenant_id=TENANT, proposal_type="curriculum", title=title,
+                scope_level="department", scope_ref=department_id or "", dept_id=department_id,
+                state=state, version_no=1, status_version=1 if state != "DRAFT" else 0,
+                submitted_by="user_academic_coordinator", submitted_office_n=10,
+                assigned_to_office_n=6, due_at=now + timedelta(days=due_days),
+                created_at=now, updated_at=now,
+            )
+            s.add(proposal)
+            s.add(D.AcademicProposalVersion(
+                id=f"{proposal_id}_v1", tenant_id=TENANT, proposal_id=proposal_id,
+                version_no=1, payload_json=json.dumps(payload),
+                rationale="Seeded Dean dashboard demonstration record.",
+                created_by="user_academic_coordinator", created_at=now,
+            ))
+        else:
+            version = s.query(D.AcademicProposalVersion).filter(
+                D.AcademicProposalVersion.proposal_id == proposal_id,
+                D.AcademicProposalVersion.version_no == proposal.version_no,
+            ).first()
+            if version and version.payload_json and '"seed": true' in version.payload_json:
+                version.payload_json = json.dumps(payload)
+
+    sections = s.query(D.Section).filter(D.Section.tenant_id == TENANT).order_by(D.Section.id).all()
+    completion_specs = [("completed", 12, 100), ("in_progress", 10, 55)]
+    completion_index = 0
+    for status, count, percentage in completion_specs:
+        for section in sections[completion_index:completion_index + count]:
+            completion_id = f"dean_completion_{section.id}"
+            if s.get(D.CourseCompletion, completion_id) is None:
+                s.add(D.CourseCompletion(
+                    id=completion_id, tenant_id=TENANT, section_id=section.id,
+                    term=section.term, completion_pct=percentage,
+                    verified_by="Dean Academics Office" if status == "completed" else "",
+                    status=status, updated_at=now,
+                ))
+        completion_index += count
+    s.commit()
+
+
 def _seed_core_domain(s):
     if s.query(D.Student).count() > 0:
         return
@@ -1586,13 +1688,24 @@ def _seed_core_domain(s):
     # so persist courses and faculty before creating sections and students.
     s.flush()
 
+    offering_ids = {}
+    for cid, did, code, sem in course_rows:
+        offering_id = f"offering_{cid}_{today.year}_odd"
+        offering_ids[cid] = offering_id
+        s.add(D.CourseOffering(
+            id=offering_id, tenant_id=TENANT, course_id=cid,
+            program_id=f"prog_{code.lower()}_btech", academic_year=fiscal_year,
+            term=term, semester=sem, status="Published", created_by="seed", updated_by="seed",
+        ))
+    s.flush()
+
     section_rows = []
     for cid, did, code, sem in course_rows:
         for sec_code in (["A", "B"] if R.random() > 0.5 else ["A"]):
             fid, _ = R.choice(faculty_by_dept[code])
             sid = f"sec_{cid.split('_')[1]}_{sec_code.lower()}"
             section_rows.append((sid, cid, did, code, sem, fid, sec_code))
-            s.add(D.Section(id=sid, tenant_id=TENANT, course_id=cid, dept_id=did,
+            s.add(D.Section(id=sid, tenant_id=TENANT, course_id=cid, offering_id=offering_ids[cid], dept_id=did,
                             term=term, section_code=sec_code,
                             faculty_person_id=fid, room=f"LH-{R.randint(1, 20)}",
                             schedule=R.choice(["Mon/Wed 10:00", "Tue/Thu 11:00",
@@ -1845,6 +1958,33 @@ def _seed_core_domain(s):
     s.commit()
 
 
+def _seed_even_semester_curriculum(s):
+    """Backfill a complete approved curriculum for the live demonstration tenant."""
+    for dept_code, courses in EVEN_SEMESTER_COURSE_BANK.items():
+        department = s.query(D.Department).filter(
+            D.Department.tenant_id == TENANT, D.Department.code == dept_code
+        ).first()
+        if not department:
+            continue
+        program = s.query(D.Program).filter(
+            D.Program.tenant_id == TENANT, D.Program.dept_id == department.id,
+            D.Program.level == "UG"
+        ).first()
+        for code, title, credits, semester in courses:
+            course_id = f"course_{code.lower()}"
+            if s.get(D.Course, course_id):
+                continue
+            s.add(D.Course(
+                id=course_id, tenant_id=TENANT, dept_id=department.id,
+                program_id=program.id if program else None, code=code, title=title,
+                credits=credits, semester=semester,
+                description=f"{title} course for semester {semester}.",
+                regulation="R2023", course_type="Core", category="Professional Core",
+                ltp="3-1-0" if credits >= 4 else "3-0-0", status="Active",
+            ))
+    s.commit()
+
+
 def _seed_reference_extensions(s):
     for code, name, dean in SCHOOLS:
         sid = f"school_{code.lower()}"
@@ -2043,6 +2183,7 @@ def _seed_chairman_workflows(s):
         ("wf_exec_17", "student_grievance", "Women in STEM Grant Appeal", "approved", None, "user_20", "Grievance Officer", 4, False, datetime(2026, 8, 5, 8, 10), datetime(2026, 8, 13, 17, 40)),
         ("wf_exec_18", "question_paper", "Semester End Examination Security", "executed", None, "user_16", "Controller of Examinations", 4, False, datetime(2026, 8, 2, 8, 0), datetime(2026, 8, 12, 19, 0)),
         ("wf_exec_19", "payroll_approval", "August Payroll Release", "approved", 5.5e7, "user_24", "HR Director", 4, False, datetime(2026, 8, 10, 9, 0), datetime(2026, 8, 16, 11, 0)),
+        ("wf_exec_21", "payroll_approval", "September Payroll Release", "submitted", 5.8e7, "user_25", "HR Executive", 1, False, datetime(2026, 9, 1, 9, 0), datetime(2026, 9, 1, 9, 0)),
         ("wf_exec_20", "result_publication", "Autonomous Results Moderation", "rejected", None, "user_16", "Controller of Examinations", 2, False, datetime(2026, 7, 24, 14, 20), datetime(2026, 7, 27, 15, 0)),
     ]
 
@@ -2094,6 +2235,7 @@ def _seed_chairman_workflows(s):
         ("wf_exec_17", "Student Affairs", "STU-2026-011", "Research and scholarship appeal raised for final closure."),
         ("wf_exec_18", "Academic Operations", "EXM-2026-054", "Exam security approval and execution control pack."),
         ("wf_exec_19", "Finance", "PAY-2026-009", "Monthly payroll approval cycle for group release."),
+        ("wf_exec_21", "Finance", "PAY-2026-010", "September payroll inputs for staff salary release, statutory deductions, and bank transfer preparation."),
         ("wf_exec_20", "Academic Operations", "EXM-2026-055", "Results moderation request rejected after evidence review."),
     ]
     spec_index = {wf_id: created_at for wf_id, _, _, _, _, _, _, _, _, created_at, _ in specs}
@@ -2685,6 +2827,402 @@ def _bind_portal_accounts(s):
             if candidate:
                 candidate.user_id = hod_login.id
                 dep.hod_person_id = candidate.id
+
+    # Academic Coordinator is a governed academic actor, not a global bypass.
+    # Bind the seeded login to an otherwise unassigned CSE staff profile so the
+    # central hierarchy resolver can enforce its department/program scope.
+    coordinator_login = _user("academic_coordinator")
+    if coordinator_login and "CSE" in dept_ids:
+        dep = s.query(D.Department).filter(D.Department.code == "CSE").first()
+        if dep:
+            coordinator_login.scope_ref = dep.id
+            candidate = (s.query(D.StaffMember)
+                         .filter(D.StaffMember.dept_id == dep.id,
+                                 (D.StaffMember.user_id == None) | (D.StaffMember.user_id == coordinator_login.id))
+                         .order_by(D.StaffMember.date_joined).first())
+            if candidate:
+                candidate.user_id = coordinator_login.id
+                candidate.office_n = 17
+                candidate.school_id = candidate.school_id or dep.school_id
+                candidate.program_id = candidate.program_id or "prog_cse_btech"
+
+    # Program Coordinator has programme-scoped proposal authority.  It must
+    # therefore be bound to a real staff/department/programme hierarchy; a
+    # global placeholder scope makes the UI advertise a proposal action while
+    # returning no selectable owning departments.
+    program_coordinator_login = _user("program_coordinator")
+    if program_coordinator_login and "CSE" in dept_ids:
+        dep = s.query(D.Department).filter(D.Department.code == "CSE").first()
+        if dep:
+            program_coordinator_login.scope_ref = dep.id
+            candidate = (s.query(D.StaffMember)
+                         .filter(D.StaffMember.dept_id == dep.id,
+                                 (D.StaffMember.user_id == None) | (D.StaffMember.user_id == program_coordinator_login.id))
+                         .order_by(D.StaffMember.date_joined).first())
+            if candidate:
+                candidate.user_id = program_coordinator_login.id
+                candidate.office_n = 41
+                candidate.school_id = candidate.school_id or dep.school_id
+                candidate.program_id = candidate.program_id or "prog_cse_btech"
+
+    # Timetable Coordinator is a department-scoped academic actor and must be
+    # linked to a real staff profile so timetable planning APIs can resolve the
+    # actor's department hierarchy instead of treating the login as global.
+    timetable_login = _user("timetable_coordinator")
+    if timetable_login and "CSE" in dept_ids:
+        dep = s.query(D.Department).filter(D.Department.code == "CSE").first()
+        if dep:
+            timetable_login.scope_ref = dep.id
+            timetable_login.scope_level = "department"
+            candidate = (s.query(D.StaffMember)
+                         .filter(D.StaffMember.dept_id == dep.id,
+                                 (D.StaffMember.user_id == None) | (D.StaffMember.user_id == timetable_login.id))
+                         .order_by(D.StaffMember.date_joined).first())
+            if candidate:
+                candidate.user_id = timetable_login.id
+                candidate.office_n = 43
+                candidate.school_id = candidate.school_id or dep.school_id
+                candidate.program_id = candidate.program_id or "prog_cse_btech"
+
+    s.commit()
+
+
+def _seed_non_teaching_staff_records(s):
+    """Seed support staff profiles so Accounts/HR offices have real employees in the database."""
+    staff_specs = [
+        {"id": "staff_support_accounts_manager", "emp_id": "ACCM-001", "name": "Accounts Manager", "designation": "Accounts Manager", "office_n": 23, "user_id": "user_23"},
+        {"id": "staff_support_accountant", "emp_id": "ACCT-001", "name": "Accountant", "designation": "Accountant", "office_n": 23, "user_id": None},
+        {"id": "staff_support_accounts_officer", "emp_id": "ACCO-001", "name": "Accounts Officer", "designation": "Accounts Officer", "office_n": 23, "user_id": None},
+        {"id": "staff_support_accounts_executive", "emp_id": "ACCE-001", "name": "Accounts Executive", "designation": "Accounts Executive", "office_n": 23, "user_id": None},
+        {"id": "staff_support_cashier", "emp_id": "CASH-001", "name": "Cashier", "designation": "Cashier", "office_n": 23, "user_id": None},
+        {"id": "staff_support_fee_collection", "emp_id": "FEE-001", "name": "Fee Collection Officer", "designation": "Fee Collection Officer", "office_n": 23, "user_id": None},
+        {"id": "staff_support_fee_verification", "emp_id": "FEV-001", "name": "Fee Verification Officer", "designation": "Fee Verification Officer", "office_n": 23, "user_id": None},
+        {"id": "staff_support_vendor_payment", "emp_id": "VPP-001", "name": "Vendor Payment Officer", "designation": "Vendor Payment Officer", "office_n": 23, "user_id": None},
+        {"id": "staff_support_accounts_clerk", "emp_id": "ACCL-001", "name": "Accounts Clerk", "designation": "Accounts Clerk", "office_n": 23, "user_id": None},
+        {"id": "staff_support_hr_chief", "emp_id": "HRCH-001", "name": "Chief HR Officer", "designation": "Chief HR Officer", "office_n": 24, "user_id": "user_24"},
+        {"id": "staff_support_hr_director", "emp_id": "HRDR-001", "name": "HR Director", "designation": "HR Director", "office_n": 24, "user_id": None},
+        {"id": "staff_support_hr_manager", "emp_id": "HRM-001", "name": "HR Manager", "designation": "HR Manager", "office_n": 24, "user_id": None},
+        {"id": "staff_support_hr_business_partner", "emp_id": "HRBP-001", "name": "HR Business Partner", "designation": "HR Business Partner", "office_n": 24, "user_id": None},
+        {"id": "staff_support_recruitment_manager", "emp_id": "RCR-001", "name": "Recruitment Manager", "designation": "Recruitment Manager", "office_n": 24, "user_id": None},
+        {"id": "staff_support_employee_relations", "emp_id": "ER-001", "name": "Employee Relations Officer", "designation": "Employee Relations Officer", "office_n": 24, "user_id": None},
+        {"id": "staff_support_ld_manager", "emp_id": "LDM-001", "name": "Learning & Development Manager", "designation": "Learning & Development Manager", "office_n": 24, "user_id": None},
+        {"id": "staff_support_performance_manager", "emp_id": "PM-001", "name": "Performance Management Officer", "designation": "Performance Management Officer", "office_n": 24, "user_id": None},
+        {"id": "staff_support_hr_compliance", "emp_id": "HRC-001", "name": "HR Compliance Officer", "designation": "HR Compliance Officer", "office_n": 24, "user_id": None},
+        {"id": "staff_support_hr_executive", "emp_id": "HREX-001", "name": "HR Executive", "designation": "HR Executive", "office_n": 25, "user_id": "user_25"},
+        {"id": "staff_support_hr_officer", "emp_id": "HROF-001", "name": "HR Officer", "designation": "HR Officer", "office_n": 25, "user_id": None},
+        {"id": "staff_support_payroll_specialist", "emp_id": "PAY-001", "name": "Payroll Specialist", "designation": "Payroll Specialist", "office_n": 25, "user_id": None},
+        {"id": "staff_support_attendance_officer", "emp_id": "ATT-001", "name": "Attendance Officer", "designation": "Attendance Officer", "office_n": 25, "user_id": None},
+        {"id": "staff_support_training_coordinator", "emp_id": "TRN-001", "name": "Training Coordinator", "designation": "Training Coordinator", "office_n": 25, "user_id": None},
+        {"id": "staff_support_hr_admin", "emp_id": "HRA-001", "name": "HR Administrator", "designation": "HR Administrator", "office_n": 25, "user_id": None},
+        {"id": "staff_support_hr_clerk", "emp_id": "HRCk-001", "name": "HR Clerk", "designation": "HR Clerk", "office_n": 25, "user_id": None},
+    ]
+
+    for spec in staff_specs:
+        existing = s.query(D.StaffMember).get(spec["id"])
+        if not existing:
+            existing = D.StaffMember(
+                id=spec["id"],
+                tenant_id=TENANT,
+                emp_id=spec["emp_id"],
+                name=spec["name"],
+                email=f"{slug(spec['name'])}@icms.edu",
+                phone="",
+                office_hours="Mon–Fri 09:00 AM – 05:00 PM",
+                dept_id=None,
+                designation=spec["designation"],
+                office_n=spec["office_n"],
+                campus=CAMPUS_SCOPES[0],
+                status="active",
+                date_joined=date(2018, 1, 1),
+            )
+            s.add(existing)
+            s.flush()
+
+        existing.name = spec["name"]
+        existing.designation = spec["designation"]
+        existing.office_n = spec["office_n"]
+        existing.campus = existing.campus or CAMPUS_SCOPES[0]
+        existing.status = "active"
+        existing.email = existing.email or f"{slug(spec['name'])}@icms.edu"
+        if spec["user_id"]:
+            existing.user_id = spec["user_id"]
+
+    s.commit()
+
+
+def _seed_payroll_demo_data(s):
+    """Create demo payroll employee profiles and a sample payroll run."""
+    staff_rows = s.query(D.StaffMember).order_by(D.StaffMember.name).all()
+    if not staff_rows:
+        return
+
+    for index, member in enumerate(staff_rows, start=1):
+        payroll_emp = s.query(D.PayrollEmployee).filter(D.PayrollEmployee.staff_member_id == member.id).first()
+        if not payroll_emp:
+            payroll_emp = D.PayrollEmployee(
+                id=f"payroll_emp_{member.id}",
+                tenant_id=TENANT,
+                staff_member_id=member.id,
+                employee_code=member.emp_id or f"EMP-{index:03d}",
+                bank_account_no=f"100{index:05d}",
+                bank_ifsc="ICMS0001",
+                pan_no=f"PAN{index:05d}",
+                pay_mode="bank_transfer",
+                status="active",
+            )
+            s.add(payroll_emp)
+            s.flush()
+
+        existing_structure = s.query(D.PayrollSalaryStructure).filter(
+            D.PayrollSalaryStructure.employee_id == payroll_emp.id
+        ).first()
+        if existing_structure is None:
+            base_salary = 22000 + (index * 2400)
+            structure = D.PayrollSalaryStructure(
+                id=f"payroll_struct_{payroll_emp.id}",
+                tenant_id=TENANT,
+                employee_id=payroll_emp.id,
+                basic_pay=base_salary,
+                hra=base_salary * 0.18,
+                special_allowance=base_salary * 0.08,
+                conveyance_allowance=1800,
+                medical_allowance=1200,
+                other_earnings=0,
+                pf_employee_share=base_salary * 0.12,
+                professional_tax=200,
+                income_tax=base_salary * 0.02,
+                loan_deduction=0,
+                advance_deduction=0,
+                other_deductions=0,
+                effective_from=datetime.utcnow(),
+            )
+            s.add(structure)
+
+    s.flush()
+
+    today = datetime.utcnow()
+    payroll_month = today.strftime("%Y-%m")
+    existing_run = s.query(D.PayrollRun).filter(D.PayrollRun.payroll_month == payroll_month).first()
+    if existing_run is not None:
+        run = existing_run
+    else:
+        run = D.PayrollRun(
+            id=f"payroll_run_{payroll_month.replace('-', '_')}",
+            tenant_id=TENANT,
+            payroll_month=payroll_month,
+            run_name=f"{today.strftime('%B %Y')} Payroll Run",
+            status="generated",
+            generated_by="system",
+        )
+        s.add(run)
+        s.flush()
+
+    existing_employee_ids = {
+        employee_id
+        for employee_id, in s.query(D.PayrollEntry.employee_id).filter(D.PayrollEntry.run_id == run.id).all()
+    }
+    employees = s.query(D.PayrollEmployee).filter(D.PayrollEmployee.status == "active").all()
+    for emp in employees:
+        if emp.id in existing_employee_ids:
+            continue
+        structure = (
+            s.query(D.PayrollSalaryStructure)
+            .filter(D.PayrollSalaryStructure.employee_id == emp.id)
+            .order_by(D.PayrollSalaryStructure.effective_from.desc())
+            .first()
+        )
+        if not structure:
+            continue
+
+        gross_salary = (
+            structure.basic_pay
+            + structure.hra
+            + structure.special_allowance
+            + structure.conveyance_allowance
+            + structure.medical_allowance
+            + structure.other_earnings
+        )
+        total_deductions = (
+            structure.pf_employee_share
+            + structure.professional_tax
+            + structure.income_tax
+            + structure.loan_deduction
+            + structure.advance_deduction
+            + structure.other_deductions
+        )
+
+        entry = D.PayrollEntry(
+            id=f"payroll_entry_{emp.id}_{payroll_month.replace('-', '_')}",
+            tenant_id=TENANT,
+            run_id=run.id,
+            employee_id=emp.id,
+            gross_salary=gross_salary,
+            total_earnings=gross_salary,
+            total_deductions=total_deductions,
+            net_salary=gross_salary - total_deductions,
+            present_days=22,
+            paid_days=22,
+            leave_days=0,
+            payment_status="pending",
+        )
+        s.add(entry)
+
+    # Keep three paid historical periods available for staff payslip demos.
+    month_cursor = datetime(today.year, today.month, 1)
+    for offset in range(1, 4):
+        month_cursor = month_cursor - timedelta(days=1)
+        historical_month = month_cursor.strftime("%Y-%m")
+        historical_run = s.query(D.PayrollRun).filter(D.PayrollRun.payroll_month == historical_month).first()
+        if historical_run is None:
+            historical_run = D.PayrollRun(
+                id=f"payroll_run_{historical_month.replace('-', '_')}",
+                tenant_id=TENANT,
+                payroll_month=historical_month,
+                run_name=f"{month_cursor.strftime('%B %Y')} Payroll Run",
+                status="paid",
+                generated_by="system",
+                payment_date=datetime(month_cursor.year, month_cursor.month, 25, 12, 0),
+            )
+            s.add(historical_run)
+            s.flush()
+
+        for emp in employees:
+            entry = s.query(D.PayrollEntry).filter(
+                D.PayrollEntry.run_id == historical_run.id,
+                D.PayrollEntry.employee_id == emp.id,
+            ).first()
+            if entry is None:
+                structure = (
+                    s.query(D.PayrollSalaryStructure)
+                    .filter(D.PayrollSalaryStructure.employee_id == emp.id)
+                    .order_by(D.PayrollSalaryStructure.effective_from.desc())
+                    .first()
+                )
+                if not structure:
+                    continue
+                gross_salary = sum((
+                    structure.basic_pay, structure.hra, structure.special_allowance,
+                    structure.conveyance_allowance, structure.medical_allowance,
+                    structure.other_earnings,
+                ))
+                total_deductions = sum((
+                    structure.pf_employee_share, structure.professional_tax,
+                    structure.income_tax, structure.loan_deduction,
+                    structure.advance_deduction, structure.other_deductions,
+                ))
+                entry = D.PayrollEntry(
+                    id=f"payroll_entry_{emp.id}_{historical_month.replace('-', '_')}",
+                    tenant_id=TENANT,
+                    run_id=historical_run.id,
+                    employee_id=emp.id,
+                    gross_salary=gross_salary,
+                    total_earnings=gross_salary,
+                    total_deductions=total_deductions,
+                    net_salary=gross_salary - total_deductions,
+                    present_days=22,
+                    paid_days=22,
+                    leave_days=0,
+                    payslip_status="generated",
+                    payment_status="paid",
+                )
+                s.add(entry)
+                s.flush()
+
+            posting = s.query(D.PayrollPaymentPosting).filter(
+                D.PayrollPaymentPosting.entry_id == entry.id
+            ).first()
+            if posting is None:
+                s.add(D.PayrollPaymentPosting(
+                    id=f"payroll_payment_{entry.id}",
+                    tenant_id=TENANT,
+                    entry_id=entry.id,
+                    payment_method=emp.pay_mode or "bank_transfer",
+                    bank_ref_no=f"PAY-{historical_month.replace('-', '')}-{emp.employee_code}",
+                    posted_by="system",
+                    posted_at=historical_run.payment_date,
+                    status="posted",
+                    remarks="Demo historical payroll payment",
+                ))
+            payslip = s.query(D.PayrollPayslip).filter(D.PayrollPayslip.entry_id == entry.id).first()
+            if payslip is None:
+                s.add(D.PayrollPayslip(
+                    id=f"payroll_payslip_{entry.id}",
+                    tenant_id=TENANT,
+                    entry_id=entry.id,
+                    pdf_url="",
+                    generated_at=historical_run.payment_date,
+                ))
+
+        month_cursor = datetime(month_cursor.year, month_cursor.month, 1)
+
+    s.commit()
+
+
+def _ensure_payroll_staff_logins(s):
+    """Give every active payroll employee a usable demo portal login."""
+    payroll_rows = (
+        s.query(D.PayrollEmployee)
+        .join(D.StaffMember, D.StaffMember.id == D.PayrollEmployee.staff_member_id)
+        .filter(D.PayrollEmployee.status == "active", D.StaffMember.status == "active")
+        .order_by(D.PayrollEmployee.employee_code)
+        .all()
+    )
+    for payroll_emp in payroll_rows:
+        staff = s.get(D.StaffMember, payroll_emp.staff_member_id)
+        user = s.get(User, staff.user_id) if staff.user_id else None
+        if not user:
+            username = slug(payroll_emp.employee_code)
+            existing = s.query(User).filter(func.lower(User.username) == username.lower()).first()
+            if existing:
+                username = f"{username}_{slug(staff.id)}"
+
+            person_id = f"person_payroll_{staff.id}"
+            person = s.get(Person, person_id)
+            if not person:
+                person = Person(
+                    id=person_id,
+                    tenant_id=TENANT,
+                    name=staff.name,
+                    email=staff.email or f"{username}@icms.edu",
+                    contact=staff.phone or "",
+                )
+                s.add(person)
+                s.flush()
+
+            user = User(
+                id=f"user_payroll_{staff.id}",
+                tenant_id=TENANT,
+                person_id=person.id,
+                username=username,
+                password_hash=pwhash("demo123"),
+                status="active",
+                mfa_enabled=False,
+                office_n=staff.office_n,
+                role=staff.designation or "Staff",
+                scope_level="department" if staff.office_n in {11, 12, 13, 14} else "campus",
+                scope_ref=staff.dept_id or CAMPUS_SCOPES[0],
+            )
+            s.add(user)
+            s.flush()
+            staff.user_id = user.id
+
+        user.status = "active"
+        user.password_hash = pwhash("demo123")
+        if not user.office_n:
+            user.office_n = staff.office_n
+        if not user.role:
+            user.role = staff.designation or "Staff"
+
+        role_id = f"role_{staff.office_n}_0"
+        if s.get(Role, role_id):
+            link_id = f"ur_payroll_{staff.id}"
+            if not s.get(UserRole, link_id):
+                s.add(UserRole(
+                    id=link_id,
+                    user_id=user.id,
+                    role_id=role_id,
+                    org_scope_id=staff.dept_id or "scope_global",
+                ))
 
     s.commit()
 
@@ -3328,6 +3866,25 @@ def _seed_admissions_phase2(s):
             application_no="APP-PH2-SUBMITTED", applicant_name="Phase Two Submitted", email="phase2.submitted@example.test",
             phone="9000000002", program_id=program.id, selected_program_id=program.id, program_name=program.name,
             campus=binding.campus, status="submitted", current_status="SUBMITTED", status_version=1, submitted_at=now))
+    s.flush()
+    # Fully populate the applicant demo record so the public portal has useful
+    # profile, preference, and document data before a real applicant starts.
+    demo = s.get(D.Application, "app_phase2_draft")
+    if demo:
+        if not demo.profile_json or demo.profile_json == "{}":
+            demo.profile_json = json.dumps({"qualifying_percentage": 82, "board": "State Board", "category": "GENERAL"})
+        if not s.query(D.ApplicationPreference).filter_by(application_id=demo.id).first():
+            s.add(D.ApplicationPreference(id="app_pref_phase2_demo", tenant_id=TENANT,
+                application_id=demo.id, program_id=demo.selected_program_id, preference_rank=1))
+        for document_id, requirement_id, document_type, file_name in [
+            ("app_doc_phase2_demo_marks", "adm_doc_phase2_marks", "Qualifying examination marksheet", "Aarav-Sharma-marksheet.pdf"),
+            ("app_doc_phase2_demo_identity", "adm_doc_phase2_identity", "Government identity", "Aarav-Sharma-id.pdf"),
+        ]:
+            if not s.get(D.ApplicationDocument, document_id):
+                s.add(D.ApplicationDocument(id=document_id, tenant_id=TENANT, application_id=demo.id,
+                    requirement_id=requirement_id, document_type=document_type,
+                    storage_key=f"seed/admissions/{file_name}", file_name=file_name,
+                    mime_type="application/pdf", verification_status="pending"))
     s.commit()
 
 
@@ -3390,6 +3947,11 @@ def _seed_admissions_phase4(s):
     pool=s.get(D.AdmissionSeatPool,"adm_pool_phase4_regular")
     if not pool:
         pool=D.AdmissionSeatPool(id="adm_pool_phase4_regular",tenant_id=TENANT,cycle_id=cycle.id,campus=binding.campus,program_id=program.id,quota_id=quota.id if quota else None,category_code="GENERAL",intake_key="phase4",capacity=5,status="open");s.add(pool)
+    # An unrestricted pool is required for applicants who qualify through the
+    # standard path and do not have a quota-specific eligibility decision.
+    general_pool=s.get(D.AdmissionSeatPool,"adm_pool_phase4_general")
+    if not general_pool:
+        general_pool=D.AdmissionSeatPool(id="adm_pool_phase4_general",tenant_id=TENANT,cycle_id=cycle.id,campus=binding.campus,program_id=program.id,quota_id=None,category_code="GENERAL",intake_key="phase4-general",capacity=10,status="open");s.add(general_pool)
     states=["ELIGIBLE","ASSESSMENT_PENDING","ASSESSMENT_QUALIFIED","COUNSELLING_PENDING","COUNSELLING_COMPLETED","ALLOCATION_PENDING","ALLOCATED","WAITLISTED","OFFER_RECOMMENDATION_PENDING","OFFER_APPROVAL_PENDING","OFFERED","OFFER_ACCEPTED","OFFER_DECLINED","OFFER_EXPIRED"]
     active={"ALLOCATED","OFFER_RECOMMENDATION_PENDING","OFFER_APPROVAL_PENDING","OFFERED","OFFER_ACCEPTED"}
     now=datetime.utcnow()
@@ -3463,7 +4025,7 @@ def _seed_admissions_phase5(s):
         if state in {"FINAL_APPROVAL_PENDING","READY_TO_ADMIT","ENROLLED"}:
             workflow=s.get(WorkflowInstance,f"workflow_{app_id}")
             if not workflow:
-                workflow=WorkflowInstance(id=f"workflow_{app_id}",tenant_id=TENANT,process_key="student_admission",label="Final admission",office_n=15,title=f"Final admission {app.application_no}",state="submitted" if state=="FINAL_APPROVAL_PENDING" else "approved",initiator_id="u_admissions",initiator_name="Admissions",current_stage=1,scope_level="campus");s.add(workflow)
+                workflow=WorkflowInstance(id=f"workflow_{app_id}",tenant_id=TENANT,process_key="student_admission",label="Final admission",office_n=15,title=f"Final admission {app.application_no}",state="under_review" if state=="FINAL_APPROVAL_PENDING" else "approved",initiator_id="u_admissions",initiator_name="Admissions",current_stage=3 if state=="FINAL_APPROVAL_PENDING" else 4,scope_level="campus",scope_ref=app.campus,source_type="application",source_id=app.id);s.add(workflow)
             s.flush()
             if not s.get(D.AdmissionWorkflowLink,f"link_{app_id}"): s.add(D.AdmissionWorkflowLink(id=f"link_{app_id}",tenant_id=TENANT,application_id=app.id,workflow_id=f"workflow_{app_id}",purpose="final_admission",status="active"))
         if state == "ENROLLED":
@@ -3812,7 +4374,13 @@ def _backfill_teaching_foundation(s):
             allocation = (s.query(D.TeachingAllocation)
                           .filter(D.TeachingAllocation.section_id == record.section_id,
                                   D.TeachingAllocation.status == "active").first())
-            faculty_id = allocation.faculty_id if allocation else ""
+            # A class session is accountable to a real faculty member.  Some
+            # historic attendance fixtures belong to sections with no active
+            # allocation; retain those legacy rows unlinked instead of writing
+            # an empty value into the faculty foreign key.
+            if not allocation or not allocation.faculty_id:
+                continue
+            faculty_id = allocation.faculty_id
             session = D.ClassSession(
                 id=f"session_legacy_{record.section_id}_{record.on_date.isoformat()}", tenant_id=TENANT,
                 allocation_id=allocation.id if allocation else None, section_id=record.section_id,
@@ -3856,6 +4424,20 @@ def _seed_marks_submission_demo(s):
     ]
     now = datetime.utcnow()
     for key, marks_state, stage, workflow_state, comment in examples:
+        # ``Assessment.workflow_instance_id`` is a database foreign key.  The
+        # workflow must be flushed before the assessment is added: otherwise a
+        # fresh PostgreSQL seed can batch the assessment first and reject the
+        # fixture, leaving the live demo dataset only partially populated.
+        workflow = None
+        if key != "draft":
+            workflow_id = f"wf_phase3_marks_{key}"
+            workflow = _ensure(s, WorkflowInstance, workflow_id, lambda workflow_id=workflow_id: WorkflowInstance(
+                id=workflow_id, tenant_id=TENANT, process_key="marks_submission", label="Marks submission", office_n=16,
+                title=f"Phase 3 {key.title()} marks for {section.section_code}", initiator_id=professor.id, initiator_name=staff.name,
+                scope_level="department",
+            ))
+            workflow.state = workflow_state; workflow.current_stage = stage; workflow.updated_at = now
+            s.flush()
         assessment_id = f"phase3_marks_{key}"
         assessment = _ensure(s, D.Assessment, assessment_id, lambda assessment_id=assessment_id, key=key: D.Assessment(
             id=assessment_id, tenant_id=TENANT, section_id=section.id, name=f"Phase 3 {key.title()} marks",
@@ -3871,13 +4453,6 @@ def _seed_marks_submission_demo(s):
         assessment.published_at = now if key == "published" else None; assessment.published_by = controller.username if key == "published" and controller else ""
         assessment.marks_published_at = now if key == "published" else None; assessment.marks_approved_at = now if key == "published" else None
         if key != "draft":
-            workflow_id = f"wf_phase3_marks_{key}"
-            workflow = _ensure(s, WorkflowInstance, workflow_id, lambda workflow_id=workflow_id: WorkflowInstance(
-                id=workflow_id, tenant_id=TENANT, process_key="marks_submission", label="Marks submission", office_n=16,
-                title=f"{assessment.name} for {section.section_code}", initiator_id=professor.id, initiator_name=staff.name,
-                scope_level="department",
-            ))
-            workflow.state = workflow_state; workflow.current_stage = stage; workflow.updated_at = now
             assessment.workflow_instance_id = workflow.id
             s.flush()
             decisions_by_key = {
@@ -3979,6 +4554,11 @@ def _ensure_legacy_student_roll_login(s):
     user = s.get(User, "user_36")
     if current and current.id != student.id:
         current.user_id = None
+    # ``student`` is a documented convenience login mapped by ``/auth/login``
+    # to this stable roll-number account.  Older seed databases retained the
+    # original placeholder hash on user_36, making that live login unusable.
+    user.password_hash = pwhash("demo123")
+    user.status = "active"
     user.username = "25ECE072"
     user.scope_ref = student.id
     student.user_id = user.id
@@ -4008,15 +4588,22 @@ def _seed_faculty_leave_demo(s):
     for key, kind, offset, reason, status, stage in examples:
         leave_id = f"phase5_leave_{key}"
         start = today + timedelta(days=offset)
+        # Persist the referenced workflow before inserting a new leave request
+        # that carries its foreign key.  PostgreSQL otherwise rejects a fresh
+        # demo seed when SQLAlchemy batches the leave rows first.
+        workflow = None
+        if stage:
+            workflow_id = f"phase5_wf_{key}"
+            workflow = _ensure(s, WorkflowInstance, workflow_id, lambda workflow_id=workflow_id: WorkflowInstance(id=workflow_id, tenant_id=TENANT, process_key="faculty_leave", label="Faculty leave", office_n=25, title=f"{kind} leave: {start.isoformat()} to {(start + timedelta(days=1)).isoformat()}", initiator_id=professor.id, initiator_name=staff.name, scope_level="department"))
+            workflow.process_key = "faculty_leave"; workflow.label = "Faculty leave"; workflow.office_n = 25; workflow.initiator_id = professor.id; workflow.initiator_name = staff.name
+            workflow.state = status; workflow.current_stage = stage; workflow.scope_level = "department"; workflow.updated_at = datetime.utcnow()
+            s.flush()
         leave = _ensure(s, D.LeaveRequest, leave_id, lambda leave_id=leave_id: D.LeaveRequest(id=leave_id, tenant_id=TENANT, staff_id=staff.id, staff_name=staff.name))
         leave.staff_id = staff.id; leave.staff_name = staff.name; leave.kind = kind; leave.from_date = start; leave.to_date = start + timedelta(days=1)
         leave.days = 2; leave.reason = reason; leave.requested_by = professor.id; leave.half_day = False; leave.status = status
         leave.submitted_at = datetime.combine(today, datetime.min.time()) if stage else None; leave.updated_at = datetime.utcnow()
         if stage:
-            workflow_id = f"phase5_wf_{key}"
-            workflow = _ensure(s, WorkflowInstance, workflow_id, lambda workflow_id=workflow_id: WorkflowInstance(id=workflow_id, tenant_id=TENANT, process_key="faculty_leave", label="Faculty leave", office_n=25, title=f"{kind} leave: {start.isoformat()} to {(start + timedelta(days=1)).isoformat()}", initiator_id=professor.id, initiator_name=staff.name, scope_level="department"))
-            workflow.process_key = "faculty_leave"; workflow.label = "Faculty leave"; workflow.office_n = 25; workflow.initiator_id = professor.id; workflow.initiator_name = staff.name
-            workflow.state = status; workflow.current_stage = stage; workflow.scope_level = "department"; workflow.updated_at = datetime.utcnow(); leave.workflow_instance_id = workflow.id
+            leave.workflow_instance_id = workflow.id
             s.flush()
             if status == "returned": leave.returned_comment = "Please clarify the handover plan before resubmitting."
             if status == "rejected": leave.decided_by = hod_staff.name
@@ -4045,9 +4632,24 @@ def _seed_assignment_submission_demo(s):
     demo_student = s.query(D.Student).filter(D.Student.user_id == "user_36").first()
     if demo_student:
         enrollment_id = f"phase4_demo_enrollment_{demo_student.id}_{section.id}"
-        enrollment = _ensure(s, D.Enrollment, enrollment_id, lambda: D.Enrollment(id=enrollment_id, tenant_id=TENANT, student_id=demo_student.id, section_id=section.id))
-        enrollment.student_id = demo_student.id; enrollment.section_id = section.id; enrollment.status = "enrolled"
-        s.flush()
+        # Enrollment identity is the student/section pair, not its fixture ID.
+        # A score-history fixture may already own this pair under a different ID;
+        # preserve that historical record rather than attempting a duplicate row.
+        enrollment = s.query(D.Enrollment).filter(
+            D.Enrollment.tenant_id == TENANT,
+            D.Enrollment.student_id == demo_student.id,
+            D.Enrollment.section_id == section.id,
+        ).first()
+        if enrollment is None:
+            enrollment = D.Enrollment(
+                id=enrollment_id,
+                tenant_id=TENANT,
+                student_id=demo_student.id,
+                section_id=section.id,
+                status="enrolled",
+            )
+            s.add(enrollment)
+            s.flush()
     roster = s.query(D.Enrollment).filter(D.Enrollment.section_id == section.id, D.Enrollment.status == "enrolled").all()
     if not roster:
         return
@@ -4071,6 +4673,41 @@ def _seed_assignment_submission_demo(s):
             evaluation = _ensure(s, D.AssignmentEvaluation, f"phase4_evaluation_{submission.id}", lambda: D.AssignmentEvaluation(id=f"phase4_evaluation_{submission.id}", tenant_id=TENANT, submission_id=submission.id, evaluator_id=staff.id))
             evaluation.submission_id = submission.id; evaluation.evaluator_id = staff.id; evaluation.status = status; evaluation.feedback = "Please revise the evidence and resubmit." if status == "returned" else "Clear analysis with supporting evidence."; evaluation.marks_awarded = None if status == "returned" else 21; evaluation.evaluated_at = now - timedelta(hours=12)
     s.commit()
+
+
+def _seed_aarav_cs404_attendance_roster(s):
+    """Ensure the checked-in CS404-A demonstration session has a real roster."""
+    professor = s.query(User).filter(User.username == "aarav_kulkarni").first()
+    staff = s.query(D.StaffMember).filter(D.StaffMember.user_id == professor.id).first() if professor else None
+    if not staff:
+        return
+    section = (s.query(D.Section)
+               .join(D.Course, D.Course.id == D.Section.course_id)
+               .filter(D.Section.id == "sec_cs404_a", D.Course.code == "CS404")
+               .first())
+    if not section or not s.query(D.TeachingAllocation).filter(
+        D.TeachingAllocation.faculty_id == staff.id,
+        D.TeachingAllocation.section_id == section.id,
+        D.TeachingAllocation.status == "active",
+    ).first():
+        return
+    if s.query(D.Enrollment).filter(D.Enrollment.section_id == section.id,
+                                    D.Enrollment.status == "enrolled").count():
+        return
+    for student_id in ("stu_1", "stu_2", "stu_3"):
+        student = s.get(D.Student, student_id)
+        if not student:
+            continue
+        enrollment = s.query(D.Enrollment).filter(D.Enrollment.section_id == section.id,
+                                                   D.Enrollment.student_id == student.id).first()
+        if not enrollment:
+            enrollment = D.Enrollment(id=f"demo_attendance_{section.id}_{student.id}",
+                                      tenant_id=TENANT, section_id=section.id,
+                                      student_id=student.id)
+            s.add(enrollment)
+        enrollment.status = "enrolled"
+    s.commit()
+
 
 def _seed_mentoring_cases_demo(s):
     """Idempotent Phase 6 cases for Aarav's real formal advisees."""
@@ -4140,13 +4777,19 @@ def _seed_research_demo(s):
 
 def seed_domain():
     ensure_versioned_migrations()
-    ensure_additive_schema()
     s = SessionLocal()
     try:
+        # Payroll support data must be available even if a later optional demo
+        # seed encounters a legacy foreign-key conflict.
+        _seed_non_teaching_staff_records(s)
+        _seed_payroll_demo_data(s)
+        _ensure_payroll_staff_logins(s)
         _seed_core_domain(s)
+        _seed_even_semester_curriculum(s)
         _seed_fee_setup_reference_data(s)
         _seed_reference_extensions(s)
         _seed_calendar_data(s)
+        _seed_dean_dashboard_data(s)
         _seed_chairman_workflows(s)
         _bind_portal_accounts(s)
         _ensure_aarav_kulkarni_professor_login(s)
@@ -4163,6 +4806,7 @@ def seed_domain():
         _seed_marks_submission_demo(s)
         _seed_faculty_leave_demo(s)
         _seed_assignment_submission_demo(s)
+        _seed_aarav_cs404_attendance_roster(s)
         _seed_mentoring_cases_demo(s)
         _seed_research_demo(s)
         legacy_published = [row[0] for row in s.query(D.Mark.assessment_id)
@@ -4183,6 +4827,7 @@ def seed_domain():
             _seed_admissions_phase5(s)
         _seed_student_portal_accounts(s)
         _ensure_legacy_student_roll_login(s)
+        _ensure_payroll_staff_logins(s)
         return {
             "status": "domain-seeded",
             "schools": s.query(D.School).count(),
@@ -4195,6 +4840,7 @@ def seed_domain():
             "workflows": s.query(WorkflowInstance).count(),
             "partners": s.query(D.Partner).count(),
             "accreditations": s.query(D.Accreditation).count(),
+            "payroll_employees": s.query(D.PayrollEmployee).count(),
         }
     finally:
         s.close()

@@ -19,16 +19,24 @@ RBAC_MATRIX = {
     2:  {"view": F, "create": L, "edit": L, "delete": X, "approve": L, "reject": F, "verify": V, "publish": V, "export": F, "configure": L, "delegate": F, "audit": V},
     3:  {"view": F, "create": L, "edit": L, "delete": X, "approve": L, "reject": L, "verify": V, "publish": C, "export": F, "configure": X, "delegate": D, "audit": V},
     4:  {"view": F, "create": L, "edit": L, "delete": X, "approve": F, "reject": F, "verify": V, "publish": C, "export": F, "configure": X, "delegate": F, "audit": V},
-    5:  {"view": F, "create": L, "edit": L, "delete": X, "approve": D, "reject": L, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
+    # VP operational approvals are an assigned institutional workflow stage,
+    # not an ad-hoc delegation. Module/action reservations and each workflow's
+    # stage checks still restrict which approvals this office may perform.
+    5:  {"view": F, "create": L, "edit": L, "delete": X, "approve": L, "reject": L, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
+    6:  {"view": F, "create": F, "edit": L, "delete": X, "approve": L, "reject": L, "verify": F, "publish": X, "export": F, "configure": X, "delegate": X, "audit": V},
     10: {"view": F, "create": F, "edit": L, "delete": X, "approve": L, "reject": L, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
     14: {"view": L, "create": L, "edit": L, "delete": X, "approve": X, "reject": X, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
     15: {"view": F, "create": F, "edit": L, "delete": X, "approve": L, "reject": L, "verify": F, "publish": X, "export": F, "configure": X, "delegate": X, "audit": V},
     16: {"view": F, "create": F, "edit": L, "delete": X, "approve": F, "reject": F, "verify": F, "publish": F, "export": F, "configure": L, "delegate": X, "audit": F},
+    17: {"view": F, "create": F, "edit": L, "delete": L, "approve": X, "reject": X, "verify": L, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
     22: {"view": F, "create": F, "edit": L, "delete": X, "approve": F, "reject": F, "verify": F, "publish": X, "export": F, "configure": L, "delegate": X, "audit": F},
     24: {"view": F, "create": F, "edit": L, "delete": X, "approve": L, "reject": L, "verify": F, "publish": X, "export": F, "configure": X, "delegate": X, "audit": V},
     27: {"view": F, "create": F, "edit": F, "delete": L, "approve": L, "reject": L, "verify": V, "publish": X, "export": F, "configure": F, "delegate": X, "audit": F},
     28: {"view": F, "create": F, "edit": F, "delete": L, "approve": L, "reject": L, "verify": V, "publish": X, "export": F, "configure": F, "delegate": X, "audit": F},
     36: {"view": V, "create": L, "edit": X, "delete": X, "approve": X, "reject": X, "verify": X, "publish": X, "export": L, "configure": X, "delegate": X, "audit": X},
+    41: {"view": F, "create": F, "edit": L, "delete": X, "approve": X, "reject": X, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
+    42: {"view": F, "create": F, "edit": L, "delete": X, "approve": X, "reject": X, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
+    43: {"view": F, "create": F, "edit": L, "delete": X, "approve": X, "reject": X, "verify": L, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
     37: {"view": V, "create": X, "edit": X, "delete": X, "approve": X, "reject": X, "verify": X, "publish": X, "export": X, "configure": X, "delegate": X, "audit": X},
     39: {"view": V, "create": X, "edit": X, "delete": X, "approve": X, "reject": X, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
     40: {"view": F, "create": L, "edit": X, "delete": X, "approve": F, "reject": F, "verify": V, "publish": V, "export": F, "configure": L, "delegate": F, "audit": F},
@@ -74,11 +82,14 @@ APPROVAL_MATRIX = [
      "chain": ["Applicant", "Admissions Office", "Admissions Dir.", "Principal/Registrar"],
      "escalation": "VC", "amount": False},
     {"key": "course_registration", "label": "Course registration", "office_n": 36,
-     "chain": ["Student", "Faculty Advisor", "HOD", "Vice Principal"],
+        "chain": ["Student", "Faculty Advisor", "HOD", "Vice Principal", "Principal"],
      "escalation": "Principal", "amount": False},
     {"key": "attendance_correction", "label": "Attendance correction", "office_n": 10,
-     "chain": ["Faculty", "Class Coordinator", "HOD", "Vice Principal"],
-     "escalation": "Principal", "amount": False},
+      "chain": ["Faculty", "Class Coordinator", "HOD", "Vice Principal"],
+      "escalation": "", "amount": False},
+        {"key": "attendance_condonation", "label": "Attendance condonation", "office_n": 10,
+         "chain": ["HOD", "Principal", "Finance Manager", "Accounts"],
+         "escalation": "Campus Head", "amount": True},
     {"key": "faculty_leave", "label": "Faculty leave", "office_n": 25,
      "chain": ["Faculty", "HOD", "Vice Principal", "Principal"],
      "escalation": "VC", "amount": False},
@@ -136,6 +147,9 @@ APPROVAL_MATRIX = [
     {"key": "branch_creation", "label": "Branch creation / closure", "office_n": 1,
      "chain": ["Chairman/VC", "VC", "Chairman", "Chairman"],
      "escalation": "—", "amount": False},
+    {"key": "academic_coordinator_message", "label": "Request to Academic Coordinator", "office_n": 17,
+     "chain": ["Academic Coordinator", "HOD"],
+     "escalation": "—", "amount": False},
 ]
 
 # Workflow states every request moves through (Document §7, office workflow images).
@@ -148,6 +162,7 @@ WF_VALID = {
     "review": ["submitted"],
     "approve": ["submitted", "under_review", "reviewed", "escalated"],
     "reject": ["submitted", "under_review", "reviewed", "escalated"],
+    "return": ["submitted", "under_review", "reviewed", "escalated"],
     "execute": ["approved"],
     "escalate": ["submitted", "under_review", "reviewed"],
 }
@@ -187,6 +202,7 @@ OFFICE_SCOPE = {
     27: "university", 28: "global", 29: "campus", 30: "campus", 31: "campus",
     32: "campus", 33: "campus", 34: "campus", 35: "campus",
     36: "individual", 37: "individual", 38: "individual", 39: "individual",
+    41: "program", 42: "faculty", 43: "section",
 }
 
 

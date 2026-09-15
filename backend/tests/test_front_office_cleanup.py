@@ -50,7 +50,7 @@ class FrontOfficeCleanupTests(unittest.TestCase):
     def test_all_front_office_roles_receive_only_dashboard_shell(self):
         for role in FRONT_OFFICE_ROLES:
             with self.subTest(role=role):
-                self.assertEqual(modules_for_office(35), ["frontdesk_dashboard", "frontdesk_visitors", "frontdesk_appointments", "frontdesk_helpdesk", "frontdesk_calls", "frontdesk_directory", "frontdesk_delegations"])
+                self.assertEqual(modules_for_office(35), ["frontdesk_dashboard", "frontdesk_visitors", "frontdesk_verify", "frontdesk_appointments", "frontdesk_helpdesk", "frontdesk_calls", "frontdesk_directory", "frontdesk_delegations"])
 
     def test_removed_domain_modules_are_denied_for_every_front_office_role(self):
         removed = ["students", "calendar", "academic_calendar"]
@@ -74,6 +74,17 @@ class FrontOfficeCleanupTests(unittest.TestCase):
         self.assertIn("workflows", modules_for_office(22))
         self.assertIn("academic_calendar", modules_for_office(14))
         self.assertIn("directory", modules_for_office(36))
+
+    def test_academic_governance_is_limited_to_dean_hod_and_coordinator(self):
+        for office_n in (6, 10, 17):
+            with self.subTest(office_n=office_n):
+                decision, _ = gate(self.db, context(office_n, "Academic Office"), "academic_calendar", "view", governance=True)
+                self.assertEqual(decision.outcome, "ALLOW")
+
+        for office_n in (41, 42, 43, 15, 22, 23):
+            with self.subTest(office_n=office_n):
+                decision, _ = gate(self.db, context(office_n, "Academic Office"), "academic_calendar", "view", governance=True)
+                self.assertEqual(decision.outcome, "DENY")
 
     def test_generic_shared_screens_reject_front_office(self):
         for role in FRONT_OFFICE_ROLES:

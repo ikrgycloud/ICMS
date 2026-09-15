@@ -38,6 +38,14 @@ class ApplicantStartIn(BaseModel):
     cycle_program_id: str
     applicant_name: str
     email: str
+    # Kept optional at account creation because applicants enter it in the
+    # Applicant details stage; submission still requires it.
+    phone: str = ""
+
+
+class ApplicantLookupIn(BaseModel):
+    application_no: str
+    email: str
 
 
 class ApplicantProfileIn(BaseModel):
@@ -67,6 +75,14 @@ class DocumentIn(BaseModel):
     file_name: str
     mime_type: str
     checksum: str = ""
+    content_base64: str = ""
+    expected_status_version: int = Field(ge=0)
+
+
+class JoiningPreferencesIn(BaseModel):
+    hostel_required: bool = False
+    transport_required: bool = False
+    pickup_point: str = ""
     expected_status_version: int = Field(ge=0)
 
 
@@ -136,6 +152,14 @@ class AllocationIn(BaseModel):
 class OfferActionIn(BaseModel):
     expected_status_version: int = Field(ge=0)
     expiry_days: int = Field(default=7, ge=1, le=90)
+
+
+class FinalClassAllocationIn(BaseModel):
+    program_id: str
+    campus: str
+    section_id: str
+    group_name: str = ""
+    expected_status_version: int = Field(ge=0)
 
 
 class FeeResolutionIn(BaseModel):

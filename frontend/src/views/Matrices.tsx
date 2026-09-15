@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { Spinner, AuthChip } from './ui'
+import { parseRbacMatrix, rbacGrant, type RbacMatrix } from './rbacMatrix'
 
 export default function Matrices() {
   const [tab, setTab] = useState<'rbac' | 'approval' | 'scope'>('rbac')
@@ -23,8 +24,15 @@ export default function Matrices() {
 }
 
 function RBAC() {
-  const [d, setD] = useState<any>(null)
-  useEffect(() => { api.matrix('rbac').then(setD).catch(() => {}) }, [])
+  const [d, setD] = useState<RbacMatrix | null>(null)
+  useEffect(() => {
+    api.matrix('rbac').then((payload: unknown) => setD(parseRbacMatrix(payload))).catch(() => {})
+  }, [])
+  useEffect(() => {
+    if (d?.rows.some(row => row.cells === null)) {
+      console.warn('RBAC matrix response contains a row without cells; denied values are being rendered.')
+    }
+  }, [d])
   if (!d) return <Spinner />
   return (
     <div className="card">
@@ -37,7 +45,7 @@ function RBAC() {
             {d.rows.map((r: any) => (
               <tr key={r.office}>
                 <td className="sticky-c" style={{ fontWeight: 600 }}>{r.office}</td>
-                {d.verbs.map((v: string) => <td key={v} style={{ textAlign: 'center' }}><AuthChip v={r.grants[v] || 'Not Allowed'} /></td>)}
+                {d.verbs.map((v: string) => <td key={v} style={{ textAlign: 'center' }}><AuthChip v={rbacGrant(r, v)} /></td>)}
               </tr>
             ))}
           </tbody>

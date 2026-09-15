@@ -1,0 +1,52 @@
+name: ICMS CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-and-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install backend test dependencies
+        run: pip install -r backend/requirements.txt
+      - name: Build and start Docker stack
+        run: docker compose up --build -d
+      - name: Wait for backend health
+        run: |
+          for attempt in $(seq 1 30); do
+            curl --fail http://localhost:8010/api/health && exit 0
+            sleep 2
+          done
+          docker compose logs backend
+          exit 1
+      - name: Backend tests against Docker API
+        env:
+          ICMS_API_URL: http://127.0.0.1:8010
+          DATABASE_URL: postgresql://icms:icms_secret@127.0.0.1:5433/icms
+        run: python backend/tests/run_docker_tests.py
+      - name: Frontend RBAC contract test
+        working-directory: frontend
+        run: npm ci && npm run test:rbac-matrix
+      - name: Production frontend build
+        working-directory: frontend
+        run: npm run build
+      - name: Docker smoke checks
+        run: |
+          curl --fail http://localhost:8010/api/health
+          curl --fail http://localhost:8080/
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose logs
+      - name: Stop Docker stack
+        if: always()
+        run: docker compose down -v

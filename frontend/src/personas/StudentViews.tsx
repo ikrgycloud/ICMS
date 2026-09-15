@@ -151,14 +151,17 @@ export function StudentCalendarView({ user, go }: { user: any; go: (v: string) =
   }
 
   function openCalendarEvent(event: any) {
+    if (!event) return
+
     if (event.kind === 'personal') {
       setError('')
+      const startDate = event.rawStartDate || event.rawDate || selectedDate
       setPersonalForm({
         id: event.personal_event_id || event.personalEventId,
-        title: event.title,
-        startDate: event.rawStartDate || event.rawDate || selectedDate,
+        title: event.title || '',
+        startDate,
         startTime: event.rawStartTime || event.rawTime || '09:00',
-        endDate: event.rawEndDate || event.rawStartDate || event.rawDate || selectedDate,
+        endDate: event.rawEndDate || event.rawStartDate || event.rawDate || startDate,
         endTime: event.rawEndTime || event.rawTime || '10:00',
         note: event.note || '',
       })
@@ -992,6 +995,29 @@ export function StudentCoursesView() {
       )}
     </div>
   )
+}
+
+export function StudentCurriculumExecution() {
+  const [data, setData] = useState<any>(null)
+  useEffect(() => { api.studentCurriculumExecution().then(setData).catch(() => setData({ items: [] })) }, [])
+  if (!data) return <Spinner />
+  const items = data.items || []
+  return <main className="student-portal fade-in">
+    <header className="student-portal-head"><div><h1>Curriculum Execution</h1><p>Progress for your current academic year and enrolled courses.</p></div></header>
+    {!items.length ? <Empty text="No curriculum execution records match your current year and enrolled courses." /> : <section className="student-portal-card">
+      <div className="faculty-student-table-wrap"><table><thead><tr><th>Course</th><th>Academic year</th><th>Section</th><th>Schedule</th><th>Dates</th><th>Status</th></tr></thead><tbody>
+        {items.map((item: any) => <tr key={item.id}><td><b>{item.course_code}</b><span>{item.course_title}</span></td><td>{item.academic_year}<span>{item.term}</span></td><td>{item.section}</td><td>{item.schedule || 'Not set'}<span>{item.room || 'Room not set'}</span></td><td>{item.course_start_date || 'Not started'}<span>{item.expected_completion_date || 'No end date'}</span></td><td>{item.execution_status}</td></tr>)}
+      </tbody></table></div>
+    </section>}
+  </main>
+}
+
+export function AcademicNotices() {
+  const [data, setData] = useState<any>(null)
+  useEffect(() => { api.academicAnnouncements().then(setData).catch(() => setData({ announcements: [] })) }, [])
+  if (!data) return <Spinner />
+  const rows = data.announcements || []
+  return <main className="faculty-students fade-in"><section className="faculty-students-heading"><div><h1>Academic Notices</h1><p>Published academic notices for the institution.</p></div></section><article className="faculty-student-table-card"><header><div><h2>Notices</h2><p>{rows.length ? `${rows.length} notice${rows.length === 1 ? '' : 's'}` : 'No current notices.'}</p></div></header><div className="faculty-student-table-wrap"><table><thead><tr><th>Title</th><th>Notice</th><th>Date</th></tr></thead><tbody>{rows.map((row: any) => <tr key={row.id}><td><b>{row.title}</b></td><td>{row.body || '-'}</td><td>{row.published_at ? new Date(row.published_at).toLocaleDateString() : '-'}</td></tr>)}{!rows.length && <tr><td colSpan={3}>No academic notices to display.</td></tr>}</tbody></table></div></article></main>
 }
 
 function StudentAcademicMetric({
@@ -2587,6 +2613,7 @@ export function StudentFeesView() {
   const [data, setData] = useState<any>(null)
   const [paying, setPaying] = useState('')
   const [semester, setSemester] = useState('')
+  const [category, setCategory] = useState('all')
   const [paymentInvoice, setPaymentInvoice] = useState<any>(null)
   const [paymentAmount, setPaymentAmount] = useState('')
   const [challanInvoice, setChallanInvoice] = useState<any>(null)
@@ -2598,12 +2625,23 @@ export function StudentFeesView() {
 
   useEffect(() => {
     api.studentFees().then(setData).catch(() => setData({ invoices: [], payments: [], summary: { balance: 0 } }))
-    api.studentChallans().then((r:any) => setChallans(r.challans || [])).catch(() => setChallans([]))
+    api.studentChallans().then((r: any) => setChallans(r.challans || [])).catch(() => setChallans([]))
   }, [])
 
   if (!data) return <Spinner />
-  const semesters = [...new Set(data.invoices.map((invoice: any) => invoice.semester || invoice.term))]
-  const visibleInvoices = data.invoices.filter((invoice: any) => !semester || (invoice.semester || invoice.term) === semester)
+
+  const defaultFeeCategories = ['Tuition', 'Exam', 'Library', 'Hostel', 'Transport', 'Lab', 'Development', 'Admission', 'Other']
+  const semesters = [...new Set((data.invoices || []).map((invoice: any) => invoice.semester || invoice.term))]
+  const categories = Array.from(new Set([
+    ...defaultFeeCategories,
+    ...(data.categories || []).map((item: any) => item.fee_category || 'Uncategorised'),
+    ...(data.invoices || []).map((invoice: any) => invoice.fee_category || 'Uncategorised'),
+  ]))
+  const visibleInvoices = (data.invoices || []).filter((invoice: any) => {
+    const matchesSemester = !semester || (invoice.semester || invoice.term) === semester
+    const matchesCategory = category === 'all' || (invoice.fee_category || 'Uncategorised') === category
+    return matchesSemester && matchesCategory
+  })
   const visibleBalance = visibleInvoices.reduce((total: number, invoice: any) => total + invoice.balance, 0)
 
   function openPayment(invoice: any) {
@@ -2611,17 +2649,39 @@ export function StudentFeesView() {
     setPaymentAmount(String(invoice.balance))
   }
 
-  function openChallan(invoice: any) { setChallanInvoice(invoice); setChallanAmount(String(invoice.balance)) }
+  function openChallan(invoice: any) {
+    setChallanInvoice(invoice)
+    setChallanAmount(String(invoice.balance))
+  }
+
   async function generateChallan(invoice: any, amount: number) {
     try {
       if (!Number.isFinite(amount) || amount <= 0 || amount > invoice.balance) throw new Error(`Enter an amount between ₹1 and ₹${Number(invoice.balance).toLocaleString('en-IN')}`)
-      const r:any = await api.createStudentChallan(invoice.id, amount); setChallans(await api.studentChallans().then((x:any) => x.challans || [])); setChallanInvoice(null); alert(`Challan ${r.challan.challan_number} for ${money(amount)} is ready to download.`)
+      const r: any = await api.createStudentChallan(invoice.id, amount)
+      setChallans(await api.studentChallans().then((x: any) => x.challans || []))
+      setChallanInvoice(null)
+      alert(`Challan ${r.challan.challan_number} for ${money(amount)} is ready to download.`)
+    } catch (error: any) {
+      alert(error.message || 'Unable to generate challan')
     }
-    catch (error:any) { alert(error.message || 'Unable to generate challan') }
   }
+
   async function submitProof() {
-    try { await api.submitOfflineProof({ challan_id: offline.id, method: offlineMethod, amount: offline.amount, reference_number: offlineReference, transaction_date: new Date().toISOString().slice(0, 10) }); alert('Payment reference submitted for Accounts Office verification.'); setOffline(null); setOfflineReference(''); setChallans(await api.studentChallans().then((x:any) => x.challans || [])) }
-    catch (error:any) { alert(error.message || 'Unable to submit payment proof') }
+    try {
+      await api.submitOfflineProof({
+        challan_id: offline.id,
+        method: offlineMethod,
+        amount: offline.amount,
+        reference_number: offlineReference,
+        transaction_date: new Date().toISOString().slice(0, 10),
+      })
+      alert('Payment reference submitted for Accounts Office verification.')
+      setOffline(null)
+      setOfflineReference('')
+      setChallans(await api.studentChallans().then((x: any) => x.challans || []))
+    } catch (error: any) {
+      alert(error.message || 'Unable to submit payment proof')
+    }
   }
 
   async function pay(invoice: any, amount: number) {
@@ -2646,12 +2706,13 @@ export function StudentFeesView() {
       </section>
       <div className="student-fees-grid">
         <div className="card student-invoices-card">
-          <div className="card-h"><div><h3>Fee invoices</h3><span className="hint">Secure payment through Razorpay</span></div><div className="student-fee-filter"><select className="select" value={semester} onChange={e => setSemester(e.target.value)}><option value="">All semesters</option>{semesters.map((item: any) => <option key={item} value={item}>{item}</option>)}</select><span className="student-fee-count">{visibleInvoices.length} invoice{visibleInvoices.length === 1 ? '' : 's'}</span></div></div>
+          <div className="card-h"><div><h3>Fee invoices</h3><span className="hint">Secure payment through Razorpay</span></div><div className="student-fee-filter"><select className="select" value={semester} onChange={e => setSemester(e.target.value)}><option value="">All semesters</option>{semesters.map((item: any) => <option key={item} value={item}>{item}</option>)}</select><select className="select" value={category} onChange={e => setCategory(e.target.value)}><option value="all">All categories</option>{categories.map((item: string) => <option key={item} value={item}>{item}</option>)}</select><span className="student-fee-count">{visibleInvoices.length} invoice{visibleInvoices.length === 1 ? '' : 's'}</span></div></div>
           <div className="tbl-scroll">
             <table className="tbl">
               <thead>
                 <tr>
                   <th>Term</th>
+                  <th>Category</th>
                   <th>Fee billed</th>
                   <th>Paid</th>
                   <th>Balance</th>
@@ -2663,6 +2724,7 @@ export function StudentFeesView() {
                 {visibleInvoices.map((invoice: any, index: number) => (
                   <tr key={`${invoice.term}-${index}`} className={invoice.balance > 0 ? 'invoice-due' : 'invoice-paid'}>
                     <td><b>{invoice.semester || invoice.term}</b><small>{invoice.due_date ? `Due ${new Date(`${invoice.due_date}T00:00:00`).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}` : invoice.term}</small></td>
+                    <td><span className="pill s-active">{invoice.fee_category || 'Uncategorised'}</span></td>
                     <td><b>{money(invoice.amount)}</b><small>Fee ledger amount</small></td>
                     <td>{money(invoice.paid)}</td>
                     <td><b className="invoice-balance">{money(invoice.balance)}</b></td>
@@ -2987,18 +3049,19 @@ function blankPersonalEvent(date: string) {
   }
 }
 
-function buildPersonalEventPayload(form: any) {
-  const startAt = combineDateAndTime(form.startDate, form.startTime)
-  const endAt = combineDateAndTime(form.endDate, form.endTime)
+function buildPersonalEventPayload(form: any = {}) {
+  const safeForm = form || {}
+  const startAt = combineDateAndTime(safeForm.startDate, safeForm.startTime)
+  const endAt = combineDateAndTime(safeForm.endDate, safeForm.endTime)
   return {
-    title: String(form.title || '').trim() || 'Personal Event',
-    note: String(form.note || '').trim(),
+    title: String(safeForm.title || '').trim() || 'Personal Event',
+    note: String(safeForm.note || '').trim(),
     start_at: startAt,
     end_at: endAt,
   }
 }
 
-function combineDateAndTime(rawDate: string, rawTime: string) {
+function combineDateAndTime(rawDate: string | undefined, rawTime: string | undefined) {
   const dateKey = rawDate || todayDateKey()
   const timeKey = rawTime || '09:00'
   return `${dateKey}T${timeKey}:00`
