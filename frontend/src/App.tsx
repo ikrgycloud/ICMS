@@ -60,6 +60,28 @@ import { FacultyMaterials } from './personas/CourseMaterials'
 import FacultyConditionalView from './personas/FacultyConditionalViews'
 import ParentHome from './personas/ParentHome'
 import FrontDeskWorkspace from './frontdesk/FrontDeskWorkspace'
+import HodOverview from './modules/HodOverview'
+import { HodDeferredPage, HodFacultyWorkload } from './personas/HodPortal'
+import HodTeachingAllocations from './personas/HodTeachingAllocations'
+import HodProgramsCourses from './personas/HodProgramsCourses'
+import HodSectionsTimetable from './personas/HodSectionsTimetable'
+import HodDepartmentStudents from './personas/HodDepartmentStudents'
+import HodAttendanceMonitoring from './personas/HodAttendanceMonitoring'
+import HodAtRiskStudents from './personas/HodAtRiskStudents'
+import HodReviewInbox from './personas/HodReviewInbox'
+import HodExaminationCoordination from './personas/HodExaminationCoordination'
+import HodWorkflowCenter from './personas/HodWorkflowCenter'
+import HodMyProfile from './personas/HodMyProfile'
+import HodDepartmentReports from './personas/HodDepartmentReports'
+import HodDepartmentPlanning from './personas/HodDepartmentPlanning'
+import HodCurriculumRequests from './personas/HodCurriculumRequests'
+import HodDepartmentResources from './personas/HodDepartmentResources'
+import HodStaffingRequests from './personas/HodStaffingRequests'
+import HodStudentWelfareEscalations from './personas/HodStudentWelfareEscalations'
+import HodDepartmentAudit from './personas/HodDepartmentAudit'
+import HodMyLeave from './personas/HodMyLeave'
+import HodDigitalId from './personas/HodDigitalId'
+import HodResearchIqac from './personas/HodResearchIqac'
 import { PageHead } from './modules/kit'
 
 const LEVEL_COLORS: Record<number, string> = {
@@ -132,6 +154,17 @@ const FACULTY_ACTIVE_LABEL: Record<string, string> = {
   payroll: 'Payroll', digital_id: 'Digital ID', messages: 'Messages', announcements: 'Announcements',
   research: 'Research & Guidance', academic_calendar: 'Academic Calendar', directory: 'My Profile',
 }
+
+const HOD_NAV = [
+  ['WORKSPACE', 'Overview', 'overview'],
+  ['DEPARTMENT OPERATIONS', 'Department Planning', 'hod_planning'], ['DEPARTMENT OPERATIONS', 'Faculty & Workload', 'hod_faculty'], ['DEPARTMENT OPERATIONS', 'Teaching Allocations', 'hod_allocations'], ['DEPARTMENT OPERATIONS', 'Programs & Courses', 'hod_courses'], ['DEPARTMENT OPERATIONS', 'Sections & Timetable', 'hod_sections'],
+  ['STUDENT SUCCESS', 'Department Students', 'hod_students'], ['STUDENT SUCCESS', 'Attendance Monitoring', 'hod_attendance'], ['STUDENT SUCCESS', 'At-Risk Students', 'hod_risk'],
+  ['ACADEMIC REVIEW', 'My Reviews', 'hod_reviews'], ['ACADEMIC REVIEW', 'Examination Coordination', 'hod_exams'],
+  ['REQUESTS & ESCALATIONS', 'Curriculum Requests', 'hod_curriculum_requests'], ['REQUESTS & ESCALATIONS', 'Department Resources', 'hod_resource_requests'], ['REQUESTS & ESCALATIONS', 'Staffing Requests', 'hod_staffing_requests'], ['REQUESTS & ESCALATIONS', 'Student Welfare Escalations', 'hod_student_welfare'], ['REQUESTS & ESCALATIONS', 'Research / IQAC', 'hod_research_iqac'],
+  ['PLANNING', 'My Requests', 'hod_requests'],
+  ['INSIGHTS', 'Department Reports', 'hod_reports'], ['INSIGHTS', 'Department Audit', 'hod_department_audit'],
+  ['SELF SERVICE', 'My Profile', 'hod_profile'], ['SELF SERVICE', 'My Leave', 'hod_leave'], ['SELF SERVICE', 'Digital ID', 'hod_digital_id'],
+] as const
 
 const COORDINATOR_NAV = [
   ['Workspace', 'Overview', 'overview'],
@@ -222,6 +255,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     // retained when opened from the dashboard KPI or the Principal sidebar.
     const virtualModule = ([3, 4].includes(user?.office_n) && PRINCIPAL_NAV.some(([, , key]) => key === view))
       || (user?.persona === 'faculty' && FACULTY_NAV.some(([, , key]) => key === view))
+      || (user?.office_n === 10 && HOD_NAV.some(([, , key]) => key === view || (key === 'hod_reviews' && view.startsWith('hod_reviews_'))))
       || (user?.persona === 'student' && ['assignments', 'course_materials'].includes(view))
       || view.startsWith('director_') || view.startsWith('manager_') || view.startsWith('coordinator_')
     // Finance is a student self-service destination even though students do
@@ -288,6 +322,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const principalShell = [3, 4].includes(user.office_n)
   const transportOfficeShell = user.office_n === 31
   const facultyShell = user.persona === 'faculty'
+  const hodShell = user.office_n === 10
   const directorAdmissionsShell = user.office_n === 15 && user.active_role === 'Director of Admissions'
   // The seeded office role is named “Admissions Manager”; accept the singular
   // wording from requirements too so both authorised role labels share this shell.
@@ -323,6 +358,10 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     ;(out[group] = out[group] || []).push({ key, label, group, source, enabled: true })
     return out
   }, {})
+  const hodGroups = HOD_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
+    ;(out[group] = out[group] || []).push({ key, label, group, enabled: true })
+    return out
+  }, {})
   const directorGroups = DIRECTOR_ADMISSIONS_NAV.reduce((out: Record<string, any[]>, [group, label, key]) => {
     const backingKey = DIRECTOR_TAB[key] ? 'admissions' : key
     const source = displayModules.find((module: any) => module.key === backingKey)
@@ -339,7 +378,9 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const managerGroupKeys = [...new Set(ADMISSION_MANAGER_NAV.map(([group]) => group))]
   const activeAdmissionsGroups = directorAdmissionsShell ? directorGroups : managerGroups
   const activeAdmissionsGroupKeys = directorAdmissionsShell ? directorGroupKeys : managerGroupKeys
-  const current = (coordinatorShell
+  const current = (hodShell
+    ? Object.values(hodGroups).flat().find((module: any) => module.key === view || (module.key === 'hod_reviews' && view.startsWith('hod_reviews_')))
+    : coordinatorShell
     ? Object.values(coordinatorGroups).flat().find((module: any) => module.key === view)
     : admissionsOperationsShell
     ? Object.values(activeAdmissionsGroups).flat().find((module: any) => module.key === view)
@@ -347,14 +388,14 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const campusHeader = user.scope_level === 'campus' ? user.scope_ref : ''
 
   return (
-    <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''} ${facultyShell ? 'faculty-shell' : ''} ${directorAdmissionsShell ? 'director-admissions-shell' : ''} ${admissionManagerShell ? 'admission-manager-shell' : ''}`}>
+    <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''} ${facultyShell ? 'faculty-shell' : ''} ${hodShell ? 'hod-shell' : ''} ${directorAdmissionsShell ? 'director-admissions-shell' : ''} ${admissionManagerShell ? 'admission-manager-shell' : ''}`}>
       <aside className={`sidebar ${sideOpen ? 'open' : ''}`}>
         <div className="brand">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <div className="seal">IC</div>
             <div>
               <div className="brand-name">ICMS</div>
-              <div className="brand-sub">{principalShell ? (user.office_n === 3 ? 'Campus Head Portal' : 'Principal Portal') : directorAdmissionsShell ? 'Admissions Directorate' : admissionManagerShell ? 'Admissions Operations' : facultyShell ? 'University Group' : 'University Group'}</div>
+              <div className="brand-sub">{hodShell ? 'HOD Office' : principalShell ? (user.office_n === 3 ? 'Campus Head Portal' : 'Principal Portal') : directorAdmissionsShell ? 'Admissions Directorate' : admissionManagerShell ? 'Admissions Operations' : facultyShell ? 'University Group' : 'University Group'}</div>
             </div>
           </div>
         </div>
@@ -368,19 +409,19 @@ export default function App({ onLogout }: { onLogout: () => void }) {
         </div>
 
         <nav className="side-nav">
-          {(coordinatorShell ? coordinatorGroupKeys : principalShell ? Object.keys(principalGroups) : facultyShell ? Object.keys(facultyGroups) : admissionsOperationsShell ? activeAdmissionsGroupKeys : groupKeys).map(group => (
+          {(hodShell ? Object.keys(hodGroups) : coordinatorShell ? coordinatorGroupKeys : principalShell ? Object.keys(principalGroups) : facultyShell ? Object.keys(facultyGroups) : admissionsOperationsShell ? activeAdmissionsGroupKeys : groupKeys).map(group => (
             <div key={group}>
               {admissionsOperationsShell ? <button className="side-sec director-nav-group" onClick={() => setCollapsedDirectorGroups(current => ({ ...current, [group]: !current[group] }))} type="button">{group}<span>{collapsedDirectorGroups[group] ? '+' : '−'}</span></button> : <div className="side-sec">{group}</div>}
-              {(!admissionsOperationsShell || !collapsedDirectorGroups[group]) && (coordinatorShell ? coordinatorGroups[group] : principalShell ? principalGroups[group] : facultyShell ? facultyGroups[group] : admissionsOperationsShell ? activeAdmissionsGroups[group] : groups[group]).map((module: any) => (
+              {(!admissionsOperationsShell || !collapsedDirectorGroups[group]) && (hodShell ? hodGroups[group] : coordinatorShell ? coordinatorGroups[group] : principalShell ? principalGroups[group] : facultyShell ? facultyGroups[group] : admissionsOperationsShell ? activeAdmissionsGroups[group] : groups[group]).map((module: any) => (
                 <button
-                  key={(principalShell || facultyShell || admissionsOperationsShell) ? `${group}-${module.label}` : module.key}
-                  className={`nav-item ${(coordinatorShell ? view === module.key : facultyShell ? FACULTY_ACTIVE_LABEL[view] === module.label : view === module.key) && (!(principalShell || facultyShell || admissionsOperationsShell) || module.enabled) ? 'on' : ''} ${(principalShell || facultyShell || admissionsOperationsShell) && !module.enabled ? 'nav-item-disabled' : ''}`}
+                  key={(principalShell || facultyShell || admissionsOperationsShell || hodShell) ? `${group}-${module.label}` : module.key}
+                  className={`nav-item ${(hodShell ? (view === module.key || view.startsWith(`${module.key}_`)) : coordinatorShell ? view === module.key : facultyShell ? FACULTY_ACTIVE_LABEL[view] === module.label : view === module.key) && (!(principalShell || facultyShell || admissionsOperationsShell || hodShell) || module.enabled) ? 'on' : ''} ${(principalShell || facultyShell || admissionsOperationsShell || hodShell) && !module.enabled ? 'nav-item-disabled' : ''}`}
                   onClick={() => {
-                    if ((principalShell || facultyShell || admissionsOperationsShell) && !module.enabled) return
+                    if ((principalShell || facultyShell || admissionsOperationsShell || hodShell) && !module.enabled) return
                     setView(module.key)
                     setSideOpen(false)
                   }}
-                  title={(principalShell || facultyShell || admissionsOperationsShell) && !module.enabled ? 'This module is not available for your current role' : module.label}
+                  title={(principalShell || facultyShell || admissionsOperationsShell || hodShell) && !module.enabled ? 'This module is not available for your current role' : module.label}
                   type="button"
                 >
                   <span className="ico">
@@ -517,6 +558,29 @@ export default function App({ onLogout }: { onLogout: () => void }) {
 function ModuleView({ view, module, user, onChange, go }: any) {
   const caps = module?.actions || {}
   if (user.office_n === 35) return <FrontDeskWorkspace view={view} />
+  if (user.office_n === 10) {
+    if (view === 'hod_planning') return <HodDepartmentPlanning go={go} />
+    if (view === 'hod_curriculum_requests') return <HodCurriculumRequests />
+    if (view === 'hod_resource_requests') return <HodDepartmentResources />
+    if (view === 'hod_staffing_requests') return <HodStaffingRequests />
+    if (view === 'hod_student_welfare') return <HodStudentWelfareEscalations />
+    if (view === 'hod_department_audit') return <HodDepartmentAudit />
+    if (view === 'hod_research_iqac') return <HodResearchIqac />
+    if (view === 'hod_faculty') return <HodFacultyWorkload go={go} />
+    if (view === 'hod_allocations') return <HodTeachingAllocations />
+    if (view === 'hod_courses') return <HodProgramsCourses go={go} />
+    if (view === 'hod_sections') return <HodSectionsTimetable go={go} />
+    if (view === 'hod_students') return <HodDepartmentStudents go={go} />
+    if (view === 'hod_attendance') return <HodAttendanceMonitoring go={go} />
+    if (view === 'hod_risk') return <HodAtRiskStudents go={go} />
+    if (view === 'hod_exams') return <HodExaminationCoordination go={go} />
+    if (view === 'hod_reports') return <HodDepartmentReports go={go} />
+    if (view === 'hod_reviews' || view.startsWith('hod_reviews_')) return <HodReviewInbox initialKind={view === 'hod_reviews' ? 'all' : view.replace('hod_reviews_', '')} />
+    if (view === 'hod_requests') return <HodWorkflowCenter go={go} />
+    if (view === 'hod_profile') return <HodMyProfile />
+    if (view === 'hod_leave') return <HodMyLeave />
+    if (view === 'hod_digital_id') return <HodDigitalId />
+  }
   if (view.startsWith('director_')) {
     if (DIRECTOR_TAB[view]) return <Admissions caps={caps} initialTab={DIRECTOR_TAB[view]} sidebarNavigation />
   }
@@ -525,6 +589,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
   }
   switch (view) {
     case 'overview':
+      if (user.office_n === 10) return <HodOverview user={user} go={go} />
       if (user.office_n === 17) return <AcademicCoordinatorCenter onNavigate={go} />
       if (user.office_n === 15 && user.active_role === 'Director of Admissions') return <DirectorAdmissionsDashboard user={user} go={go} />
       if (user.persona === 'student') return <StudentHome user={user} go={go} />

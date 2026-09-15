@@ -34,6 +34,7 @@ from core import auth, db, uid, write_audit
 from database import TENANT, office
 import domain_models as D
 from models import User, Notification
+from teaching import active_allocations_for_faculty
 
 router = APIRouter(prefix="/api/portal")
 
@@ -2480,7 +2481,7 @@ def student_attendance(ctx=Depends(auth), s=Depends(db)):
                 "semester": course.semester,
                 "section": section.section_code,
                 "room": section.room,
-                "schedule": _section_schedule_string(s, section.id, section.schedule),
+                "schedule": _section_schedule_string(s, section.id, "Timetable pending"),
                 "attended": counts["present"],
                 "total": counts["total"],
                 "attendance_pct": pct,
@@ -3390,10 +3391,15 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
 @router.get("/faculty/sections")
 def faculty_sections(ctx=Depends(auth), s=Depends(db)):
     stf = _staff_or_404(s, ctx)
-    sections = s.query(D.Section).filter(D.Section.faculty_person_id == stf.id).all()
+    allocations = active_allocations_for_faculty(s, stf.id)
+    allocation_by_section = {row.section_id: row for row in allocations}
+    sections = {row.id: row for row in s.query(D.Section).filter(D.Section.id.in_(allocation_by_section)).all()} if allocation_by_section else {}
     course_map = {row.id: row for row in s.query(D.Course).all()}
     out = []
-    for section in sections:
+    for allocation in allocations:
+        section = sections.get(allocation.section_id)
+        if not section:
+            continue
         course = course_map.get(section.course_id)
         enrolled = (
             s.query(D.Enrollment)
@@ -3404,10 +3410,11 @@ def faculty_sections(ctx=Depends(auth), s=Depends(db)):
         out.append(
             {
                 "id": section.id,
+                "teaching_allocation_id": allocation.id,
                 "course_code": course.code if course else "",
                 "title": course.title if course else "",
                 "section": section.section_code,
-                "schedule": _section_schedule_string(s, section.id, section.schedule),
+                "schedule": _section_schedule_string(s, section.id, "Timetable pending"),
                 "room": section.room,
                 "enrolled": enrolled,
                 "assessments": assessments,
@@ -3418,27 +3425,51 @@ def faculty_sections(ctx=Depends(auth), s=Depends(db)):
 
 @router.get("/faculty/schedule")
 def faculty_schedule(ctx=Depends(auth), s=Depends(db)):
-    """Weekly schedule built from the faculty member's assigned sections and staff events."""
+    """Weekly schedule from in-effect shared allocations and active timetable entries."""
     stf = _staff_or_404(s, ctx)
     today = date.today(); week_start = today - timedelta(days=today.weekday()); week_end = week_start + timedelta(days=6)
     courses = {row.id: row for row in s.query(D.Course).all()}
-    days = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
     events = []
-    sections = s.query(D.Section).filter(D.Section.faculty_person_id == stf.id).all()
-    for section in sections:
-        parts = (section.schedule or "").split(maxsplit=1); names = parts[0] if parts else ""; class_time = parts[1] if len(parts) > 1 else "Time pending"
-        course = courses.get(section.course_id)
-        for name in names.split("/"):
-            index = days.get(name[:3].title())
-            if index is not None:
-                events.append({"id": f"class-{section.id}-{index}", "date": (week_start + timedelta(days=index)).isoformat(), "time": class_time, "title": f"{course.code if course else 'Course'} ({section.section_code})", "detail": course.title if course else "Assigned section", "location": section.room or "Room pending", "type": "class", "route": "attendance"})
+    section_map = {row.id: row for row in s.query(D.Section).all()}
+    active_section_ids = {row.section_id for row in active_allocations_for_faculty(s, stf.id)}
+    for index in range(6):
+        session_day = week_start + timedelta(days=index)
+        allocations = active_allocations_for_faculty(s, stf.id, session_day)
+        section_ids = {row.section_id for row in allocations}
+        if not section_ids:
+            continue
+        entries = (s.query(D.TimetableEntry)
+                   .filter(D.TimetableEntry.section_id.in_(section_ids),
+                           D.TimetableEntry.status == "active",
+                           D.TimetableEntry.day_of_week == index,
+                           or_(D.TimetableEntry.effective_from.is_(None), D.TimetableEntry.effective_from <= session_day),
+                           or_(D.TimetableEntry.effective_to.is_(None), D.TimetableEntry.effective_to >= session_day))
+                   .all())
+        for entry in entries:
+            section = section_map.get(entry.section_id)
+            if not section:
+                continue
+            course = courses.get(section.course_id)
+            events.append({"id": f"class-{entry.id}-{session_day.isoformat()}", "date": session_day.isoformat(), "time": f"{entry.start_time}-{entry.end_time}", "title": f"{course.code if course else 'Course'} ({section.section_code})", "detail": course.title if course else "Assigned section", "location": entry.room or section.room or "Room pending", "type": "class", "route": "attendance"})
     for event in s.query(D.CalendarEvent).filter(D.CalendarEvent.status == "published").all():
         if not event.start_at or not (week_start <= event.start_at.date() <= week_end) or event.audience not in ("all", "staff", "leadership"):
             continue
         events.append({"id": f"event-{event.id}", "date": event.start_at.date().isoformat(), "time": "All day" if event.all_day else event.start_at.strftime("%H:%M"), "title": event.title, "detail": event.category, "location": event.location or "Campus", "type": "meeting", "route": "calendar"})
     events.sort(key=lambda item: (item["date"], item["time"], item["title"]))
     leaves = s.query(D.LeaveRequest).filter(D.LeaveRequest.staff_id == stf.id, D.LeaveRequest.status.in_(["pending", "approved"])).count()
-    return {"profile": {"name": stf.name, "email": stf.email, "phone": stf.phone, "office_hours": stf.office_hours}, "role": ctx.get("role"), "week_start": week_start.isoformat(), "events": events, "summary": {"classes": sum(item["type"] == "class" for item in events), "meetings": sum(item["type"] == "meeting" for item in events), "sections": len(sections), "leave_requests": leaves}}
+    timetable_pending = []
+    for section_id in active_section_ids:
+        if section_id not in section_map:
+            continue
+        timetable_exists = (s.query(D.TimetableEntry)
+                            .filter(D.TimetableEntry.section_id == section_id,
+                                    D.TimetableEntry.status == "active",
+                                    or_(D.TimetableEntry.effective_from.is_(None), D.TimetableEntry.effective_from <= today),
+                                    or_(D.TimetableEntry.effective_to.is_(None), D.TimetableEntry.effective_to >= today))
+                            .first())
+        if not timetable_exists:
+            timetable_pending.append(section_map[section_id])
+    return {"profile": {"name": stf.name, "email": stf.email, "phone": stf.phone, "office_hours": stf.office_hours}, "role": ctx.get("role"), "week_start": week_start.isoformat(), "events": events, "timetable_pending": [{"section_id": row.id, "section": row.section_code, "course_code": courses.get(row.course_id).code if courses.get(row.course_id) else "Course"} for row in timetable_pending], "summary": {"classes": sum(item["type"] == "class" for item in events), "meetings": sum(item["type"] == "meeting" for item in events), "sections": len(active_section_ids), "leave_requests": leaves}}
 
 
 @router.get("/faculty/section/{section_id}/students")

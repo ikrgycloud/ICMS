@@ -2,10 +2,12 @@ import { api } from '../api'
 import { PageHead, Kpis, Spinner, money, useLoad, Empty } from './kit'
 import ChairmanOverview from './ChairmanOverview'
 import PrincipalDashboard from './PrincipalDashboard'
+import HodOverview from './HodOverview'
 
 export default function Overview({ user, go }: { user: any; go: (v: string) => void }) {
   if (user.office_n === 1) return <ChairmanOverview go={go} />
   if ([3, 4].includes(user.office_n)) return <PrincipalDashboard user={user} go={go} />
+  if (user.office_n === 10) return <HodOverview user={user} go={go} />
   if (user.office_n === 22) return <FinanceManagerOverview user={user} go={go} />
   const [data, loading] = useLoad<any>(() => api.overview())
   if (loading || !data) return <Spinner />
