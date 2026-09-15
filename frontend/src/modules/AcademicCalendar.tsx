@@ -13,9 +13,10 @@ const CATEGORIES = [
   "Break",
   "Experiential",
 ];
-const blank = (term = "") => ({
+const blank = (term = "", academicYear = "") => ({
   id: "",
   term,
+  academic_year: academicYear,
   title: "",
   category: "Teaching",
   campus: "All Campuses",
@@ -42,6 +43,9 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
     [form, setForm] = useState<any>(blank()),
     [detail, setDetail] = useState<any>(null),
     [modal, setModal] = useState(false),
+    [returnDetail, setReturnDetail] = useState<any>(null),
+    [returnReason, setReturnReason] = useState(""),
+    [returnError, setReturnError] = useState(""),
     [saving, setSaving] = useState(false);
   async function load(value = term) {
     setLoading(true);
@@ -101,15 +105,7 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
       }, {}),
     [entries],
   );
-  const pending = useMemo(
-    () =>
-      (data?.entries || []).filter((x: any) =>
-        String(x.status).toLowerCase().includes("pending")
-      ).concat((data?.proposals || []).filter((x: any) =>
-        ["SUBMITTED", "RESUBMITTED"].includes(x.state),
-      )),
-    [data],
-  );
+  const pending = useMemo(() => data?.review_inbox || [], [data]);
   const upcoming = useMemo(
     () =>
       (data?.entries || [])
@@ -117,10 +113,9 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
         .slice(0, 4),
     [data],
   );
-  const canCreate = !!(data?.permissions?.create && (caps?.create || user?.office_n === 17)),
-    canEdit = !!(data?.permissions?.edit && caps?.edit),
-    canDelete = !!(data?.permissions?.delete && caps?.delete);
-  const showCreate = user?.office_n === 4 || user?.office_n === 17;
+  const canEdit = user?.office_n === 17;
+  const canDelete = user?.office_n === 17;
+  const showCreate = user?.office_n === 17;
   const examConflicts = useMemo(() => {
     const exams = (data?.entries || []).filter((x: any) =>
       /exam/i.test(x.category),
@@ -142,7 +137,10 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
   }, [data]);
   const canDecide = !!data?.workflow_permissions?.decide;
   function open(x: any) {
-    if (x.editable && canEdit) {
+    // Drafts and returned records are editable by their coordinator.  An
+    // approved record must open in the governed detail view so the sole
+    // permitted next action is publication, not an accidental direct edit.
+    if (x.editable && canEdit && ["draft", "Dean Returned", "VP Returned"].includes(x.status)) {
       setForm({
         id: x.id,
         term: x.term,
@@ -160,15 +158,24 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
     setModal(true);
   }
   async function save() {
+    const title = String(form.title || "").trim();
+    const selectedTerm = String(form.term || "").trim();
+    const selectedAcademicYear = String(form.academic_year || "").trim();
+    if (!title || !selectedTerm || !selectedAcademicYear) {
+      setError("Title, term, and academic year are required before saving an academic event.");
+      return;
+    }
     setSaving(true);
     try {
       const payload = {
         ...form,
+        title,
+        term: selectedTerm,
+        academic_year: selectedAcademicYear,
         student_year: form.student_year === "" || form.student_year == null ? null : Number(form.student_year),
         program_id: form.program_id?.trim() || null,
         department_id: form.department_id?.trim() || null,
       };
-      delete payload.academic_year;
       form.id
         ? await api.updateAcademicCalendarEntry(form.id, payload)
         : await api.createAcademicCalendarEntry(payload);
@@ -231,17 +238,17 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
   async function decide(proposal: any, decision: string) {
     setSaving(true);
     try {
-      await api.decideAcademicCalendarProposal(
-        proposal.id,
-        decision,
-        proposal.status_version,
-        decision === "approve" ? "" : "Decision recorded by Dean Academics",
-      );
+      await api.decideAcademicCalendarEntry(proposal.id, { action: decision, reason: decision === "approve" ? "" : "Decision recorded by reviewer", expected_version: proposal.version_no });
       setModal(false);
       setDetail(null);
       await load();
     } catch (e: any) {
-      setError(e.message || "Could not record decision.");
+      if (e?.status === 409) {
+        setModal(false);
+        setDetail(null);
+        await load();
+        setError("This calendar is no longer current. The queue was refreshed; reopen the latest version before deciding.");
+      } else setError(e.message || "Could not record decision.");
     } finally {
       setSaving(false);
     }
@@ -251,6 +258,20 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
     try { await api.submitAcademicCalendarEntry(form.id); setModal(false); await load(); }
     catch (e: any) { setError(e.message || "Could not submit the draft."); }
     finally { setSaving(false); }
+  }
+  async function returnForRevision() {
+    if (!returnDetail || !returnReason.trim()) {
+      setReturnError("Enter a clear reason so the Academic Coordinator can revise the event.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.decideAcademicCalendarEntry(returnDetail.id, { action: "return", reason: returnReason.trim(), expected_version: returnDetail.version_no });
+      setReturnDetail(null); setReturnReason(""); setReturnError(""); setModal(false); setDetail(null); await load();
+    } catch (e: any) {
+      if (e?.status === 409) { setReturnDetail(null); setModal(false); setDetail(null); await load(); setError("This calendar is no longer current. The queue was refreshed; reopen the latest version before deciding."); }
+      else setReturnError(e.message || "Could not return the calendar.");
+    } finally { setSaving(false); }
   }
   if (loading && !data) return <Spinner />;
   return (
@@ -266,7 +287,7 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
               onClick={() => {
                 setError("");
                 setDetail(null);
-                setForm(blank(data?.selected_term || term));
+                setForm(blank(data?.selected_term || term, academicYear || data?.academic_year_options?.[0] || ""));
                 setModal(true);
               }}
             >
@@ -412,12 +433,12 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
                 <div className="card-pad academic-governance">
                   <div className="snap">
                     <span>Owner</span>
-                    <b>Academic Office</b>
+                    <b>Academic Coordinator</b>
                   </div>
                   <div className="snap">
                     <span>Approval authority</span>
-                    <b>Principal</b>
                     <b>Dean Academics</b>
+                    <b>Vice Principal when operational review is required</b>
                   </div>
                   <div className="snap">
                     <span>Pending changes</span>
@@ -426,8 +447,9 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
                   <p>
                     Changes follow role permissions and are recorded in the
                     audit trail.
-                    Academic Office proposes changes. Dean Academics reviews,
-                    decides, publishes, and all actions are recorded in the audit trail.
+                    The Academic Coordinator drafts and publishes. Dean Academics
+                    performs governance review, then the Vice Principal performs
+                    operational review when the calendar item requires it.
                   </p>
                 </div>
               </section>
@@ -451,7 +473,7 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
                   Delete
                 </button>
               )}
-              {form.id && user?.office_n === 17 && form.status === "draft" && <button className="btn btn-out" disabled={saving} onClick={submitDraft}>Submit for review</button>}
+              {form.id && user?.office_n === 17 && ["draft", "Dean Returned", "VP Returned"].includes(form.status) && <button className="btn btn-out" disabled={saving} onClick={submitDraft}>Submit for Dean review</button>}
               <button className="btn btn-out" onClick={() => setModal(false)}>
                 Cancel
               </button>
@@ -480,6 +502,16 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
                 onChange={(e) => setForm({ ...form, term: e.target.value })}
               />
             </Field>
+            <Field label="Academic year">
+              <input
+                className="inp"
+                placeholder="e.g. 2026-27"
+                value={form.academic_year || ""}
+                onChange={(e) => setForm({ ...form, academic_year: e.target.value })}
+              />
+            </Field>
+          </div>
+          <div className="grid-2">
             <Field label="Category">
               <select
                 className="select"
@@ -549,7 +581,7 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
             setModal(false);
             setDetail(null);
           }}
-          footer={detail.status === "pending_review" && user?.office_n !== 17 ? <><button className="btn btn-out" disabled={saving} onClick={async () => { const reason = window.prompt("Reason for returning this change:") || ""; if (!reason.trim()) return; setSaving(true); try { await api.decideAcademicCalendarEntry(detail.id, { action: "return", reason }); setModal(false); setDetail(null); await load(); } catch (e: any) { setError(e.message || "Could not return the change."); } finally { setSaving(false); } }}>Return</button><button className="btn btn-crimson" disabled={saving} onClick={async () => { setSaving(true); try { await api.decideAcademicCalendarEntry(detail.id, { action: "approve" }); setModal(false); setDetail(null); await load(); } catch (e: any) { setError(e.message || "Could not approve the change."); } finally { setSaving(false); } }}>Approve</button></> : undefined}
+          footer={<>{detail.status === "Dean Review" && user?.office_n === 6 && <><button className="btn btn-out" disabled={saving} onClick={() => { setReturnDetail(detail); setReturnReason(""); setReturnError(""); }}>Return</button><button className="btn btn-crimson" disabled={saving} onClick={() => decide(detail, "approve")}>Approve</button></>}{detail.status === "VP Review" && user?.office_n === 5 && <><button className="btn btn-out" disabled={saving} onClick={() => { setReturnDetail(detail); setReturnReason(""); setReturnError(""); }}>Return</button><button className="btn btn-crimson" disabled={saving} onClick={() => decide(detail, "approve")}>Operationally approve</button></>}{detail.status === "Approved" && user?.office_n === 17 && <button className="btn btn-crimson" disabled={saving} onClick={async () => { setSaving(true); try { await api.publishAcademicCalendarEntry(detail.id); setModal(false); setDetail(null); await load(); } catch (e: any) { setError(e.message || "Could not publish the calendar."); } finally { setSaving(false); } }}>Publish calendar</button>}</>}
         >
           <div className="calendar-detail">
             <Pill s={detail.status || "published"} />
@@ -566,6 +598,22 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
             <div className="snap"><span>Academic year / term</span><b>{detail.academic_year || "All years"} · {detail.term}</b></div>
             <div className="snap"><span>Target</span><b>{detail.program_id || "All programs"} · {detail.department_id || "All departments"} · {detail.student_year ? `${detail.student_year} Year` : "All student years"}</b></div>
             <div className="snap"><span>Time</span><b>{detail.start_time || "Not specified"}{detail.end_time ? ` – ${detail.end_time}` : ""}</b></div>
+          </div>
+        </Modal>
+      )}
+      {returnDetail && (
+        <Modal
+          className="academic-calendar-return-modal"
+          title="Return academic event for revision"
+          onClose={() => { if (!saving) { setReturnDetail(null); setReturnReason(""); setReturnError(""); } }}
+          footer={<><button className="btn btn-out" disabled={saving} onClick={() => { setReturnDetail(null); setReturnReason(""); setReturnError(""); }}>Cancel</button><button className="btn btn-crimson" disabled={saving || !returnReason.trim()} onClick={returnForRevision}>{saving ? "Returning…" : "Return for revision"}</button></>}
+        >
+          <div className="calendar-return-dialog">
+            <Pill s={returnDetail.status} />
+            <h4>{returnDetail.title}</h4>
+            <p>Explain what must be corrected. Your note is recorded in the workflow audit trail and sent to the Academic Coordinator.</p>
+            <Field label="Return reason"><textarea className="inp" rows={4} autoFocus value={returnReason} placeholder="Example: Confirm that the examination preparation dates do not overlap with the teaching period." onChange={e => { setReturnReason(e.target.value); setReturnError(""); }} /></Field>
+            {returnError && <div className="calendar-banner warn">{returnError}</div>}
           </div>
         </Modal>
       )}
@@ -592,7 +640,6 @@ function Side({ title, rows, empty, open, showPill }: any) {
       <div className="card-pad">
         {rows.length ? (
           rows.map((x: any) => (
-            <>
             <button
               className="academic-side-item"
               onClick={() => open(x)}
@@ -604,67 +651,6 @@ function Side({ title, rows, empty, open, showPill }: any) {
               </span>
               {showPill && <Pill s={x.status} />}
             </button>
-            <div className="academic-side-item" key={x.id}>
-              <button className="linkish" onClick={() => open(x)} type="button">
-                <strong>{x.title}</strong>
-                <span>
-                  {dates(x.start_date, x.end_date)} · {x.category}
-                </span>
-                {showPill && <Pill s={x.status} />}
-              </button>
-              {showPill && (
-                <span className="row-actions">
-                  <button
-                    className="btn btn-sm btn-crimson"
-                    onClick={() =>
-                      api
-                        .decideAcademicCalendarProposal(
-                          x.id,
-                          "approve",
-                          x.status_version,
-                        )
-                        .then(() => window.location.reload())
-                    }
-                    type="button"
-                  >
-                    Approve
-                  </button>
-                  <button
-                    className="btn btn-sm btn-out"
-                    onClick={() =>
-                      api
-                        .decideAcademicCalendarProposal(
-                          x.id,
-                          "return",
-                          x.status_version,
-                          "Decision recorded by Dean Academics",
-                        )
-                        .then(() => window.location.reload())
-                    }
-                    type="button"
-                  >
-                    Return
-                  </button>
-                  <button
-                    className="btn btn-sm btn-out"
-                    onClick={() =>
-                      api
-                        .decideAcademicCalendarProposal(
-                          x.id,
-                          "reject",
-                          x.status_version,
-                          "Decision recorded by Dean Academics",
-                        )
-                        .then(() => window.location.reload())
-                    }
-                    type="button"
-                  >
-                    Reject
-                  </button>
-                </span>
-              )}
-            </div>
-            </>
           ))
         ) : (
           <Empty icon="✓" text={empty} />

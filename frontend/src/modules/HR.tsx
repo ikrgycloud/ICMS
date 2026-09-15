@@ -2,20 +2,23 @@ import { useState, useEffect } from 'react'
 import { api } from '../api'
 import { PageHead, Spinner, DecisionToast } from './kit'
 
-export default function HR({ caps, initialTab = 'leave' }: { caps: any, initialTab?: 'leave' | 'jobs' | 'payroll' }) {
+export default function HR({ caps, initialTab = 'leave', user }: { caps: any, initialTab?: 'leave' | 'jobs' | 'payroll', user?: any }) {
   const [tab, setTab] = useState<'leave' | 'jobs' | 'payroll'>(initialTab)
   const [leave, setLeave] = useState<any>(null)
   const [jobs, setJobs] = useState<any>(null)
   const [payrollRuns, setPayrollRuns] = useState<any>(null)
   const [payrollDetail, setPayrollDetail] = useState<any>(null)
   const [decision, setDecision] = useState<any>(null)
+  const canManagePayroll = [24, 25].includes(Number(user?.office_n))
 
   function load() {
     api.leave().then(setLeave).catch(() => {})
     api.jobs().then(setJobs).catch(() => {})
-    api.payrollRuns().then(setPayrollRuns).catch(() => setPayrollRuns({ runs: [] }))
+    // Payroll run data is restricted to HR payroll officers.  Do not issue a
+    // known-forbidden request merely because a Principal opened Leave/HR.
+    if (canManagePayroll) api.payrollRuns().then(setPayrollRuns).catch(() => setPayrollRuns({ runs: [] }))
   }
-  useEffect(() => { setTab(initialTab) }, [initialTab])
+  useEffect(() => { setTab(initialTab === 'payroll' && !canManagePayroll ? 'leave' : initialTab) }, [initialTab, canManagePayroll])
   useEffect(() => { load() }, [])
 
   async function decide(id: string, action: string) {
@@ -73,7 +76,7 @@ export default function HR({ caps, initialTab = 'leave' }: { caps: any, initialT
       <div className="tabs">
         <button className={`tab ${tab === 'leave' ? 'on' : ''}`} onClick={() => setTab('leave')}>Leave requests</button>
         <button className={`tab ${tab === 'jobs' ? 'on' : ''}`} onClick={() => setTab('jobs')}>Openings</button>
-        <button className={`tab ${tab === 'payroll' ? 'on' : ''}`} onClick={() => setTab('payroll')}>Payroll</button>
+        {canManagePayroll && <button className={`tab ${tab === 'payroll' ? 'on' : ''}`} onClick={() => setTab('payroll')}>Payroll</button>}
       </div>
 
       {tab === 'leave' && (
@@ -121,7 +124,7 @@ export default function HR({ caps, initialTab = 'leave' }: { caps: any, initialT
         </div>
       )}
 
-      {tab === 'payroll' && (
+      {tab === 'payroll' && canManagePayroll && (
         <div className="card">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
             <h3 style={{ margin: 0 }}>Payroll runs</h3>

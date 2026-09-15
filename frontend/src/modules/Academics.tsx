@@ -11,8 +11,8 @@ const DAY_OPTIONS = [
   { value: 5, label: 'Saturday' },
 ]
 
-export default function Academics({ caps, go }: { caps: any, go?: (view: string) => void }) {
-  const [tab, setTab] = useState<'sections' | 'courses' | 'offerings' | 'programmes'>('sections')
+export default function Academics({ caps, go, initialTab = 'sections', offeringWorkspace = false }: { caps: any, go?: (view: string) => void, initialTab?: 'sections' | 'courses' | 'offerings' | 'programmes', offeringWorkspace?: boolean }) {
+  const [tab, setTab] = useState<'sections' | 'courses' | 'offerings' | 'programmes'>(initialTab)
   const [sections, setSections] = useState<any>(null)
   const [courses, setCourses] = useState<any>(null)
   const [offerings, setOfferings] = useState<any>({ offerings: [] })
@@ -68,6 +68,10 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
   useEffect(() => {
     load()
   }, [])
+
+  useEffect(() => {
+    setTab(initialTab)
+  }, [initialTab])
 
   async function submitSection() {
     const offering = (offerings.offerings || []).find((row: any) => row.id === form.offering_id)
@@ -276,6 +280,12 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
   const sectionRows = Array.isArray(sections.sections) ? sections.sections : []
   const courseRows = Array.isArray(courses.courses) ? courses.courses : []
   const offeringRows = Array.isArray(offerings.offerings) ? offerings.offerings : []
+  // The HOD workspace is an action queue. Historical offerings that have
+  // already entered timetable review or been published cannot accept HOD
+  // changes, so showing them as "Pending" would be misleading.
+  const visibleOfferingRows = offeringWorkspace
+    ? offeringRows.filter((offering: any) => ['Draft', 'HOD Input Pending', 'Ready'].includes(String(offering.status || '')))
+    : offeringRows
   const eligibleSectionOfferings = offeringRows.filter((offering: any) => {
     const requested = Number(offering.hod_input?.required_sections || 0)
     const created = Number(offering.sections?.length || 0)
@@ -302,21 +312,22 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
     setShowAdd(true)
   }
   const selectedSectionOffering = eligibleSectionOfferings.find((offering: any) => offering.id === form.offering_id)
+  const hodRequirementsSubmitted = String(selectedOffering?.hod_input?.status || '').toLowerCase() === 'submitted'
 
   return (
     <div className="fade-in">
       <PageHead
-        title="Academics"
-        sub="Course catalog, sections, timetable management, and targeted student notices"
-        right={tab === 'programmes' ? <GatedBtn can={!!caps.create_program} onClick={() => { setProgrammeForm({ ...programmeForm, department_id: programmes.departments[0]?.id || '' }); setShowProgrammeAdd(true) }}>+ Create programme</GatedBtn> : <GatedBtn can={!!caps.create_section} onClick={() => openSectionCreate()}>+ Create section</GatedBtn>}
+        title={offeringWorkspace ? 'Course Offerings' : 'Academics'}
+        sub={offeringWorkspace ? 'Set department delivery requirements that unlock governed section planning.' : 'Course catalog, sections, timetable management, and targeted student notices'}
+        right={offeringWorkspace ? undefined : (tab === 'programmes' ? <GatedBtn can={!!caps.create_program} onClick={() => { setProgrammeForm({ ...programmeForm, department_id: programmes.departments[0]?.id || '' }); setShowProgrammeAdd(true) }}>+ Create programme</GatedBtn> : <GatedBtn can={!!caps.create_section} onClick={() => openSectionCreate()}>+ Create section</GatedBtn>)}
       />
 
-      <div className="tabs">
+      {!offeringWorkspace && <div className="tabs">
         <button className={`tab ${tab === 'programmes' ? 'on' : ''}`} onClick={() => setTab('programmes')} type="button">Programmes ({programmes.programmes.length})</button>
         <button className={`tab ${tab === 'sections' ? 'on' : ''}`} onClick={() => setTab('sections')} type="button">Sections ({sections.sections.length})</button>
         <button className={`tab ${tab === 'courses' ? 'on' : ''}`} onClick={() => setTab('courses')} type="button">Course catalog ({courses.courses.length})</button>
         <button className={`tab ${tab === 'offerings' ? 'on' : ''}`} onClick={() => setTab('offerings')} type="button">Course offerings ({offerings.offerings?.length || 0})</button>
-      </div>
+      </div>}
 
       {tab === 'programmes' && <div className="card"><div className="card-pad"><p className="hint">Create the programme master here, then the Admissions Office can add it to an admission cycle.</p></div><div className="tbl-scroll"><table className="tbl"><thead><tr><th>Code</th><th>Programme</th><th>Department</th><th>Level</th><th>Duration</th></tr></thead><tbody>{programmes.programmes.map((programme: any) => <tr key={programme.id}><td className="mono"><b>{programme.code}</b></td><td>{programme.name}</td><td>{programme.department}</td><td>{programme.level}</td><td>{programme.duration_years} years</td></tr>)}</tbody></table></div></div>}
 
@@ -370,15 +381,19 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
       )}
 
       {tab === 'offerings' && (
-        <div className="card">
+        <div className={`card ${offeringWorkspace ? 'hod-offering-register' : ''}`}>
+          {offeringWorkspace && <div className="hod-offering-hero">
+            <div><span>DEPARTMENT DELIVERY CONTROL</span><h3>Review new course offerings</h3><p>Enter faculty, section and capacity requirements. Submission makes the offering ready for Academic Coordinator section planning.</p></div>
+            <div className="hod-offering-count"><b>{visibleOfferingRows.filter((row: any) => String(row.hod_input?.status || '').toLowerCase() !== 'submitted').length}</b><small>awaiting your input</small></div>
+          </div>}
           <div className="card-pad">
-            <p className="hint">Coordinator-created offerings within your department scope. Operational changes remain with the Academic Coordinator.</p>
+            <p className="hint">{offeringWorkspace ? 'Only offerings within your department are listed. Creating or changing an offering remains with the Academic Coordinator.' : 'Coordinator-created offerings within your department scope. Operational changes remain with the Academic Coordinator.'}</p>
           </div>
           <div className="tbl-scroll">
             <table className="tbl">
               <thead><tr><th>Course</th><th>Program</th><th>Academic year / term</th><th>Status</th><th>HOD input</th><th>Sections</th><th>Readiness</th></tr></thead>
               <tbody>
-                {(offerings.offerings || []).map((offering: any) => (
+                {visibleOfferingRows.map((offering: any) => (
                   <tr key={offering.id}>
                     <td><b className="mono">{offering.course_code}</b><br />{offering.course_title}</td>
                     <td>{offering.program_code || offering.program}</td>
@@ -388,7 +403,7 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
                     <td>{offering.sections?.length || 0} / {offering.hod_input?.required_sections || 0}</td>
                     <td>
                       <div className="row-actions">
-                        <button className="btn btn-sm btn-out" onClick={() => openHodReview(offering)} type="button">Workflow</button>
+                        <button className={`btn btn-sm ${offeringWorkspace && String(offering.hod_input?.status || '').toLowerCase() !== 'submitted' ? 'btn-brass' : 'btn-out'}`} onClick={() => openHodReview(offering)} type="button">{offeringWorkspace && String(offering.hod_input?.status || '').toLowerCase() !== 'submitted' ? 'Provide HOD input' : 'View requirements'}</button>
                         {eligibleSectionOfferings.some((row: any) => row.id === offering.id) && caps.create_section && <button className="btn btn-sm btn-brass" onClick={() => openSectionCreate(offering)} type="button">Add section</button>}
                       </div>
                       <div className="hint">{offering.readiness?.ready ? 'Ready' : 'In preparation'}</div>
@@ -398,7 +413,8 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
               </tbody>
             </table>
           </div>
-          {!offerings.offerings?.length && <div className="card-pad"><p className="hint">No course offerings are currently visible in your department scope.</p></div>}
+          {!visibleOfferingRows.length && <div className="card-pad"><p className="hint">{offeringWorkspace ? 'There are no offerings awaiting department requirements.' : 'No course offerings are currently visible in your department scope.'}</p></div>}
+          {offeringWorkspace && <style>{`.hod-offering-register{overflow:hidden}.hod-offering-hero{display:flex;justify-content:space-between;gap:24px;padding:22px 24px;background:linear-gradient(120deg,#3d1722 0%,#6f2438 58%,#9a6a25 160%);color:#fff}.hod-offering-hero span{font-size:10px;font-weight:800;letter-spacing:.12em;color:#efcf92}.hod-offering-hero h3{margin:6px 0;font-size:21px}.hod-offering-hero p{max-width:620px;margin:0;color:#f7e9ec;font-size:13px;line-height:1.55}.hod-offering-count{min-width:126px;align-self:center;padding:13px 17px;border:1px solid rgba(255,255,255,.3);border-radius:13px;background:rgba(255,255,255,.1);text-align:center}.hod-offering-count b{display:block;font-size:28px}.hod-offering-count small{text-transform:uppercase;font-size:9px;letter-spacing:.08em;color:#f6dfb8}@media(max-width:640px){.hod-offering-hero{padding:18px;flex-direction:column}.hod-offering-count{align-self:flex-start}}`}</style>}
         </div>
       )}
 
@@ -476,8 +492,8 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
           onClose={() => setShowHodReview(false)}
           footer={<>
             <button className="btn btn-out" onClick={() => setShowHodReview(false)} type="button">Close</button>
-            <button className="btn btn-out" onClick={saveHodReview} disabled={savingHodReview} type="button">{savingHodReview ? 'Saving...' : 'Save HOD input'}</button>
-            <button className="btn btn-brass" onClick={submitHodReview} disabled={submittingHodReview} type="button">{submittingHodReview ? 'Submitting...' : 'Submit HOD input'}</button>
+            {!hodRequirementsSubmitted && <><button className="btn btn-out" onClick={saveHodReview} disabled={savingHodReview} type="button">{savingHodReview ? 'Saving...' : 'Save HOD input'}</button>
+            <button className="btn btn-brass" onClick={submitHodReview} disabled={submittingHodReview} type="button">{submittingHodReview ? 'Submitting...' : 'Submit HOD input'}</button></>}
           </>}
         >
           <style>{`
@@ -487,7 +503,7 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
             .hod-workflow-hero h3 { margin:6px 0; font-size:22px; color:#fff; }.hod-workflow-hero p { margin:0; opacity:.85; font-size:13px; }
             .hod-workflow-stage { background:rgba(255,255,255,.14); border:1px solid rgba(255,255,255,.25); border-radius:10px; padding:8px 11px; text-align:right; font-size:11px; }.hod-workflow-stage b{display:block;font-size:13px;margin-top:3px;}
             .hod-timeline { border:1px solid #e8e9ed; border-radius:16px; padding:18px; background:#fff; }.hod-timeline-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:14px;}.hod-timeline-head h4{margin:0;font-size:14px;}.hod-timeline-head span{font-size:12px;color:#727780;}
-            .hod-timeline-steps { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }.hod-step{min-height:80px;padding:11px;border:1px solid #e8e9ed;border-radius:12px;background:#fafafb;}.hod-step-dot{width:23px;height:23px;border-radius:50%;display:grid;place-items:center;background:#d9dce1;color:#68707b;font-size:12px;font-weight:800;margin-bottom:7px;}.hod-step.done{background:#f1faf4;border-color:#cce8d5;}.hod-step.done .hod-step-dot{background:#25834d;color:#fff}.hod-step.active{background:#fff8ea;border-color:#eed69c;box-shadow:0 3px 12px rgba(154,112,24,.12)}.hod-step.active .hod-step-dot{background:#a56d14;color:#fff}.hod-step b{display:block;font-size:12px;line-height:1.3}.hod-step small{display:block;margin-top:4px;color:#767b84;font-size:10px;text-transform:uppercase;font-weight:700;letter-spacing:.04em}.hod-input-panel{border:1px solid #e8e9ed;border-radius:16px;padding:18px;background:linear-gradient(135deg,#fff,#faf9fb)}.hod-input-panel h4{margin:0 0 4px}.hod-input-panel p{margin:0 0 16px;color:#737881;font-size:12px}@media(max-width:650px){.hod-workflow-hero{flex-direction:column}.hod-timeline-steps{grid-template-columns:repeat(2,minmax(0,1fr))}}
+            .hod-timeline-steps { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }.hod-step{min-height:80px;padding:11px;border:1px solid #e8e9ed;border-radius:12px;background:#fafafb;}.hod-step-dot{width:23px;height:23px;border-radius:50%;display:grid;place-items:center;background:#d9dce1;color:#68707b;font-size:12px;font-weight:800;margin-bottom:7px;}.hod-step.done{background:#f1faf4;border-color:#cce8d5;}.hod-step.done .hod-step-dot{background:#25834d;color:#fff}.hod-step.active{background:#fff8ea;border-color:#eed69c;box-shadow:0 3px 12px rgba(154,112,24,.12)}.hod-step.active .hod-step-dot{background:#a56d14;color:#fff}.hod-step b{display:block;font-size:12px;line-height:1.3}.hod-step small{display:block;margin-top:4px;color:#767b84;font-size:10px;text-transform:uppercase;font-weight:700;letter-spacing:.04em}.hod-input-panel{border:1px solid #e8e9ed;border-radius:16px;padding:18px;background:linear-gradient(135deg,#fff,#faf9fb)}.hod-input-panel h4{margin:0 0 4px}.hod-input-panel p{margin:0 0 16px;color:#737881;font-size:12px}.hod-submitted-note{display:flex;flex-direction:column;gap:3px;margin:0 0 15px;padding:11px 13px;border:1px solid #c8e4d1;border-radius:10px;background:#f0faf3;color:#276540;font-size:12px}.hod-submitted-note span{color:#568067}.hod-input-panel .inp:disabled,.hod-input-panel .select:disabled{background:#f4f5f6;color:#596068;cursor:not-allowed}@media(max-width:650px){.hod-workflow-hero{flex-direction:column}.hod-timeline-steps{grid-template-columns:repeat(2,minmax(0,1fr))}}
           `}</style>
           <div className="hod-workflow">
           <section className="hod-workflow-hero">
@@ -497,23 +513,24 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
           <section className="hod-timeline"><div className="hod-timeline-head"><h4>Live workflow timeline</h4><span>Next: {selectedOffering.next_expected_action || 'Review HOD requirements'}</span></div><div className="hod-timeline-steps">
             {workflowForOffering(selectedOffering).map((step: any, index: number) => <div key={step.label} className={`hod-step ${step.done ? 'done' : step.active ? 'active' : ''}`}><div className="hod-step-dot">{step.done ? '✓' : index + 1}</div><b>{step.label}</b><small>{step.done ? 'Completed' : step.active ? 'In progress' : 'Waiting'}</small></div>)}
           </div></section>
-          <section className="hod-input-panel"><h4>Department delivery requirements</h4><p>Save a draft while planning. Submit only when the department requirements are complete.</p>
+          <section className="hod-input-panel"><h4>Department delivery requirements</h4><p>{hodRequirementsSubmitted ? 'Requirements submitted and locked for downstream section planning.' : 'Save a draft while planning. Submit only when the department requirements are complete.'}</p>
+          {hodRequirementsSubmitted && <div className="hod-submitted-note"><b>✓ Requirements submitted</b><span>This record is read-only. A revision must be formally returned before it can change.</span></div>}
           <div className="grid-2">
             <div className="form-row">
               <label>Required faculty count</label>
-              <input className="inp" type="number" min="0" value={hodReviewForm.required_faculty_count} onChange={e => setHodReviewForm({ ...hodReviewForm, required_faculty_count: Number(e.target.value || 0) })} />
+              <input className="inp" disabled={hodRequirementsSubmitted} type="number" min="0" value={hodReviewForm.required_faculty_count} onChange={e => setHodReviewForm({ ...hodReviewForm, required_faculty_count: Number(e.target.value || 0) })} />
             </div>
             <div className="form-row">
               <label>Required sections</label>
-              <input className="inp" type="number" min="0" value={hodReviewForm.required_sections} onChange={e => setHodReviewForm({ ...hodReviewForm, required_sections: Number(e.target.value || 0) })} />
+              <input className="inp" disabled={hodRequirementsSubmitted} type="number" min="0" value={hodReviewForm.required_sections} onChange={e => setHodReviewForm({ ...hodReviewForm, required_sections: Number(e.target.value || 0) })} />
             </div>
             <div className="form-row">
               <label>Expected capacity</label>
-              <input className="inp" type="number" min="0" value={hodReviewForm.expected_capacity} onChange={e => setHodReviewForm({ ...hodReviewForm, expected_capacity: Number(e.target.value || 0) })} />
+              <input className="inp" disabled={hodRequirementsSubmitted} type="number" min="0" value={hodReviewForm.expected_capacity} onChange={e => setHodReviewForm({ ...hodReviewForm, expected_capacity: Number(e.target.value || 0) })} />
             </div>
             <div className="form-row">
               <label>Delivery type</label>
-              <select className="select" value={hodReviewForm.delivery_type} onChange={e => setHodReviewForm({ ...hodReviewForm, delivery_type: e.target.value })}>
+              <select className="select" disabled={hodRequirementsSubmitted} value={hodReviewForm.delivery_type} onChange={e => setHodReviewForm({ ...hodReviewForm, delivery_type: e.target.value })}>
                 <option value="theory">Theory</option>
                 <option value="lab">Lab</option>
                 <option value="hybrid">Hybrid</option>
@@ -523,7 +540,7 @@ export default function Academics({ caps, go }: { caps: any, go?: (view: string)
           </div>
           <div className="form-row">
             <label>HOD remarks</label>
-            <textarea className="inp" rows={5} value={hodReviewForm.remarks} onChange={e => setHodReviewForm({ ...hodReviewForm, remarks: e.target.value })} />
+            <textarea className="inp" disabled={hodRequirementsSubmitted} rows={5} value={hodReviewForm.remarks} onChange={e => setHodReviewForm({ ...hodReviewForm, remarks: e.target.value })} />
           </div>
           </section>
           </div>

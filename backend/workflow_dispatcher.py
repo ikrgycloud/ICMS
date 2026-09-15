@@ -107,6 +107,9 @@ def apply_decision(s, wf, action, actor_id, actor_name):
         row.decided_by = actor_id
         row.decided_at = datetime.utcnow()
         row.updated_at = datetime.utcnow()
-        _event(s, wf, "user_22" if action == "approve" else row.requested_by, f"Condonation {row.status.lower()}", wf.title, f"workflow:{wf.id}:{action}", "action" if action == "approve" else "info")
+        _event(s, wf, "user_22" if action == "approve" else row.requested_by,
+               f"Condonation {row.status.lower()}",
+               f"{wf.title}; condonation {row.id}; workflow {wf.id}.",
+               f"workflow:{wf.id}:{action}", "action" if action == "approve" else "info")
         return
     raise HTTPException(409, f"No source handler registered for {wf.source_type}")

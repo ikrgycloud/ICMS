@@ -119,8 +119,15 @@ export function PrincipalTransport({ caps: _caps }: { caps?: any }) {
       const seats = Number(route.seats || 0)
       const taken = Number(route.taken || 0)
       const occupancy = seats ? Math.min(100, Math.max(0, (taken / seats) * 100)) : 0
-      const stopCount = Array.isArray(route.stops) ? route.stops.length : Number(route.stops || 0)
-      return <tr key={route.id}><td><b>{route.name}</b></td><td className="hint">{stopCount}</td><td className="mono">{route.vehicle || route.vehicle_no || '—'}</td><td><span className="fill-bar"><span style={{ width: `${occupancy}%` }} /></span> {taken}/{seats}</td></tr>
+      // The operational API stores a route's stops as a comma-separated value;
+      // some integrations return an array.  Never coerce a label such as
+      // "Gate, Library" to a number, because that renders an unhelpful NaN.
+      const stopCount = Array.isArray(route.stops)
+        ? route.stops.filter(Boolean).length
+        : typeof route.stops === "string"
+          ? route.stops.split(",").map((stop: string) => stop.trim()).filter(Boolean).length
+          : Number.isFinite(Number(route.stops)) ? Number(route.stops) : 0
+      return <tr key={route.id}><td><b>{route.name}</b></td><td className="hint">{stopCount} {stopCount === 1 ? "stop" : "stops"}</td><td className="mono">{route.vehicle || route.vehicle_no || '—'}</td><td><span className="fill-bar"><span style={{ width: `${occupancy}%` }} /></span> {taken}/{seats}</td></tr>
     })}</tbody></table>{!routes.length && <div className="principal-empty"><b>No transport routes found.</b><p>There are no active routes in the authorised campus.</p></div>}</div></div>
   </div>
 }

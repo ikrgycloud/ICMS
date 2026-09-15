@@ -12,8 +12,10 @@ const WORKSPACE_TAB_GROUPS = [
 
 export default function DeanAcademicWorkspaces({
   initialTab = "allocation",
+  sourceMode = false,
 }: {
   initialTab?: string;
+  sourceMode?: boolean;
 }) {
   const [data, setData] = useState<any>(null),
     [tab, setTab] = useState(initialTab),
@@ -31,6 +33,8 @@ export default function DeanAcademicWorkspaces({
     [verificationAction, setVerificationAction] = useState<any>(null),
     [verificationNote, setVerificationNote] = useState(""),
     [verificationError, setVerificationError] = useState(""),
+    [allocationReturn, setAllocationReturn] = useState<any>(null),
+    [allocationReturnReason, setAllocationReturnReason] = useState(""),
     [saving, setSaving] = useState(false),
     [refreshing, setRefreshing] = useState(false),
     [density, setDensity] = useState<"comfortable" | "compact">("comfortable"),
@@ -179,12 +183,30 @@ export default function DeanAcademicWorkspaces({
       setSaving(false);
     }
   }
+  async function returnAllocation() {
+    if (!allocationReturn) return;
+    if (!allocationReturnReason.trim()) {
+      setError("A return reason is required so the proposer can revise the allocation.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.decideAllocationProposal(allocationReturn.id, "return", allocationReturn.status_version, allocationReturnReason.trim());
+      setAllocationReturn(null);
+      setAllocationReturnReason("");
+      await load();
+    } catch (e: any) {
+      setError(e.message || "Unable to return faculty allocation proposal");
+    } finally {
+      setSaving(false);
+    }
+  }
   async function decideTimetable(plan: any, action: "approve" | "return") {
     const reason = action === "return" ? window.prompt("Return reason (required)") || "" : "";
     if (action === "return" && !reason.trim()) return;
     setSaving(true);
     try {
-      await api.timetableDeanDecision(plan.id, action, reason);
+      await api.timetableDeanDecision(plan.id, action, reason, plan.version_no);
       await load();
     } catch (e: any) {
       setError(e.message || "Unable to update timetable review");
@@ -340,14 +362,28 @@ export default function DeanAcademicWorkspaces({
   const averageAttainment = attainmentValues.length
     ? Math.round(attainmentValues.reduce((sum: number, value: number) => sum + value, 0) / attainmentValues.length)
     : null;
+  const allocationFacultyFor = (sectionId: string) => {
+    const section = data.sections.find((item: any) => item.id === sectionId);
+    // The staff directory intentionally returns presentation fields rather
+    // than internal department IDs. Match the section's department label and
+    // allow only active teaching staff; otherwise the first global directory
+    // row can be an Accounts employee and the server correctly rejects it.
+    return data.staff.filter((member: any) =>
+      member.status === "active" &&
+      member.type === "Teaching" &&
+      member.department === section?.department,
+    );
+  };
   const open = (kind: string) => {
+    const firstSectionId = data.sections[0]?.id || "";
+    const eligibleFaculty = allocationFacultyFor(firstSectionId);
     setRiskReviewContext(null);
     setReviewFocusId("");
     setForm(
       kind === "allocation"
         ? {
-            section_id: data.sections[0]?.id || "",
-            faculty_person_id: data.staff[0]?.id || "",
+            section_id: firstSectionId,
+            faculty_person_id: eligibleFaculty[0]?.id || "",
             rationale: "",
           }
         : kind === "review"
@@ -377,6 +413,9 @@ export default function DeanAcademicWorkspaces({
     setShow(true);
   };
   const activeTabLabel = WORKSPACE_TAB_GROUPS.flatMap((group) => group.tabs).find((item) => item.key === tab)?.label || "Dean Academic Workspaces";
+  const visibleTabGroups = sourceMode
+    ? [{ label: "Faculty Allocation", tabs: [{ key: "allocation", label: "Allocation Proposals" }] }]
+    : WORKSPACE_TAB_GROUPS;
   return (
     <div className={`fade-in dean-workspaces dean-density-${density}`}>
       <PageHead
@@ -407,8 +446,8 @@ export default function DeanAcademicWorkspaces({
         }
       />
       {error && <div className="calendar-banner warn">{error}</div>}
-      <div className="dean-workspace-tabs" role="tablist" aria-label="Dean academic workspaces">
-        {WORKSPACE_TAB_GROUPS.map((group) => (
+      {!sourceMode && <div className="dean-workspace-tabs" role="tablist" aria-label="Dean academic workspaces">
+        {visibleTabGroups.map((group) => (
           <div className="dean-workspace-tab-group" key={group.label}>
             <span className="dean-workspace-tab-label">{group.label}</span>
             <div className="dean-workspace-tab-list">
@@ -420,15 +459,15 @@ export default function DeanAcademicWorkspaces({
             </div>
           </div>
         ))}
-      </div>
-      <div className="dean-workspace-tools">
+      </div>}
+      {!sourceMode && <div className="dean-workspace-tools">
         <label className="dean-workspace-search"><span>Search workspace</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Search ${activeTabLabel.toLowerCase()}...`} aria-label={`Search ${activeTabLabel}`} /><kbd>/</kbd></label>
         <div className="dean-density-toggle" role="group" aria-label="Workspace density">
           <span>Density</span>
           <button className={density === "comfortable" ? "on" : ""} onClick={() => setDensity("comfortable")} type="button">Comfortable</button>
           <button className={density === "compact" ? "on" : ""} onClick={() => setDensity("compact")} type="button">Compact</button>
         </div>
-      </div>
+      </div>}
       {tab === "allocation" && (
         <div className="dean-workspace dean-allocation-workspace">
           <div className="dean-workspace-metrics">
@@ -448,7 +487,7 @@ export default function DeanAcademicWorkspaces({
             </button>}
           </div>
           {filteredAllocationRows.map((p: any) => (
-            <div className="dean-workspace-row" key={p.id}>
+            <div className="dean-workspace-row" key={p.id} data-proposal-id={p.id}>
               <span>
                 <b>{p.title}</b>
                 <br />
@@ -457,13 +496,13 @@ export default function DeanAcademicWorkspaces({
               <Pill s={p.state} />
               {["SUBMITTED", "RESUBMITTED"].includes(p.state) &&
                 p.submitted_by !== currentUserId() && (
-                  <button
+                  <span className="row-actions"><button
                     className="btn btn-sm btn-crimson"
                     disabled={saving}
                     onClick={() => approve(p)}
                   >
                     Approve
-                  </button>
+                  </button><button className="btn btn-sm btn-out" disabled={saving} onClick={() => { setAllocationReturn(p); setAllocationReturnReason(""); }}>Return for revision</button></span>
                 )}
               {["SUBMITTED", "RESUBMITTED"].includes(p.state) &&
                 p.submitted_by === currentUserId() && (
@@ -492,7 +531,7 @@ export default function DeanAcademicWorkspaces({
           </div>
           <section className="card card-pad dean-workspace-table">
             <div className="card-h">
-              <div><h3>Timetable review queue</h3><p className="hint">Review complete timetable plans after HOD approval. Publication remains with the VP stage.</p></div>
+              <div><h3>Timetable review queue</h3><p className="hint">Review complete timetable plans after HOD approval. After VP operational approval, the Academic Coordinator publishes.</p></div>
               <b>{(data.timetablePlans || []).filter((plan: any) => plan.status === "Dean Review").length} pending</b>
             </div>
             {(data.timetablePlans || []).filter((plan: any) => plan.status === "Dean Review" || plan.status === "Published").map((plan: any) => (
@@ -888,7 +927,7 @@ export default function DeanAcademicWorkspaces({
                       : action
                 }
               >
-                {saving ? "Saving..." : "Save"}
+                {saving ? (tab === "allocation" ? "Submitting..." : "Saving...") : (tab === "allocation" ? "Submit allocation proposal" : "Save")}
               </button>
             </>
           }
@@ -899,9 +938,11 @@ export default function DeanAcademicWorkspaces({
                 <select
                   className="select"
                   value={form.section_id}
-                  onChange={(e) =>
-                    setForm({ ...form, section_id: e.target.value })
-                  }
+                  onChange={(e) => {
+                    const sectionId = e.target.value;
+                    const eligibleFaculty = allocationFacultyFor(sectionId);
+                    setForm({ ...form, section_id: sectionId, faculty_person_id: eligibleFaculty[0]?.id || "" });
+                  }}
                 >
                   {data.sections.map((x: any) => (
                     <option key={x.id} value={x.id}>
@@ -918,7 +959,7 @@ export default function DeanAcademicWorkspaces({
                     setForm({ ...form, faculty_person_id: e.target.value })
                   }
                 >
-                  {data.staff.map((x: any) => (
+                  {allocationFacultyFor(form.section_id).map((x: any) => (
                     <option key={x.id} value={x.id}>
                       {x.name}
                     </option>
@@ -1006,6 +1047,14 @@ export default function DeanAcademicWorkspaces({
           )}
         </Modal>
       )}
+      {allocationReturn && <Modal
+        title="Return faculty allocation for revision"
+        onClose={() => { if (!saving) { setAllocationReturn(null); setAllocationReturnReason(""); } }}
+        footer={<><button className="btn btn-out" disabled={saving} onClick={() => { setAllocationReturn(null); setAllocationReturnReason(""); }}>Cancel</button><button className="btn btn-crimson" disabled={saving || !allocationReturnReason.trim()} onClick={returnAllocation}>{saving ? "Returning..." : "Return to proposer"}</button></>}
+      >
+        <div className="allocation-return-context"><span>ALLOCATION PROPOSAL</span><h4>{allocationReturn.title}</h4><p>Return this same proposal version to its proposer. They must revise and resubmit before a new decision.</p></div>
+        <div className="form-row"><label>Revision reason <em>Required</em></label><textarea className="inp" rows={5} autoFocus value={allocationReturnReason} onChange={(event) => setAllocationReturnReason(event.target.value)} placeholder="Explain what must change, for example workload balance or section suitability." /></div>
+      </Modal>}
       {evidenceAction && (
         <Modal
           className="quality-evidence-modal"

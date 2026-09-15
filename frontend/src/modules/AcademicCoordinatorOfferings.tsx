@@ -19,7 +19,7 @@ export default function AcademicCoordinatorOfferings() {
   const [createOpen, setCreateOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [editing, setEditing] = useState<any>(null);
-  const [createData, setCreateData] = useState<any>({ courses: [], programs: [], faculty: [] });
+  const [createData, setCreateData] = useState<any>({ courses: [], programs: [], curriculumVersions: [] });
   const [createForm, setCreateForm] = useState<any>({
     academic_year: "",
     semester: "",
@@ -27,7 +27,7 @@ export default function AcademicCoordinatorOfferings() {
     program_id: "",
     course_id: "",
     term: "",
-    faculty_id: "",
+    curriculum_version_id: "",
     course_start_date: "",
     expected_completion_date: "",
   });
@@ -51,15 +51,15 @@ export default function AcademicCoordinatorOfferings() {
   const loadCreateData = async () => {
     setError("");
     if (createData.courses.length) return;
-    const [courses, programs, faculty] = await Promise.all([
+    const [courses, programs, curriculumVersions] = await Promise.all([
       api.courses(),
       api.academicPrograms(),
-      api.facultyStaff("", "", "teaching", 1, { status: "active" }),
+      api.curriculumVersions(),
     ]);
     setCreateData({
       courses: courses.courses || [],
       programs: programs.programs || [],
-      faculty: faculty.staff || faculty.rows || [],
+      curriculumVersions: curriculumVersions.versions || [],
     });
   };
 
@@ -100,11 +100,16 @@ export default function AcademicCoordinatorOfferings() {
         (!createForm.department || course.dept === createForm.department),
     ),
   );
+  const effectiveCurricula = createData.curriculumVersions.filter((version: any) =>
+    version.status === "effective" && version.program_id === createForm.program_id && version.effective_term === createForm.term,
+  );
+  const selectedCurriculum = effectiveCurricula.find((version: any) => version.id === createForm.curriculum_version_id);
   const createCourses = createData.courses.filter(
     (course: any) =>
       (!createForm.department || course.dept === createForm.department) &&
       (!createForm.program_id || course.program_id === createForm.program_id) &&
-      (!createForm.semester || Number(course.semester) === Number(createForm.semester)),
+      (!createForm.semester || Number(course.semester) === Number(createForm.semester)) &&
+      (!selectedCurriculum || (selectedCurriculum.course_ids || []).includes(course.id)),
   );
 
   const submitCreate = async () => {
@@ -112,12 +117,13 @@ export default function AcademicCoordinatorOfferings() {
     setError("");
     setMessage("");
     try {
-      if (!createForm.academic_year || !createForm.semester || !createForm.program_id || !createForm.course_id || !createForm.term) {
-        throw new Error("Academic year, semester, branch, course, and term are required");
+      if (!createForm.academic_year || !createForm.semester || !createForm.program_id || !createForm.curriculum_version_id || !createForm.course_id || !createForm.term) {
+        throw new Error("Academic year, semester, branch, effective curriculum, course, and term are required");
       }
       const created = await api.createCourseOffering({
         course_id: createForm.course_id,
         program_id: createForm.program_id,
+        curriculum_version_id: createForm.curriculum_version_id,
         academic_year: createForm.academic_year.trim(),
         term: createForm.term.trim(),
         semester: Number(createForm.semester),
@@ -136,15 +142,8 @@ export default function AcademicCoordinatorOfferings() {
       setStatus("");
       setTerm(offering.term);
       setCreateOpen(false);
-      setCreateForm({ academic_year: "", semester: "", department: "", program_id: "", course_id: "", term: "", faculty_id: "", course_start_date: "", expected_completion_date: "" });
-      setMessage(`${offering.course_code} was created and is now shown below. Next: request HOD input.`);
-      if (createForm.faculty_id) {
-        try {
-          await api.createFacultyAllocation(offering.id, { faculty_id: createForm.faculty_id });
-        } catch (allocationError: any) {
-          setError(`Offering created, but the optional faculty allocation needs follow-up: ${allocationError.message || "unable to create allocation"}`);
-        }
-      }
+      setCreateForm({ academic_year: "", semester: "", department: "", program_id: "", curriculum_version_id: "", course_id: "", term: "", course_start_date: "", expected_completion_date: "" });
+      setMessage(`${offering.course_code} was created. Next: HOD requirements, section creation, then a governed faculty-allocation proposal.`);
       await load();
     } catch (e: any) {
       setError(e.message || "Unable to create course offering");
@@ -161,6 +160,7 @@ export default function AcademicCoordinatorOfferings() {
       await api.updateCourseOffering(editing.id, {
         course_id: editing.course_id,
         program_id: editing.program_id,
+        curriculum_version_id: editing.curriculum_version_id || "",
         academic_year: editing.academic_year.trim(),
         term: editing.term.trim(),
         semester: Number(editing.semester),
@@ -169,13 +169,6 @@ export default function AcademicCoordinatorOfferings() {
         course_start_date: editing.course_start_date || "",
         expected_completion_date: editing.expected_completion_date || "",
       });
-      if (editing.faculty_id) {
-        if (editing.allocation_id) {
-          await api.updateFacultyAllocation(editing.id, editing.allocation_id, { faculty_id: editing.faculty_id, section_id: editing.section_id || "" });
-        } else {
-          await api.createFacultyAllocation(editing.id, { faculty_id: editing.faculty_id });
-        }
-      }
       setEditOpen(false);
       setEditing(null);
       await load();
@@ -927,7 +920,7 @@ export default function AcademicCoordinatorOfferings() {
       <div className="offerings-head">
         <PageHead
           title="Course Offerings"
-          sub="Manage term-specific course offerings, faculty allocation and section readiness."
+          sub="Create and configure term-specific offerings through HOD requirements, sections and faculty allocation."
           right={
             <div className="offerings-head-actions">
               <button className="btn btn-crimson" onClick={openCreate}>Create offering</button>
@@ -1054,7 +1047,7 @@ export default function AcademicCoordinatorOfferings() {
         <div>
           <h2 className="offer-summary-title">Course Offerings</h2>
           <p className="offer-summary-sub">
-            Review HOD inputs, faculty assignments and section readiness.
+            Complete the setup milestones that prepare each course for delivery.
           </p>
         </div>
         <div className="offer-result-count">
@@ -1075,20 +1068,12 @@ export default function AcademicCoordinatorOfferings() {
                 <th>Current status</th>
                 <th>HOD input</th>
                 <th>Sections</th>
-                <th>Readiness</th>
-                <th>Faculty</th>
-                <th>Start Date</th>
-                <th>End Date</th>
+                <th>Setup milestone</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {visibleRows.map((x) => {
-                const a = x.faculty_allocations || [];
-                const facultyNames = Array.from(
-                  new Set(a.map((z: any) => z.faculty || z.faculty_id).filter(Boolean)),
-                ).join(", ");
-
                 return (
                   <tr key={x.id} className={x.id === newOfferingId ? "offer-new-row" : ""}>
                     <td className="offer-course">
@@ -1116,16 +1101,7 @@ export default function AcademicCoordinatorOfferings() {
                     <td><Pill s={x.status || "Draft"} /></td>
                     <td><Pill s={x.hod_input?.status || "Pending"} /></td>
                     <td>{x.sections?.length || 0} / {x.hod_input?.required_sections || 0}</td>
-                    <td><Pill s={x.readiness?.ready ? "Ready" : "Pending"} /></td>
-
-                    <td>
-                      <span className="offer-faculty-names">
-                        {facultyNames || "No faculty assigned"}
-                      </span>
-                    </td>
-
-                    <td className="offer-date"><div className="offer-date-value"><span>Starts</span><b>{x.course_start_date || "Not set"}</b></div></td>
-                    <td className="offer-date"><div className="offer-date-value"><span>Ends</span><b>{x.expected_completion_date || "Not set"}</b></div></td>
+                    <td><Pill s={x.readiness?.ready ? "Setup Complete" : "Setup In Progress"} /></td>
 
                     <td>
                       <button className="offer-view" title="Edit offering" aria-label="Edit offering" onClick={() => openEdit(x)}>
@@ -1156,9 +1132,8 @@ export default function AcademicCoordinatorOfferings() {
 
       {selected && (
         <Modal
-          className="offer-detail-modal"
+          className="offer-detail-modal offer-details-modal"
           title={`${selected.row.course_code} · Sections & Workflow`}
-          className="offer-details-modal"
           onClose={() => setSelected(null)}
           footer={<button className="btn btn-crimson" title="Edit offering" aria-label="Edit offering" onClick={() => { setSelected(null); openEdit(selected.row); }}><FiEdit2 aria-hidden="true" /></button>}
         >
@@ -1312,13 +1287,6 @@ export default function AcademicCoordinatorOfferings() {
                 </div>
               </DetailSection>
 
-              <DetailSection title="Execution marks">
-                <div className="offer-info-grid">
-                  <Info l="Lab marks" v={selected.row.lab_marks} />
-                  <Info l="Mid marks" v={selected.row.mid_marks} />
-                  <Info l="Semester marks" v={selected.row.semester_marks} />
-                </div>
-              </DetailSection>
             </div>
           )}
         </Modal>
@@ -1342,10 +1310,10 @@ export default function AcademicCoordinatorOfferings() {
             <div className="form-row"><label>Academic year</label><input className="inp" value={createForm.academic_year} onChange={(e) => setCreateForm({ ...createForm, academic_year: e.target.value })} placeholder="e.g. 2026-27" /></div>
             <div className="form-row"><label>Semester</label><select className="select" value={createForm.semester} onChange={(e) => setCreateForm({ ...createForm, semester: e.target.value, course_id: "" })}><option value="">Select semester</option>{Array.from({ length: 8 }, (_, index) => index + 1).map((semester) => <option key={semester} value={semester}>{semester}</option>)}</select></div>
             <div className="form-row"><label>Department</label><select className="select" value={createForm.department} onChange={(e) => setCreateForm({ ...createForm, department: e.target.value, program_id: "", course_id: "" })}><option value="">Select department</option>{createDepartments.map((department) => <option key={department}>{department}</option>)}</select></div>
-            <div className="form-row"><label>Branch</label><select className="select" value={createForm.program_id} onChange={(e) => setCreateForm({ ...createForm, program_id: e.target.value, course_id: "" })}><option value="">Select branch</option>{createPrograms.map((program: any) => <option key={program.id} value={program.id}>{program.code} · {program.name}</option>)}</select></div>
+            <div className="form-row"><label>Branch</label><select className="select" value={createForm.program_id} onChange={(e) => setCreateForm({ ...createForm, program_id: e.target.value, curriculum_version_id: "", course_id: "" })}><option value="">Select branch</option>{createPrograms.map((program: any) => <option key={program.id} value={program.id}>{program.code} · {program.name}</option>)}</select></div>
+            <div className="form-row curriculum-create-full"><label>Effective curriculum version</label><select className="select" value={createForm.curriculum_version_id} onChange={(e) => setCreateForm({ ...createForm, curriculum_version_id: e.target.value, course_id: "" })}><option value="">Select the effective curriculum for this branch and term</option>{effectiveCurricula.map((version: any) => <option key={version.id} value={version.id}>{version.regulation} · v{version.version} · {version.course_count} courses</option>)}</select>{createForm.program_id && createForm.term && !effectiveCurricula.length && <small className="muted">No effective curriculum is available for this branch and term.</small>}</div>
             <div className="form-row curriculum-create-full"><label>Course</label><select className="select" value={createForm.course_id} onChange={(e) => setCreateForm({ ...createForm, course_id: e.target.value })}><option value="">Select course</option>{createCourses.map((course: any) => <option key={course.id} value={course.id}>{course.code} · {course.title}</option>)}</select></div>
-            <div className="form-row"><label>Term</label><input className="inp" value={createForm.term} onChange={(e) => setCreateForm({ ...createForm, term: e.target.value })} placeholder="e.g. Odd Semester" /></div>
-            <div className="form-row"><label>Faculty name</label><select className="select" value={createForm.faculty_id} onChange={(e) => setCreateForm({ ...createForm, faculty_id: e.target.value })}><option value="">Select faculty</option>{createData.faculty.map((person: any) => <option key={person.id} value={person.id}>{person.name}</option>)}</select></div>
+            <div className="form-row"><label>Term</label><input className="inp" value={createForm.term} onChange={(e) => setCreateForm({ ...createForm, term: e.target.value, curriculum_version_id: "", course_id: "" })} placeholder="e.g. Odd Semester" /></div>
             <div className="form-row"><label>Start date</label><input className="inp" type="date" value={createForm.course_start_date} onChange={(e) => setCreateForm({ ...createForm, course_start_date: e.target.value })} /></div>
             <div className="form-row"><label>End date</label><input className="inp" type="date" min={createForm.course_start_date || undefined} value={createForm.expected_completion_date} onChange={(e) => setCreateForm({ ...createForm, expected_completion_date: e.target.value })} /></div>
           </div>
@@ -1373,7 +1341,6 @@ export default function AcademicCoordinatorOfferings() {
             <div className="form-row"><label>Branch</label><select className="select" value={editing.program_id || ""} onChange={(e) => setEditing({ ...editing, program_id: e.target.value, course_id: "" })}><option value="">Select branch</option>{createData.programs.filter((program: any) => createData.courses.some((course: any) => course.program_id === program.id && (!editing.department || course.dept === editing.department))).map((program: any) => <option key={program.id} value={program.id}>{program.code} · {program.name}</option>)}</select></div>
             <div className="form-row curriculum-create-full"><label>Course</label><select className="select" value={editing.course_id || ""} onChange={(e) => setEditing({ ...editing, course_id: e.target.value })}><option value="">Select course</option>{createData.courses.filter((course: any) => (!editing.department || course.dept === editing.department) && (!editing.program_id || course.program_id === editing.program_id) && (!editing.semester || Number(course.semester) === Number(editing.semester))).map((course: any) => <option key={course.id} value={course.id}>{course.code} · {course.title}</option>)}</select></div>
             <div className="form-row"><label>Term</label><input className="inp" value={editing.term || ""} onChange={(e) => setEditing({ ...editing, term: e.target.value })} /></div>
-            <div className="form-row"><label>Faculty name</label><select className="select" value={editing.faculty_id || ""} onChange={(e) => setEditing({ ...editing, faculty_id: e.target.value })}><option value="">No faculty assigned</option>{createData.faculty.map((person: any) => <option key={person.id} value={person.id}>{person.name}</option>)}</select></div>
             <div className="form-row"><label>Start date</label><input className="inp" type="date" value={editing.course_start_date || ""} onChange={(e) => setEditing({ ...editing, course_start_date: e.target.value })} /></div>
             <div className="form-row"><label>End date</label><input className="inp" type="date" min={editing.course_start_date || undefined} value={editing.expected_completion_date || ""} onChange={(e) => setEditing({ ...editing, expected_completion_date: e.target.value })} /></div>
           </div>

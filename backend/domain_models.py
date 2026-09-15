@@ -81,6 +81,7 @@ class CourseOffering(Base):
     tenant_id = Column(String, index=True)
     course_id = Column(String, ForeignKey("courses.id"), index=True)
     program_id = Column(String, ForeignKey("programs.id"), index=True)
+    curriculum_version_id = Column(String, ForeignKey("curriculum_versions.id"), nullable=True, index=True)
     academic_year = Column(String, index=True)
     term = Column(String, index=True)
     semester = Column(Integer)
@@ -133,6 +134,7 @@ class TimetablePlanWorkflow(Base):
     reason = Column(Text, default="")
     submitted_by = Column(String, default="")
     updated_by = Column(String, default="")
+    version_no = Column(Integer, default=1, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
@@ -158,7 +160,9 @@ class CurriculumExecutionIssue(Base):
     __tablename__ = "curriculum_execution_issues"
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
-    offering_id = Column(String, ForeignKey("course_offerings.id"), index=True)
+    offering_id = Column(String, ForeignKey("course_offerings.id"), index=True, nullable=True)
+    course_id = Column(String, ForeignKey("courses.id"), index=True, nullable=True)
+    curriculum_version_id = Column(String, ForeignKey("curriculum_versions.id"), index=True, nullable=True)
     issue_type = Column(String)
     description = Column(Text, default="")
     status = Column(String, default="Open", index=True)
@@ -514,6 +518,7 @@ class Enrollment(Base):
     status = Column(String, default="enrolled")  # requested/enrolled/dropped
     requested_at = Column(DateTime, default=datetime.utcnow)
     grade = Column(String, default="")
+    __table_args__ = (UniqueConstraint("tenant_id", "student_id", "section_id", name="uq_enrollment_student_section"),)
 
 
 class AttendanceRecord(Base):
@@ -1344,14 +1349,20 @@ class AcademicRollover(Base):
     source_semester = Column(Integer, nullable=False)
     target_academic_year = Column(String, nullable=False)
     target_semester = Column(Integer, nullable=False)
+    dept_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True)
     status = Column(String, default="draft")
+    version_no = Column(Integer, default=1, nullable=False)
     created_by = Column(String, default="")
+    hod_reviewed_by = Column(String, default="")
+    dean_reviewed_by = Column(String, default="")
+    finance_reviewed_by = Column(String, default="")
     approved_by = Column(String, default="")
     executed_by = Column(String, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
     approved_at = Column(DateTime, nullable=True)
     executed_at = Column(DateTime, nullable=True)
     remarks = Column(Text, default="")
+    workflow_reason = Column(Text, default="")
 
 
 class AcademicRolloverDecision(Base):
@@ -1709,6 +1720,13 @@ class AcademicCalendarEntry(Base):
     end_time = Column(String, default="")
     description = Column(Text, default="")
     status = Column(String, default="published")
+    version_no = Column(Integer, default=1, nullable=False)
+    requires_vp = Column(Boolean, default=False, nullable=False)
+    dean_approved_by = Column(String, default="")
+    dean_approved_at = Column(DateTime, nullable=True)
+    vp_approved_by = Column(String, default="")
+    vp_approved_at = Column(DateTime, nullable=True)
+    workflow_reason = Column(Text, default="")
     owner_office_n = Column(Integer, nullable=True)
     created_by = Column(String, default="")
     updated_by = Column(String, default="")
@@ -1817,6 +1835,9 @@ class TimetableException(Base):
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
     section_id = Column(String, ForeignKey("sections.id"), nullable=True)
+    timetable_entry_id = Column(String, ForeignKey("timetable_entries.id"), nullable=True, index=True)
+    timetable_plan_id = Column(String, ForeignKey("timetable_plan_workflows.id"), nullable=True, index=True)
+    class_session_id = Column(String, ForeignKey("class_sessions.id"), nullable=True, index=True)
     school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True)
     dept_id = Column(String, ForeignKey("departments.id"), nullable=True, index=True)
     program_id = Column(String, ForeignKey("programs.id"), nullable=True, index=True)
@@ -1827,6 +1848,11 @@ class TimetableException(Base):
     detected_at = Column(DateTime, default=datetime.utcnow)
     resolved_at = Column(DateTime, nullable=True)
     resolved_by = Column(String, default="")
+    requested_by = Column(String, default="")
+    change_payload_json = Column(Text, default="{}")
+    base_version = Column(Integer, default=0)
+    workflow_version_no = Column(Integer, default=1, nullable=False)
+    published_at = Column(DateTime, nullable=True)
 
 
 class AcademicQualityReview(Base):
@@ -2009,6 +2035,7 @@ class TimetableEntry(Base):
     effective_from = Column(Date, nullable=True)
     effective_to = Column(Date, nullable=True)
     status = Column(String, default="active")    # active / cancelled / inactive
+    version_no = Column(Integer, default=1)
     created_by = Column(String, default="")
     updated_by = Column(String, default="")
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -394,7 +394,7 @@ def create_curriculum_version(body: CurriculumVersionIn, ctx=Depends(auth), s=De
 def curriculum_versions(ctx=Depends(auth), s=Depends(db)):
     leadership(ctx)
     rows = s.query(D.CurriculumVersion).filter(D.CurriculumVersion.tenant_id == TENANT).order_by(D.CurriculumVersion.effective_term.desc(), D.CurriculumVersion.version.desc()).all()
-    return {"versions": [{"id": row.id, "program_id": row.program_id, "regulation": row.regulation, "effective_term": row.effective_term, "version": row.version, "status": row.status, "course_count": len(json.loads(row.snapshot_json or "[]"))} for row in rows]}
+    return {"versions": [{"id": row.id, "program_id": row.program_id, "regulation": row.regulation, "effective_term": row.effective_term, "version": row.version, "status": row.status, "course_count": len(json.loads(row.snapshot_json or "[]")), "course_ids": [item.get("id") for item in json.loads(row.snapshot_json or "[]")]} for row in rows]}
 
 
 @router.get("/curriculum/versions/{version_id}/compare/{other_id}")

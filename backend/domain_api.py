@@ -9,6 +9,7 @@ return 403 with the engine's reason — the same verdict the UI uses to disable
 the control.
 """
 from datetime import date, datetime, timedelta
+import hashlib
 import json
 import csv
 import io
@@ -29,8 +30,9 @@ from capabilities import (modules_for_office, module_meta, MODULE_ACTIONS,
 import domain_models as D
 from academic_scope import authorize_object, dean_scope_assignments, hierarchy
 from governance_engine import validate_transition
-from teaching import active_allocations_for_faculty, faculty_owns_section
-from models import User, Person, OrgScope, WorkflowInstance, Notification
+from teaching import (active_allocation_for_section, active_allocations_for_faculty,
+                      class_session_for_timetable, faculty_owns_section)
+from models import User, Person, OrgScope, WorkflowInstance, Notification, Approval, AuditLog
 
 router = APIRouter(prefix="/api")
 
@@ -141,15 +143,15 @@ def dean_dashboard(
         D.TimetablePlanWorkflow.offering_id.in_(offering_ids) if offering_ids else text("1=0"),
     ).all()
     plan_by_section = {}
-    plan_priority = {"Published": 5, "Approved": 4, "VP Review": 3, "HOD Review": 2,
-                     "VP Returned": 1, "HOD Returned": 1, "Draft": 0, "Closed": 0}
+    plan_priority = {"Published": 7, "Approved": 6, "VP Review": 5, "Dean Review": 4, "HOD Review": 3,
+                     "VP Returned": 2, "Dean Returned": 2, "HOD Returned": 2, "Draft": 0, "Closed": 0}
     for plan in timetable_plans:
         current = plan_by_section.get(plan.section_id)
         if current is None or plan_priority.get(plan.status, -1) >= plan_priority.get(current.status, -1):
             plan_by_section[plan.section_id] = plan
     published_sections = {section_id for section_id, plan in plan_by_section.items() if plan.status == "Published"}
-    review_sections = {section_id for section_id, plan in plan_by_section.items() if plan.status in {"HOD Review", "VP Review", "Approved"}}
-    returned_sections = {section_id for section_id, plan in plan_by_section.items() if plan.status in {"HOD Returned", "VP Returned"}}
+    review_sections = {section_id for section_id, plan in plan_by_section.items() if plan.status in {"HOD Review", "Dean Review", "VP Review", "Approved"}}
+    returned_sections = {section_id for section_id, plan in plan_by_section.items() if plan.status in {"HOD Returned", "Dean Returned", "VP Returned"}}
     active_entry_ids = {
         row[0] for row in s.query(D.TimetableEntry.id).filter(
             D.TimetableEntry.tenant_id == ctx["tenant_id"],
@@ -499,7 +501,10 @@ MONETARY = {("finance", "waive"): ("fee_waiver", "Vice-Chancellor"),
 # --------------------------------------------------------------------------- #
 #  Authority gate for a module action                                         #
 # --------------------------------------------------------------------------- #
-ACADEMIC_GOVERNANCE_OFFICES = {6, 10, 17}
+# Programme Coordinators prepare programme-scoped proposals.  They belong in
+# the governed *source* set so their explicitly authorised endpoints are
+# reachable; approval remains restricted by each workflow's stage policy.
+ACADEMIC_GOVERNANCE_OFFICES = {6, 10, 17, 41}
 
 
 def academic_scope_allows(ctx, *, dept_id=None, program_id=None, section_id=None) -> bool:
@@ -605,7 +610,7 @@ def gate(s, ctx, module: str, action: str, amount=None, governance: bool = False
     o = office(ctx["office_n"])
     if governance and ctx.get("office_n") not in ACADEMIC_GOVERNANCE_OFFICES:
         from authority import Decision, DENY
-        return Decision(DENY, "Only Dean Academics, HOD, or Academic Coordinator may access academic governance", "Not Allowed"), "view"
+        return Decision(DENY, "Only Dean Academics, HOD, Academic Coordinator, or Programme Coordinator may access academic governance", "Not Allowed"), "view"
     rbac = rbac_for(ctx["office_n"], o["level"], verb)
     # Front Office cleanup is enforced server-side. Hiding its sidebar alone
     # must never leave shared domain APIs reachable with a copied URL/token.
@@ -1274,7 +1279,7 @@ def chairman_outstanding_fees(start: str = "", ctx=Depends(auth), s=Depends(db))
 # --------------------------------------------------------------------------- #
 #  CALENDAR HUB
 # --------------------------------------------------------------------------- #
-CALENDAR_ACADEMIC_EDITORS = {4, 17}
+CALENDAR_ACADEMIC_EDITORS = {17}
 # Calendar changes are operational requests. The Dean independently reviews
 # them and must never originate work that reaches their own approval queue.
 CALENDAR_PROPOSERS = {42}
@@ -1332,7 +1337,27 @@ def _calendar_event_editable(ctx, row) -> bool:
 
 
 def _academic_entry_editable(ctx, row) -> bool:
-    return ctx["office_n"] in CALENDAR_ACADEMIC_EDITORS and row.status != "deleted"
+    return ctx["office_n"] == 17 and row.created_by == ctx["sub"] and row.status in {"draft", "Dean Returned", "VP Returned", "Approved"}
+
+
+def _calendar_entry_payload(row, ctx=None):
+    return {
+        "id": row.id, "version_no": row.version_no, "term": row.term,
+        "academic_year": row.academic_year, "program_id": row.program_id,
+        "department_id": row.department_id, "student_year": row.student_year,
+        "title": row.title, "category": row.category, "campus": row.campus,
+        "start_date": row.start_date.isoformat(), "start_time": row.start_time,
+        "end_time": row.end_time, "end_date": (row.end_date or row.start_date).isoformat(),
+        "description": row.description, "status": row.status, "requires_vp": bool(row.requires_vp),
+        "workflow_reason": row.workflow_reason or "", "owner_office_n": row.owner_office_n,
+        "created_by": row.created_by, "updated_by": row.updated_by,
+        "editable": _academic_entry_editable(ctx, row) if ctx else False,
+    }
+
+
+def _notify_calendar_office(s, office_n, title, body):
+    for user in s.query(User).filter(User.office_n == office_n, User.status == "active").all():
+        notify(s, user.id, title, body, "action")
 
 
 def _proposal_version(s, proposal):
@@ -1787,6 +1812,7 @@ def academic_calendar_proposal_detail(proposal_id: str, ctx=Depends(auth), s=Dep
 
 @router.post("/academic-calendar/proposals")
 def create_academic_calendar_proposal(body: AcademicCalendarProposalIn, ctx=Depends(auth), s=Depends(db)):
+    raise HTTPException(410, "Calendar proposals are retired; create the governed calendar draft through /academic-calendar")
     require(gate(s, ctx, "academic_calendar", "view", governance=True)[0])
     if ctx["office_n"] not in CALENDAR_PROPOSERS:
         raise HTTPException(403, "Only an authorized Academic Office or Academic Coordinator actor can propose calendar changes")
@@ -1820,6 +1846,7 @@ def create_academic_calendar_proposal(body: AcademicCalendarProposalIn, ctx=Depe
 
 @router.post("/academic-calendar/proposals/{proposal_id}/submit")
 def submit_academic_calendar_proposal(proposal_id: str, body: AcademicProposalTransitionIn, ctx=Depends(auth), s=Depends(db)):
+    raise HTTPException(410, "Calendar proposals are retired; use the calendar draft workflow")
     proposal = require_tenant(s.get(D.AcademicProposal, proposal_id), ctx, "Calendar proposal")
     if proposal.proposal_type != "calendar": raise HTTPException(404, "Calendar proposal not found")
     if proposal.submitted_by != ctx["sub"] or proposal.state not in {"DRAFT", "RETURNED", "CLARIFICATION_REQUIRED"}: raise HTTPException(409, "Proposal cannot be submitted in its current state")
@@ -1834,6 +1861,7 @@ def submit_academic_calendar_proposal(proposal_id: str, body: AcademicProposalTr
 
 @router.post("/academic-calendar/proposals/{proposal_id}/decision/{decision}")
 def decide_academic_calendar_proposal(proposal_id: str, decision: str, body: AcademicProposalTransitionIn, ctx=Depends(auth), s=Depends(db)):
+    raise HTTPException(410, "Calendar proposals are retired; use the calendar review workflow")
     require(gate(s, ctx, "academic_calendar", "approve_proposal" if decision.lower() == "approve" else "reject_proposal")[0])
     proposal = require_academic_object(s, ctx, s.query(D.AcademicProposal).filter(D.AcademicProposal.id == proposal_id).with_for_update().first(), "approve", "Calendar proposal")
     prevent_self_approval(proposal, ctx)
@@ -1875,13 +1903,25 @@ def decide_academic_calendar_proposal(proposal_id: str, decision: str, body: Aca
 @router.get("/academic-calendar")
 def academic_calendar(term: str = "", academic_year: str = "", program_id: str = "", department_id: str = "", student_year: int | None = None, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academic_calendar", "view")[0])
-    term_rows = (s.query(D.AcademicCalendarEntry.term)
+    term_rows = (s.query(D.AcademicCalendarEntry.term, func.max(D.AcademicCalendarEntry.updated_at).label("last_updated"))
                  .filter(D.AcademicCalendarEntry.status != "deleted")
-                 .distinct().order_by(D.AcademicCalendarEntry.term.desc()).all())
+                 .group_by(D.AcademicCalendarEntry.term)
+                 .order_by(desc("last_updated")).all())
     term_options = [row[0] for row in term_rows]
     selected_term = term if term in term_options else (term_options[0] if term_options else "")
 
     query = s.query(D.AcademicCalendarEntry).filter(D.AcademicCalendarEntry.tenant_id == ctx["tenant_id"], D.AcademicCalendarEntry.status != "deleted")
+    # Published records are the only calendar data visible to downstream users.
+    # Creators and the current reviewer additionally see just the work assigned
+    # to them, never another team's in-progress draft.
+    if ctx["office_n"] == 17:
+        query = query.filter(or_(D.AcademicCalendarEntry.status == "Published", D.AcademicCalendarEntry.created_by == ctx["sub"]))
+    elif ctx["office_n"] == 6:
+        query = query.filter(or_(D.AcademicCalendarEntry.status == "Published", D.AcademicCalendarEntry.status == "Dean Review"))
+    elif ctx["office_n"] == 5:
+        query = query.filter(or_(D.AcademicCalendarEntry.status == "Published", D.AcademicCalendarEntry.status == "VP Review"))
+    else:
+        query = query.filter(D.AcademicCalendarEntry.status == "Published")
     if selected_term:
         query = query.filter(D.AcademicCalendarEntry.term == selected_term)
     if academic_year:
@@ -1930,23 +1970,10 @@ def academic_calendar(term: str = "", academic_year: str = "", program_id: str =
         ],
         "summary": summary,
         "months": [{"label": label, "count": count} for label, count in months.items()],
-        "entries": [{
-            "id": row.id,
-            "academic_year": row.academic_year, "program_id": row.program_id, "department_id": row.department_id, "student_year": row.student_year,
-            "term": row.term,
-            "title": row.title,
-            "category": row.category,
-            "campus": row.campus,
-            "start_date": row.start_date.isoformat(),
-            "start_time": row.start_time, "end_time": row.end_time,
-            "end_date": (row.end_date or row.start_date).isoformat(),
-            "description": row.description,
-            "status": row.status,
-            "owner_office_n": row.owner_office_n,
-            "editable": _academic_entry_editable(ctx, row),
-        } for row in rows],
-        "proposals": [_proposal_payload(s, row) for row in s.query(D.AcademicProposal).filter(D.AcademicProposal.tenant_id == ctx["tenant_id"], D.AcademicProposal.proposal_type == "calendar").order_by(desc(D.AcademicProposal.updated_at)).limit(25).all()],
-        "workflow_permissions": {"propose": ctx["office_n"] in CALENDAR_PROPOSERS, "decide": ctx["office_n"] == 6},
+        "entries": [_calendar_entry_payload(row, ctx) for row in rows],
+        "proposals": [],
+        "review_inbox": [_calendar_entry_payload(row, ctx) for row in rows if (ctx["office_n"] == 6 and row.status == "Dean Review") or (ctx["office_n"] == 5 and row.status == "VP Review")],
+        "workflow_permissions": {"propose": ctx["office_n"] == 17, "decide": ctx["office_n"] in {5, 6}, "publish": ctx["office_n"] == 17},
     }
 
 
@@ -1954,10 +1981,10 @@ def academic_calendar(term: str = "", academic_year: str = "", program_id: str =
 def create_academic_calendar_entry(body: AcademicCalendarIn, ctx=Depends(auth), s=Depends(db)):
     dec, _ = gate(s, ctx, "academic_calendar", "create")
     require(dec)
-    if ctx["office_n"] not in CALENDAR_ACADEMIC_EDITORS:
-        raise HTTPException(403, "This office cannot manage the academic calendar")
-    if not body.title.strip():
-        raise HTTPException(422, "Event title is required")
+    if ctx["office_n"] != 17:
+        raise HTTPException(403, "Only the Academic Coordinator may create an academic calendar draft")
+    if not body.title.strip() or not body.term.strip() or not body.academic_year.strip():
+        raise HTTPException(422, "Title, term, and academic year are required")
     start = date.fromisoformat(body.start_date)
     end = date.fromisoformat(body.end_date) if body.end_date else start
     if end < start:
@@ -1977,7 +2004,8 @@ def create_academic_calendar_entry(body: AcademicCalendarIn, ctx=Depends(auth), 
         category=body.category, campus=body.campus,
         start_date=start,
         end_date=end, start_time=body.start_time, end_time=body.end_time,
-        description=body.description, status=("draft" if ctx["office_n"] == 17 else (body.status or "published")),
+        description=body.description, status="draft", version_no=1,
+        requires_vp=body.category in {"Teaching", "Examinations", "Break", "Registration"}, workflow_reason="",
         owner_office_n=ctx["office_n"], created_by=ctx["sub"], updated_by=ctx["sub"],
         created_at=now, updated_at=now
     )
@@ -1986,25 +2014,7 @@ def create_academic_calendar_entry(body: AcademicCalendarIn, ctx=Depends(auth), 
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic_calendar.create",
                 f"academic_calendar:{row.id}", "", row.status,
                 f"Created academic milestone '{row.title}'")
-    _fanout_notification(
-        s, "all",
-        f"Academic calendar updated: {row.title}",
-        f"{row.term} · {row.start_date.strftime('%d %b %Y')} to {(row.end_date or row.start_date).strftime('%d %b %Y')}.",
-        severity="action",
-    )
-    return {"entry": {
-        "id": row.id,
-        "term": row.term, "academic_year": row.academic_year, "program_id": row.program_id, "department_id": row.department_id, "student_year": row.student_year,
-        "title": row.title,
-        "category": row.category,
-        "campus": row.campus,
-        "start_date": row.start_date.isoformat(), "start_time": row.start_time, "end_time": row.end_time,
-        "end_date": (row.end_date or row.start_date).isoformat(),
-        "description": row.description,
-        "status": row.status,
-        "owner_office_n": row.owner_office_n,
-        "editable": _academic_entry_editable(ctx, row),
-    }, "decision": dec.as_dict()}
+    return {"entry": _calendar_entry_payload(row, ctx), "decision": dec.as_dict()}
 
 
 @router.put("/academic-calendar/{entry_id}")
@@ -2014,10 +2024,12 @@ def update_academic_calendar_entry(entry_id: str, body: AcademicCalendarIn, ctx=
         raise HTTPException(404, "Academic calendar entry not found")
     dec, _ = gate(s, ctx, "academic_calendar", "edit")
     require(dec)
-    if ctx["office_n"] not in CALENDAR_ACADEMIC_EDITORS or (ctx["office_n"] == 17 and row.owner_office_n != 17 and row.created_by != ctx["sub"]):
-        raise HTTPException(403, "This office cannot manage the academic calendar")
-    if row.status not in {"draft", "correction_required"}:
-        raise HTTPException(409, "Only draft or correction-required entries can be edited")
+    if ctx["office_n"] != 17 or row.created_by != ctx["sub"]:
+        raise HTTPException(403, "Only the creating Academic Coordinator may edit this calendar")
+    if row.status == "Published":
+        raise HTTPException(409, "A published calendar cannot be edited directly; create a new calendar change")
+    if row.status not in {"draft", "Dean Returned", "VP Returned", "Approved"}:
+        raise HTTPException(409, "This calendar version is under review and cannot be changed")
     start = date.fromisoformat(body.start_date)
     end = date.fromisoformat(body.end_date) if body.end_date else start
     if end < start:
@@ -2032,50 +2044,43 @@ def update_academic_calendar_entry(entry_id: str, body: AcademicCalendarIn, ctx=
     row.end_date = end
     row.start_time, row.end_time = body.start_time, body.end_time
     row.description = body.description
-    row.status = body.status or row.status
+    if prev == "Approved":
+        row.status = "Dean Returned"
+        row.dean_approved_by = row.vp_approved_by = ""
+        row.dean_approved_at = row.vp_approved_at = None
+        row.workflow_reason = "Calendar changed after approval; Dean and VP review are required again."
+        row.version_no += 1
+    else:
+        row.status = prev
     row.updated_by = ctx["sub"]
     row.updated_at = datetime.utcnow()
     s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic_calendar.edit",
                 f"academic_calendar:{row.id}", prev, row.status,
                 f"Updated academic milestone '{row.title}'")
-    _fanout_notification(
-        s, "all",
-        f"Academic calendar revised: {row.title}",
-        f"{row.term} academic timeline was updated for {row.start_date.strftime('%d %b %Y')}.",
-        severity="action",
-    )
-    return {"entry": {
-        "id": row.id,
-        "term": row.term,
-        "title": row.title,
-        "category": row.category,
-        "campus": row.campus,
-        "start_date": row.start_date.isoformat(),
-        "end_date": (row.end_date or row.start_date).isoformat(),
-        "description": row.description,
-        "status": row.status,
-        "owner_office_n": row.owner_office_n,
-        "editable": _academic_entry_editable(ctx, row),
-    }, "decision": dec.as_dict()}
+    if prev == "Approved":
+        write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic_calendar.invalidate", f"academic_calendar:{row.id}", prev, row.status, row.workflow_reason)
+    return {"entry": _calendar_entry_payload(row, ctx), "decision": dec.as_dict()}
 
 
 @router.post("/academic-calendar/{entry_id}/submit")
 def submit_academic_calendar_entry(entry_id: str, ctx=Depends(auth), s=Depends(db)):
     row = s.get(D.AcademicCalendarEntry, entry_id)
     if not row or row.status == "deleted": raise HTTPException(404, "Academic calendar entry not found")
-    if ctx["office_n"] != 17 or row.created_by != ctx["sub"]: raise HTTPException(403, "Only the creating Academic Coordinator may submit this draft")
+    if ctx["office_n"] != 17 or row.created_by != ctx["sub"]: raise HTTPException(403, "Only the creating Academic Coordinator may submit this calendar")
     dec, _ = gate(s, ctx, "academic_calendar", "edit"); require(dec)
-    if row.status not in {"draft", "correction_required"}: raise HTTPException(409, "Only draft or correction-required calendar entries can be submitted")
+    if row.status not in {"draft", "Dean Returned", "VP Returned"}: raise HTTPException(409, "Only a draft or returned calendar can be submitted")
     previous = row.status
-    row.status, row.updated_by, row.updated_at = "pending_review", ctx["sub"], datetime.utcnow(); s.commit()
+    row.status, row.workflow_reason, row.updated_by, row.updated_at = "Dean Review", "", ctx["sub"], datetime.utcnow(); s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic_calendar.submit", f"academic_calendar:{row.id}", previous, row.status, "Submitted for academic calendar review")
+    _notify_calendar_office(s, 6, "Academic calendar awaiting Dean review", f"Calendar {row.id}, version {row.version_no}, awaits academic-governance review.")
     return {"status": row.status, "decision": dec.as_dict()}
 
 
 class AcademicCalendarDecisionIn(BaseModel):
     action: str
     reason: str = ""
+    expected_version: int | None = None
 
 
 @router.post("/academic-calendar/{entry_id}/decision")
@@ -2083,26 +2088,59 @@ def decide_academic_calendar_entry(entry_id: str, body: AcademicCalendarDecision
     row = s.get(D.AcademicCalendarEntry, entry_id)
     if not row or row.status == "deleted":
         raise HTTPException(404, "Academic calendar entry not found")
-    if ctx["office_n"] == 17 or ctx["office_n"] not in {1, 2, 4, 5}:
-        raise HTTPException(403, "This office cannot approve academic calendar changes")
-    dec, _ = gate(s, ctx, "academic_calendar", "edit"); require(dec)
-    if row.status != "pending_review":
-        raise HTTPException(409, "Only pending calendar changes can be decided")
+    if ctx["office_n"] not in {5, 6}:
+        raise HTTPException(403, "Only Dean Academics or Vice Principal may decide this calendar stage")
+    decision_verb = "approve_proposal" if body.action.strip().lower() == "approve" else "reject_proposal"
+    dec, _ = gate(s, ctx, "academic_calendar", decision_verb); require(dec)
     action = body.action.strip().lower()
-    if action not in {"approve", "reject", "return", "publish"}:
-        raise HTTPException(400, "Decision must be approve, reject, return, or publish")
+    if action not in {"approve", "reject", "return"}:
+        raise HTTPException(400, "Decision must be approve, reject, or return")
     if action in {"reject", "return"} and not body.reason.strip():
         raise HTTPException(400, "A reason is required when rejecting or requesting correction")
-    if action == "publish" and row.status != "approved":
-        raise HTTPException(409, "Only approved calendar entries can be published")
+    expected_state = "Dean Review" if ctx["office_n"] == 6 else "VP Review"
+    if row.status != expected_state:
+        raise HTTPException(409, f"Calendar is not awaiting {'Dean' if ctx['office_n'] == 6 else 'VP'} review")
+    if body.expected_version is not None and body.expected_version != row.version_no:
+        raise HTTPException(409, "Calendar version is stale; refresh before deciding")
     previous = row.status
-    row.status = {"approve": "approved", "publish": "published", "return": "correction_required", "reject": "rejected"}[action]
+    if action == "approve":
+        if ctx["office_n"] == 6:
+            row.dean_approved_by, row.dean_approved_at = ctx["sub"], datetime.utcnow()
+            row.status = "VP Review" if row.requires_vp else "Approved"
+        else:
+            row.vp_approved_by, row.vp_approved_at, row.status = ctx["sub"], datetime.utcnow(), "Approved"
+    elif action == "return":
+        row.status = "Dean Returned" if ctx["office_n"] == 6 else "VP Returned"
+    else:
+        row.status = "Rejected"
+    row.workflow_reason = body.reason.strip()
     row.updated_by, row.updated_at = ctx["sub"], datetime.utcnow()
     s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic_calendar.decision",
                 f"academic_calendar:{row.id}", previous, row.status,
                 f"Academic calendar {action}: {body.reason.strip()}".strip())
+    if action == "approve" and row.status == "VP Review":
+        _notify_calendar_office(s, 5, "Academic calendar awaiting VP review", f"Calendar {row.id}, version {row.version_no}, passed Dean review and awaits operational review.")
+    elif action == "approve" and row.status == "Approved":
+        notify(s, row.created_by, "Academic calendar ready to publish", f"Calendar {row.id}, version {row.version_no}, has all required approvals.", "action")
+    else:
+        notify(s, row.created_by, f"Academic calendar {row.status.lower()}", row.workflow_reason, "action")
     return {"status": row.status, "decision": dec.as_dict(), "reason": body.reason.strip()}
+
+
+@router.post("/academic-calendar/{entry_id}/publish")
+def publish_academic_calendar_entry(entry_id: str, ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] != 17:
+        raise HTTPException(403, "Only the Academic Coordinator may publish an approved calendar")
+    dec, _ = gate(s, ctx, "academic_calendar", "edit"); require(dec)
+    row = s.get(D.AcademicCalendarEntry, entry_id)
+    if not row or row.status == "deleted": raise HTTPException(404, "Academic calendar entry not found")
+    if row.created_by != ctx["sub"]: raise HTTPException(403, "Only the creating Academic Coordinator may publish this calendar")
+    if row.status != "Approved": raise HTTPException(409, "Only fully approved calendars can be published")
+    previous = row.status; row.status, row.updated_by, row.updated_at = "Published", ctx["sub"], datetime.utcnow(); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic_calendar.publish", f"academic_calendar:{row.id}", previous, row.status, "Academic calendar published")
+    _fanout_notification(s, "all", f"Academic calendar published: {row.title}", f"{row.term} · {row.start_date.strftime('%d %b %Y')} to {(row.end_date or row.start_date).strftime('%d %b %Y')}.", severity="info")
+    return {"entry": _calendar_entry_payload(row, ctx), "decision": dec.as_dict()}
 
 
 @router.delete("/academic-calendar/{entry_id}")
@@ -2114,8 +2152,8 @@ def delete_academic_calendar_entry(entry_id: str, ctx=Depends(auth), s=Depends(d
     require(dec)
     if ctx["office_n"] not in CALENDAR_ACADEMIC_EDITORS or (ctx["office_n"] == 17 and row.owner_office_n != 17 and row.created_by != ctx["sub"]):
         raise HTTPException(403, "This office cannot manage the academic calendar")
-    if row.status not in {"draft", "correction_required"}:
-        raise HTTPException(409, "Only draft or correction-required entries can be deleted")
+    if row.status not in {"draft", "Dean Returned", "VP Returned"}:
+        raise HTTPException(409, "Only draft or returned entries can be deleted")
     prev = row.status
     row.status = "deleted"
     row.updated_by = ctx["sub"]
@@ -2212,7 +2250,12 @@ def principal_approval_history(q: str = "", action: str = "", ctx=Depends(auth),
              .join(WorkflowInstance, Approval.workflow_id == WorkflowInstance.id)
              .filter(WorkflowInstance.tenant_id == ctx["tenant_id"]))
     if ctx.get("office_n") == 4:
-        query = query.filter(WorkflowInstance.scope_level == "campus")
+        # A Principal may review history for their own campus only.  Filtering
+        # by level alone would expose every campus-scoped workflow in a tenant.
+        query = query.filter(
+            WorkflowInstance.scope_level == "campus",
+            WorkflowInstance.scope_ref == ctx["scope_ref"],
+        )
     if action:
         query = query.filter(Approval.decision == action.upper())
     if q:
@@ -2294,7 +2337,51 @@ def principal_compliance_detail(requirement_id: str, ctx=Depends(auth), s=Depend
 
 @router.get("/exams/sections/{section_id}/oversight")
 def principal_exam_section_oversight(section_id: str, ctx=Depends(auth), s=Depends(db)):
-    return exam_section_oversight(section_id, ctx=ctx, s=s)
+    """Return persisted examination evidence for scoped, read-only oversight."""
+    require(gate(s, ctx, "examinations", "view")[0])
+    # Principal examination oversight uses the same role-aware section
+    # resolver as the register endpoint.  Legacy sections may not carry the
+    # newer academic-scope reference, so applying the generic object guard
+    # here would make a section visible in the register but impossible to
+    # open.  `_can_view_exam_section` remains the authoritative scope gate.
+    section = _section_or_404(s, section_id)
+    if not _can_view_exam_section(s, ctx, section):
+        raise HTTPException(403, "You cannot view examinations for this section")
+
+    course = s.query(D.Course).get(section.course_id) if section.course_id else None
+    department = s.query(D.Department).get(section.dept_id) if section.dept_id else None
+    faculty = s.query(Person).get(section.faculty_person_id) if section.faculty_person_id else None
+    enrollments = (s.query(D.Enrollment).filter(D.Enrollment.tenant_id == ctx["tenant_id"], D.Enrollment.section_id == section.id, D.Enrollment.status == "enrolled").all())
+    student_ids = [row.student_id for row in enrollments]
+    student_map = {row.id: row for row in s.query(D.Student).filter(D.Student.id.in_(student_ids)).all()} if student_ids else {}
+    assessments = (s.query(D.Assessment).filter(D.Assessment.tenant_id == ctx["tenant_id"], D.Assessment.section_id == section.id).order_by(D.Assessment.scheduled_at, D.Assessment.created_at, D.Assessment.id).all())
+    assessment_ids = [row.id for row in assessments]
+    marks = s.query(D.Mark).filter(D.Mark.tenant_id == ctx["tenant_id"], D.Mark.assessment_id.in_(assessment_ids)).all() if assessment_ids else []
+    marks_by_assessment = {}
+    for mark in marks:
+        marks_by_assessment.setdefault(mark.assessment_id, {})[mark.student_id] = mark
+    result = (s.query(D.ResultSheet).filter(D.ResultSheet.tenant_id == ctx["tenant_id"], D.ResultSheet.section_id == section.id).order_by(desc(D.ResultSheet.published_at), desc(D.ResultSheet.updated_at)).first())
+
+    assessment_payload, exceptions = [], []
+    for assessment in assessments:
+        assessment_marks, rows, missing_count = marks_by_assessment.get(assessment.id, {}), [], 0
+        for enrollment in enrollments:
+            student, mark = student_map.get(enrollment.student_id), assessment_marks.get(enrollment.student_id)
+            missing_count += 0 if mark else 1
+            rows.append({"student_id": enrollment.student_id, "roll_no": getattr(student, "roll_no", "") if student else "", "name": getattr(student, "name", "") if student else enrollment.student_id, "score": mark.score if mark else None, "mark_status": mark.status if mark else "not_entered"})
+        if missing_count:
+            exceptions.append({"severity": "warning", "issue": f"{missing_count} mark record(s) have not been entered for {assessment.name}.", "current_owner": "Assigned faculty", "required_action": "Complete marks entry through the authorised assessment workflow.", "status": "OPEN"})
+        assessment_payload.append({"id": assessment.id, "name": assessment.name, "type": assessment.assessment_type, "max_marks": assessment.max_marks, "status": assessment.status, "marks_status": assessment.marks_state or assessment.status, "scheduled_at": assessment.scheduled_at.isoformat() if assessment.scheduled_at else None, "marks": rows})
+    if not assessments:
+        exceptions.append({"severity": "info", "issue": "No assessments are configured for this section.", "current_owner": "Academic delivery owner", "required_action": "Configure assessments before marks collection begins.", "status": "OPEN"})
+    if assessments and not result:
+        exceptions.append({"severity": "info", "issue": "No result sheet has been produced yet.", "current_owner": "Examination Controller", "required_action": "Complete the authorised marks and result workflow.", "status": "PENDING"})
+
+    audits = (s.query(AuditLog).filter(AuditLog.tenant_id == ctx["tenant_id"], or_(AuditLog.entity == f"section:{section.id}", AuditLog.entity.like("assessment:%"))).order_by(desc(AuditLog.created_at)).limit(100).all())
+    assessment_id_set = set(assessment_ids)
+    audits = [row for row in audits if row.entity == f"section:{section.id}" or row.entity.split(":", 1)[-1] in assessment_id_set]
+    academic_year = (result.academic_year if result else "") or next((row.academic_year for row in assessments if row.academic_year), "")
+    return {"section": {"id": section.id, "course_code": course.code if course else "", "course_title": course.title if course else "", "section": section.section_code, "term": section.term, "academic_year": academic_year, "department": department.name if department else "", "faculty": faculty.name if faculty else "", "students": len(enrollments)}, "assessments": assessment_payload, "result": {"id": result.id, "status": result.status, "term": result.term, "published_at": result.published_at.isoformat() if result.published_at else None} if result else {"status": "not_started"}, "exceptions": exceptions, "audit": [{"action": row.action, "actor": row.actor_name, "previous": row.prev_state, "current": row.new_state, "at": row.created_at.isoformat() if row.created_at else None} for row in audits]}
 
 
 def _academic_year_label(batch):
@@ -2575,8 +2662,8 @@ def submit_allocation_proposal(proposal_id: str, body: AcademicProposalTransitio
     proposal = require_academic_object(s, ctx, s.get(D.AcademicProposal, proposal_id), "submit", "Allocation proposal")
     if not proposal or proposal.proposal_type != "allocation": raise HTTPException(404, "Allocation proposal not found")
     if proposal.submitted_by != ctx["sub"] or proposal.state not in {"DRAFT", "RETURNED"} or proposal.status_version != body.expected_status_version: raise HTTPException(409, "Proposal cannot be submitted")
-    previous=proposal.state; proposal.state="RESUBMITTED" if previous == "RETURNED" else "SUBMITTED"; proposal.status_version += 1; proposal.updated_at=datetime.utcnow(); _proposal_event(s, proposal, ctx, previous, proposal.state, body.reason); dean=s.query(User).filter(User.office_n==6).first()
-    if dean: _proposal_notice(s, dean.id, "Faculty allocation decision required", proposal.title)
+    previous=proposal.state; proposal.state="RESUBMITTED" if previous == "RETURNED" else "SUBMITTED"; proposal.status_version += 1; proposal.updated_at=datetime.utcnow(); _proposal_event(s, proposal, ctx, previous, proposal.state, body.reason); dean=s.query(User).filter(User.office_n==6, User.tenant_id==proposal.tenant_id).first()
+    if dean: _proposal_notice(s, dean.id, "Faculty allocation decision required", f"{proposal.title} ({proposal.id}) for section {proposal.section_id}. Review the submitted version {proposal.version_no}.")
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.allocation.proposal.submit", f"academic_proposal:{proposal.id}", previous, proposal.state, body.reason, commit=False); s.commit(); return {"proposal": _proposal_payload(s, proposal)}
 
 
@@ -2596,8 +2683,48 @@ def decide_allocation_proposal(proposal_id: str, decision: str, body: AcademicPr
     if target=="APPROVED":
         payload=json.loads(_proposal_version(s, proposal).payload_json); section=s.get(D.Section,payload["section_id"]); faculty=s.get(D.StaffMember,payload["faculty_person_id"])
         if not section or not faculty: raise HTTPException(409, "Allocation target no longer exists")
-        section.faculty_person_id=faculty.id; s.add(D.FacultyAllocation(id=uid(),tenant_id=TENANT,offering_id=section.offering_id,section_id=section.id,faculty_person_id=faculty.id,term=section.term,workload_units=1,status="APPROVED",proposal_id=proposal.id,created_by=proposal.submitted_by,approved_by=ctx["sub"],created_at=datetime.utcnow(),updated_at=datetime.utcnow())); proposal.implementation_ref=section.id
-    _proposal_event(s, proposal, ctx, previous, target, body.reason); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.allocation.proposal.decision", f"academic_proposal:{proposal.id}", previous, target, body.reason, commit=False); s.commit(); return {"proposal": _proposal_payload(s, proposal)}
+        offering = s.get(D.CourseOffering, section.offering_id) if section.offering_id else None
+        course = s.get(D.Course, section.course_id)
+        section.faculty_person_id=faculty.id
+        s.add(D.FacultyAllocation(id=uid(),tenant_id=TENANT,offering_id=section.offering_id,section_id=section.id,faculty_person_id=faculty.id,term=section.term,workload_units=1,status="APPROVED",proposal_id=proposal.id,created_by=proposal.submitted_by,approved_by=ctx["sub"],created_at=datetime.utcnow(),updated_at=datetime.utcnow()))
+        # TeachingAllocation is the authoritative time-bound record consumed by
+        # professor workspaces and session generation. Create it as part of the
+        # approval transaction; relying on a later seed/restart would leave a
+        # newly approved section operationally incomplete.
+        active_allocations = s.query(D.TeachingAllocation).filter(
+            D.TeachingAllocation.section_id == section.id,
+            D.TeachingAllocation.status == "active",
+        ).all()
+        teaching_allocation = next((row for row in active_allocations if row.faculty_id == faculty.id), None)
+        for row in active_allocations:
+            if row is not teaching_allocation:
+                row.status = "inactive"
+                row.updated_at = datetime.utcnow()
+        if teaching_allocation is None:
+            teaching_allocation = D.TeachingAllocation(
+                id=f"alloc_proposal_{proposal.id}", tenant_id=TENANT,
+                faculty_id=faculty.id, course_id=section.course_id,
+                section_id=section.id,
+            )
+            s.add(teaching_allocation)
+        teaching_allocation.academic_year = offering.academic_year if offering else ""
+        teaching_allocation.term = section.term or (offering.term if offering else "")
+        teaching_allocation.allocation_type = "primary"
+        teaching_allocation.lecture_hours = float(course.credits if course else 0)
+        teaching_allocation.lab_hours = 0
+        teaching_allocation.tutorial_hours = 0
+        teaching_allocation.workload_units = float(course.credits if course else 1)
+        teaching_allocation.assigned_by = actor_name(s, ctx)
+        teaching_allocation.effective_from = offering.course_start_date if offering else None
+        teaching_allocation.effective_to = offering.expected_completion_date if offering else None
+        teaching_allocation.status = "active"
+        teaching_allocation.updated_at = datetime.utcnow()
+        proposal.implementation_ref=section.id
+    _proposal_event(s, proposal, ctx, previous, target, body.reason)
+    submitter = s.get(User, proposal.submitted_by)
+    if submitter:
+        _proposal_notice(s, submitter.id, f"Faculty allocation {target.lower()}", f"Proposal {proposal.id} for section {proposal.section_id} is {target.lower()}. {body.reason.strip()}", "info" if target == "APPROVED" else "action")
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.allocation.proposal.decision", f"academic_proposal:{proposal.id}", previous, target, body.reason, commit=False); s.commit(); return {"proposal": _proposal_payload(s, proposal)}
 
 
 @router.get("/academics/timetable/readiness")
@@ -2953,6 +3080,7 @@ class CurriculumProposalIn(BaseModel):
     code: str
     title: str
     dept_code: str
+    program_id: str
     credits: int = Field(default=3, ge=1, le=30)
     semester: int = Field(default=1, ge=1, le=16)
     regulation: str = "R2023"
@@ -2963,6 +3091,10 @@ class CurriculumProposalIn(BaseModel):
     description: str = ""
     effective_term: str
     rationale: str = ""
+
+
+class CurriculumMaterializeIn(BaseModel):
+    program_id: str
 
 
 class ProgramProposalIn(BaseModel):
@@ -3054,8 +3186,11 @@ def decide_program_proposal(proposal_id:str,decision:str,body:AcademicProposalTr
 def committees(ctx=Depends(auth),s=Depends(db)):
     require(gate(s,ctx,"academics","view", governance=True)[0]); return {"committees":[{"id":x.id,"name":x.name,"type":x.committee_type,"chair_id":x.chair_id,"status":x.status,"permissions":json.loads(x.permissions_json or "[]")} for x in scoped_academic_query(s, D.AcademicCommittee, ctx).all()]}
 
-class CommitteeIn(BaseModel): name:str; committee_type:str; chair_id:str=""; permissions:list[str]=["view","record","assign","verify"]
-class CommitteeUpdateIn(BaseModel): name:str; committee_type:str; chair_id:str=""; status:str="active"; permissions:list[str]=["view","record","assign","verify"]
+class CommitteeIn(BaseModel):
+    name:str; committee_type:str; chair_id:str=""; permissions:list[str]=["view","record","assign","verify"]
+    school_id:str=""; dept_id:str=""
+class CommitteeUpdateIn(BaseModel):
+    name:str; committee_type:str; chair_id:str=""; status:str="active"; permissions:list[str]=["view","record","assign","verify"]
 class MeetingIn(BaseModel): committee_id:str; meeting_at:str; agenda:str=""
 class ResolutionIn(BaseModel): title:str; decision:str; linked_proposal_id:str=""; linked_quality_action_id:str=""; linked_planning_item_id:str=""
 
@@ -3067,22 +3202,53 @@ def require_committee_permission(s, ctx, committee_id, permission):
         raise HTTPException(403,"Committee permission denied")
     return committee
 
+
+def _committee_notice(s, committee, title, body, severity="action", exclude_user_id=""):
+    """Notify real committee participants after a committed governance event."""
+    recipient_ids = {committee.chair_id} if committee.chair_id else set()
+    recipient_ids.update(x.user_id for x in s.query(D.CommitteeMember).filter(
+        D.CommitteeMember.tenant_id == TENANT,
+        D.CommitteeMember.committee_id == committee.id,
+        D.CommitteeMember.active == True,
+    ).all())
+    for user_id in recipient_ids - {exclude_user_id}:
+        if s.get(User, user_id):
+            notify(s, user_id, title, body, severity)
+
 @router.post("/academics/committees")
 def create_committee(body:CommitteeIn,ctx=Depends(auth),s=Depends(db)):
     require(gate(s, ctx, "academics", "manage_committee", governance=True)[0])
-    row=D.AcademicCommittee(id=uid(),tenant_id=TENANT,name=body.name,committee_type=body.committee_type,chair_id=body.chair_id,permissions_json=json.dumps(body.permissions));s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.create",f"committee:{row.id}","","active",body.name);return {"id":row.id,"status":row.status,"permissions":body.permissions}
+    if not body.name.strip() or not body.committee_type.strip(): raise HTTPException(422, "Committee name and type are required")
+    if body.chair_id and not s.get(User, body.chair_id): raise HTTPException(404, "Chair user not found")
+    dept_id = body.dept_id or (actor_department_id(s, ctx) if ctx["office_n"] != 6 else "")
+    department = s.get(D.Department, dept_id) if dept_id else None
+    if dept_id and not department: raise HTTPException(404, "Committee department not found")
+    school_id = body.school_id or (department.school_id if department else "")
+    if school_id and not s.get(D.School, school_id): raise HTTPException(404, "Committee school not found")
+    allowed_permissions = {"view", "record", "assign", "verify"}
+    if not set(body.permissions).issubset(allowed_permissions): raise HTTPException(422, "Invalid committee permission")
+    row=D.AcademicCommittee(id=uid(),tenant_id=TENANT,name=body.name.strip(),committee_type=body.committee_type.strip(),chair_id=body.chair_id,school_id=school_id or None,dept_id=dept_id or None,permissions_json=json.dumps(sorted(set(body.permissions))))
+    require_academic_object(s, ctx, row, "create", "Committee")
+    s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.create",f"committee:{row.id}","","active",body.name)
+    _committee_notice(s, row, "Committee created", f"Committee {row.id} ({row.name}) is active.", "info", ctx["sub"])
+    return {"id":row.id,"status":row.status,"permissions":body.permissions}
 
 @router.put("/academics/committees/{committee_id}")
 def update_committee(committee_id:str,body:CommitteeUpdateIn,ctx=Depends(auth),s=Depends(db)):
     require(gate(s,ctx,"academics","manage_committee", governance=True)[0]); row=require_academic_object(s,ctx,s.get(D.AcademicCommittee,committee_id),"edit","Committee")
     if body.chair_id and not s.get(User,body.chair_id): raise HTTPException(404,"Chair user not found")
-    previous=row.status; row.name=body.name.strip(); row.committee_type=body.committee_type.strip(); row.chair_id=body.chair_id.strip(); row.status=body.status; row.permissions_json=json.dumps(body.permissions); s.commit(); write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.update",f"committee:{row.id}",previous,row.status,body.name); return {"id":row.id,"name":row.name,"type":row.committee_type,"chair_id":row.chair_id,"status":row.status,"permissions":body.permissions}
+    if not body.name.strip() or not body.committee_type.strip(): raise HTTPException(422, "Committee name and type are required")
+    previous=row.status; row.name=body.name.strip(); row.committee_type=body.committee_type.strip(); row.chair_id=body.chair_id.strip(); row.status=body.status; row.permissions_json=json.dumps(sorted(set(body.permissions))); s.commit(); write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.update",f"committee:{row.id}",previous,row.status,body.name)
+    _committee_notice(s, row, "Committee updated", f"Committee {row.id} was updated; status is {row.status}.", "info", ctx["sub"])
+    return {"id":row.id,"name":row.name,"type":row.committee_type,"chair_id":row.chair_id,"status":row.status,"permissions":body.permissions}
 
 @router.post("/academics/committees/meetings")
 def create_meeting(body:MeetingIn,ctx=Depends(auth),s=Depends(db)):
     require(gate(s, ctx, "academics", "manage_committee", governance=True)[0])
-    require_committee_permission(s,ctx,body.committee_id,"record")
-    row=D.CommitteeMeeting(id=uid(),tenant_id=TENANT,committee_id=body.committee_id,meeting_at=datetime.fromisoformat(body.meeting_at),agenda=body.agenda,created_by=ctx["sub"]);s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.meeting.create",f"committee_meeting:{row.id}","","SCHEDULED",body.agenda);return {"id":row.id,"status":row.status}
+    committee=require_committee_permission(s,ctx,body.committee_id,"record")
+    row=D.CommitteeMeeting(id=uid(),tenant_id=TENANT,committee_id=body.committee_id,school_id=committee.school_id,dept_id=committee.dept_id,meeting_at=datetime.fromisoformat(body.meeting_at),agenda=body.agenda,created_by=ctx["sub"]);s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.meeting.create",f"committee_meeting:{row.id}","","SCHEDULED",body.agenda)
+    _committee_notice(s, committee, "Committee meeting scheduled", f"Committee {committee.id}; meeting {row.id} is scheduled.", "action", ctx["sub"])
+    return {"id":row.id,"status":row.status}
 
 @router.get("/academics/committees/{committee_id}/meetings")
 def committee_meetings(committee_id:str,ctx=Depends(auth),s=Depends(db)):
@@ -3094,23 +3260,38 @@ class CommitteeTransitionIn(BaseModel): target_status:str; reason:str=""; conten
 
 @router.post("/academics/committees/meetings/{meeting_id}/transition")
 def transition_meeting(meeting_id:str,body:CommitteeTransitionIn,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","manage_committee", governance=True)[0]); row=require_academic_object(s,ctx,s.get(D.CommitteeMeeting,meeting_id),"edit","Committee meeting"); require_committee_permission(s,ctx,row.committee_id,"record"); target=body.target_status.upper()
+    require(gate(s,ctx,"academics","manage_committee", governance=True)[0]); row=s.get(D.CommitteeMeeting,meeting_id)
+    if not row or row.tenant_id != ctx["tenant_id"]: raise HTTPException(404,"Committee meeting not found")
+    committee=require_committee_permission(s,ctx,row.committee_id,"record"); target=body.target_status.upper()
     if target not in {"AGENDA_APPROVED","HELD","MINUTES_DRAFT","MINUTES_FINAL"}: raise HTTPException(422,"Unknown meeting status")
+    allowed_transitions = {
+        "SCHEDULED": {"AGENDA_APPROVED"},
+        "AGENDA_APPROVED": {"HELD"},
+        "HELD": {"MINUTES_DRAFT"},
+        "MINUTES_DRAFT": {"MINUTES_FINAL"},
+    }
+    if target not in allowed_transitions.get(row.status, set()):
+        raise HTTPException(409, f"Meeting cannot move from {row.status} to {target}")
     if target=="AGENDA_APPROVED" and not row.agenda.strip(): raise HTTPException(422,"Agenda is required")
     if target in {"MINUTES_DRAFT","MINUTES_FINAL"} and body.content.strip(): row.minutes=body.content.strip()
     if target=="AGENDA_APPROVED": row.agenda_status="APPROVED"
     if target=="MINUTES_DRAFT": row.minutes_status="DRAFT"
     if target=="MINUTES_FINAL": row.minutes_status="FINAL"
-    row.status=target; s.commit(); return {"id":row.id,"status":row.status,"agenda_status":row.agenda_status,"minutes_status":row.minutes_status}
+    previous=row.status; row.status=target; s.commit(); write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.meeting.transition",f"committee_meeting:{row.id}",previous,target,body.reason or body.content)
+    _committee_notice(s, committee, "Committee meeting updated", f"Committee {committee.id}; meeting {row.id} moved from {previous} to {target}.", "info", ctx["sub"])
+    return {"id":row.id,"status":row.status,"agenda_status":row.agenda_status,"minutes_status":row.minutes_status}
 
 @router.post("/academics/committees/meetings/{meeting_id}/resolutions")
 def create_resolution(meeting_id:str,body:ResolutionIn,ctx=Depends(auth),s=Depends(db)):
     require(gate(s, ctx, "academics", "manage_committee", governance=True)[0])
-    require_academic_object(s, ctx, s.get(D.CommitteeMeeting,meeting_id), "create", "Committee meeting")
-    meeting=require_academic_object(s,ctx,s.get(D.CommitteeMeeting,meeting_id),"create","Committee meeting")
-    require_committee_permission(s,ctx,meeting.committee_id,"record")
+    meeting=s.get(D.CommitteeMeeting,meeting_id)
+    if not meeting or meeting.tenant_id != ctx["tenant_id"]: raise HTTPException(404,"Committee meeting not found")
+    committee=require_committee_permission(s,ctx,meeting.committee_id,"record")
     if meeting.minutes_status != "FINAL": raise HTTPException(409,"Minutes must be finalized before recording a resolution")
-    row=D.CommitteeResolution(id=uid(),tenant_id=TENANT,meeting_id=meeting_id,title=body.title,decision=body.decision,linked_proposal_id=body.linked_proposal_id,linked_quality_action_id=body.linked_quality_action_id,linked_planning_item_id=body.linked_planning_item_id);s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.resolution.create",f"committee_resolution:{row.id}","","DRAFT",body.decision);return {"id":row.id,"status":row.status}
+    if not body.title.strip() or not body.decision.strip(): raise HTTPException(422,"Resolution title and decision are required")
+    row=D.CommitteeResolution(id=uid(),tenant_id=TENANT,meeting_id=meeting_id,school_id=committee.school_id,dept_id=committee.dept_id,title=body.title.strip(),decision=body.decision.strip(),linked_proposal_id=body.linked_proposal_id,linked_quality_action_id=body.linked_quality_action_id,linked_planning_item_id=body.linked_planning_item_id);s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.resolution.create",f"committee_resolution:{row.id}","","DRAFT",body.decision)
+    _committee_notice(s, committee, "Committee resolution recorded", f"Committee {committee.id}; resolution {row.id} awaits a decision.", "action", ctx["sub"])
+    return {"id":row.id,"status":row.status}
 
 @router.get("/academics/committees/{committee_id}/resolutions")
 def committee_resolutions(committee_id:str,ctx=Depends(auth),s=Depends(db)):
@@ -3120,25 +3301,35 @@ def committee_resolutions(committee_id:str,ctx=Depends(auth),s=Depends(db)):
 
 @router.post("/academics/committees/resolutions/{resolution_id}/transition")
 def transition_resolution(resolution_id:str,body:CommitteeTransitionIn,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","manage_committee", governance=True)[0]); row=require_academic_object(s,ctx,s.get(D.CommitteeResolution,resolution_id),"approve","Committee resolution"); meeting=s.get(D.CommitteeMeeting,row.meeting_id); require_committee_permission(s,ctx,meeting.committee_id,"approve"); target=body.target_status.upper()
+    require(gate(s,ctx,"academics","manage_committee", governance=True)[0]); row=s.get(D.CommitteeResolution,resolution_id)
+    if not row or row.tenant_id != ctx["tenant_id"]: raise HTTPException(404,"Committee resolution not found")
+    meeting=s.get(D.CommitteeMeeting,row.meeting_id); committee=require_committee_permission(s,ctx,meeting.committee_id,"approve"); target=body.target_status.upper()
     if target not in {"APPROVED","REJECTED"}: raise HTTPException(422,"Resolution must be approved or rejected")
-    row.status=target; row.approved_by=ctx["sub"]; row.approved_at=datetime.utcnow(); s.commit(); return {"id":row.id,"status":row.status}
+    if row.status != "DRAFT": raise HTTPException(409,"Committee resolution has already been decided")
+    previous=row.status; row.status=target; row.approved_by=ctx["sub"]; row.approved_at=datetime.utcnow(); s.commit(); write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.resolution.transition",f"committee_resolution:{row.id}",previous,target,body.reason)
+    _committee_notice(s, committee, "Committee resolution decided", f"Committee {committee.id}; resolution {row.id} is {target.lower()}.", "info", ctx["sub"])
+    return {"id":row.id,"status":row.status}
 
 class MemberIn(BaseModel): user_id:str; role:str="member"
 @router.post("/academics/committees/{committee_id}/members")
 def add_committee_member(committee_id:str,body:MemberIn,ctx=Depends(auth),s=Depends(db)):
     require(gate(s, ctx, "academics", "manage_committee", governance=True)[0])
-    require_academic_object(s, ctx, s.get(D.AcademicCommittee,committee_id), "create", "Committee")
+    committee=require_academic_object(s, ctx, s.get(D.AcademicCommittee,committee_id), "create", "Committee")
+    if body.role not in {"chair", "secretary", "member", "observer"}: raise HTTPException(422,"Invalid committee member role")
     if not s.get(User,body.user_id): raise HTTPException(404,"User not found")
     if s.query(D.CommitteeMember).filter(D.CommitteeMember.tenant_id == ctx["tenant_id"], D.CommitteeMember.committee_id == committee_id, D.CommitteeMember.user_id == body.user_id, D.CommitteeMember.active == True).first(): raise HTTPException(409,"User is already an active committee member")
-    row=D.CommitteeMember(id=uid(),tenant_id=TENANT,committee_id=committee_id,user_id=body.user_id,role=body.role);s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.member.add",f"committee_member:{row.id}","","active",body.user_id);return {"id":row.id}
+    row=D.CommitteeMember(id=uid(),tenant_id=TENANT,committee_id=committee_id,user_id=body.user_id,role=body.role);s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.member.add",f"committee_member:{row.id}","","active",body.user_id)
+    notify(s, body.user_id, "Committee membership assigned", f"You were added to committee {committee.id} as {body.role}.", "action")
+    return {"id":row.id}
 
 @router.delete("/academics/committees/{committee_id}/members/{member_id}")
 def remove_committee_member(committee_id:str,member_id:str,ctx=Depends(auth),s=Depends(db)):
     require(gate(s,ctx,"academics","manage_committee", governance=True)[0]); require_committee_permission(s,ctx,committee_id,"assign")
     row=s.query(D.CommitteeMember).filter(D.CommitteeMember.tenant_id==TENANT,D.CommitteeMember.id==member_id,D.CommitteeMember.committee_id==committee_id,D.CommitteeMember.active==True).first()
     if not row: raise HTTPException(404,"Active committee member not found")
-    row.active=False; s.commit(); return {"id":row.id,"active":False}
+    row.active=False; s.commit(); write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.member.remove",f"committee_member:{row.id}","active","inactive",row.user_id)
+    notify(s, row.user_id, "Committee membership ended", f"Your membership in committee {committee_id} is no longer active.", "info")
+    return {"id":row.id,"active":False}
 
 @router.get("/academics/committees/{committee_id}/members")
 def committee_members(committee_id:str,ctx=Depends(auth),s=Depends(db)):
@@ -3148,20 +3339,30 @@ class CommitteeActionIn(BaseModel): title:str; owner_id:str; deadline:str=""
 @router.post("/academics/committees/resolutions/{resolution_id}/actions")
 def committee_action(resolution_id:str,body:CommitteeActionIn,ctx=Depends(auth),s=Depends(db)):
     require(gate(s, ctx, "academics", "manage_committee", governance=True)[0])
-    resolution=require_academic_object(s, ctx, s.get(D.CommitteeResolution,resolution_id), "create", "Committee resolution")
-    meeting=s.get(D.CommitteeMeeting,resolution.meeting_id); require_committee_permission(s,ctx,meeting.committee_id,"assign")
-    row=D.CommitteeActionItem(id=uid(),tenant_id=TENANT,resolution_id=resolution_id,title=body.title,owner_id=body.owner_id,deadline=datetime.fromisoformat(body.deadline) if body.deadline else None);s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.action.create",f"committee_action:{row.id}","","OPEN",body.title);return {"id":row.id,"status":row.status}
+    resolution=s.get(D.CommitteeResolution,resolution_id)
+    if not resolution or resolution.tenant_id != ctx["tenant_id"]: raise HTTPException(404,"Committee resolution not found")
+    if resolution.status != "APPROVED": raise HTTPException(409,"Action items require an approved resolution")
+    if not s.get(User, body.owner_id): raise HTTPException(404,"Action owner not found")
+    meeting=s.get(D.CommitteeMeeting,resolution.meeting_id); committee=require_committee_permission(s,ctx,meeting.committee_id,"assign")
+    row=D.CommitteeActionItem(id=uid(),tenant_id=TENANT,resolution_id=resolution_id,school_id=committee.school_id,dept_id=committee.dept_id,title=body.title,owner_id=body.owner_id,deadline=datetime.fromisoformat(body.deadline) if body.deadline else None);s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.action.create",f"committee_action:{row.id}","","OPEN",body.title)
+    notify(s, body.owner_id, "Committee action assigned", f"Committee {committee.id}; action {row.id} requires your attention.", "action")
+    return {"id":row.id,"status":row.status}
 
 @router.get("/academics/committees/action-items")
 def committee_action_items(ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","view", governance=True)[0]); rows=s.query(D.CommitteeActionItem).filter(D.CommitteeActionItem.tenant_id==TENANT).order_by(D.CommitteeActionItem.deadline).all()
+    require(gate(s,ctx,"academics","view", governance=True)[0]); rows=scoped_academic_query(s, D.CommitteeActionItem, ctx).order_by(D.CommitteeActionItem.deadline).all()
     return {"actions":[{"id":x.id,"resolution_id":x.resolution_id,"title":x.title,"owner_id":x.owner_id,"deadline":x.deadline.isoformat() if x.deadline else None,"status":x.status,"evidence":x.evidence,"verification_result":x.verification_result} for x in rows]}
 
 @router.post("/academics/committees/action-items/{action_id}/verify")
 def verify_committee_action(action_id:str,body:CommitteeTransitionIn,ctx=Depends(auth),s=Depends(db)):
-    require(gate(s,ctx,"academics","manage_committee", governance=True)[0]); row=require_academic_object(s,ctx,s.get(D.CommitteeActionItem,action_id),"verify","Committee action"); resolution=s.get(D.CommitteeResolution,row.resolution_id); meeting=s.get(D.CommitteeMeeting,resolution.meeting_id); require_committee_permission(s,ctx,meeting.committee_id,"verify")
+    require(gate(s,ctx,"academics","manage_committee", governance=True)[0]); row=s.get(D.CommitteeActionItem,action_id)
+    if not row or row.tenant_id != ctx["tenant_id"]: raise HTTPException(404,"Committee action not found")
+    if row.status == "VERIFIED": raise HTTPException(409,"Committee action is already verified")
+    resolution=s.get(D.CommitteeResolution,row.resolution_id); meeting=s.get(D.CommitteeMeeting,resolution.meeting_id); committee=require_committee_permission(s,ctx,meeting.committee_id,"verify")
     if not body.content.strip(): raise HTTPException(422,"Verification evidence is required")
-    row.evidence=body.content.strip(); row.verification_result=body.reason.strip() or "Verified"; row.status="VERIFIED"; row.verified_by=ctx["sub"]; row.verified_at=datetime.utcnow(); s.commit(); return {"id":row.id,"status":row.status}
+    row.evidence=body.content.strip(); row.verification_result=body.reason.strip() or "Verified"; row.status="VERIFIED"; row.verified_by=ctx["sub"]; row.verified_at=datetime.utcnow(); s.commit(); write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"academic.committee.action.verify",f"committee_action:{row.id}","OPEN","VERIFIED",row.verification_result)
+    _committee_notice(s, committee, "Committee action verified", f"Committee {committee.id}; action {row.id} was verified.", "info", ctx["sub"])
+    return {"id":row.id,"status":row.status}
 
 @router.get("/academics/attainment")
 def attainment(program_id:str="",course_id:str="",ctx=Depends(auth),s=Depends(db)):
@@ -3329,10 +3530,66 @@ def transition_next_plan(plan_id:str,body:CommitteeTransitionIn,ctx=Depends(auth
     row.state=target; row.approved_by=ctx["sub"] if target=="APPROVED" else row.approved_by; row.updated_at=datetime.utcnow(); s.commit(); return {"id":row.id,"state":row.state}
 
 
-# Curriculum ownership sits with the academic unit.  The Dean is the
-# independent academic authority that reviews and decides proposals, rather
-# than routinely originating the requests they must approve.
-CURRICULUM_PROPOSERS = {10, 17}
+# Curriculum ownership sits with the academic unit.  The HOD originates a
+# curriculum change and the Dean is the independent academic authority that
+# reviews it.  Academic Coordinators consume approved, effective curricula to
+# plan offerings and delivery; they must not originate curriculum changes.
+CURRICULUM_PROPOSERS = {10}
+
+
+def _publish_curriculum_version_from_approval(s, proposal, course, ctx, payload):
+    """Materialise the approved course change as the single effective source
+    for downstream offerings.  This is intentionally part of Dean approval so
+    a coordinator can never select an unapproved curriculum snapshot.
+    """
+    program = s.get(D.Program, payload.get("program_id") or proposal.program_id)
+    if not program or program.tenant_id != proposal.tenant_id or program.dept_id != proposal.dept_id:
+        raise HTTPException(422, "An in-scope programme is required before the curriculum can become effective")
+
+    course.program_id = program.id
+    same_term = s.query(D.CurriculumVersion).filter(
+        D.CurriculumVersion.tenant_id == proposal.tenant_id,
+        D.CurriculumVersion.program_id == program.id,
+        D.CurriculumVersion.effective_term == payload["effective_term"].strip(),
+    ).order_by(desc(D.CurriculumVersion.version)).all()
+    previous = next((row for row in same_term if row.status == "effective"), None)
+    if previous:
+        snapshot = list(json.loads(previous.snapshot_json or "[]"))
+    else:
+        baseline = s.query(D.Course).filter(
+            D.Course.tenant_id == proposal.tenant_id,
+            D.Course.dept_id == program.dept_id,
+            D.Course.status == "Active",
+        ).all()
+        snapshot = [{"id": row.id, "code": row.code, "title": row.title,
+                     "credits": row.credits, "semester": row.semester} for row in baseline]
+
+    course_item = {"id": course.id, "code": course.code, "title": course.title,
+                   "credits": course.credits, "semester": course.semester}
+    snapshot = [item for item in snapshot if item.get("id") != course.id]
+    snapshot.append(course_item)
+    snapshot.sort(key=lambda item: (int(item.get("semester") or 0), item.get("code") or ""))
+    version = (same_term[0].version + 1) if same_term else 1
+    for row in same_term:
+        if row.status == "effective":
+            row.status = "archived"
+    curriculum = D.CurriculumVersion(
+        id=uid(), tenant_id=proposal.tenant_id, program_id=program.id,
+        regulation=course.regulation, effective_term=payload["effective_term"].strip(),
+        version=version, status="effective", snapshot_json=json.dumps(snapshot),
+        source_proposal_id=proposal.id, created_by=ctx["sub"], effective_at=datetime.utcnow(),
+    )
+    s.add(curriculum); s.flush()
+    checksum = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
+    s.add(D.CurriculumSnapshot(id=uid(), tenant_id=proposal.tenant_id,
+                                curriculum_version_id=curriculum.id,
+                                course_set_json=json.dumps(snapshot), checksum=checksum))
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"],
+                "academic.curriculum.version.publish", f"curriculum_version:{curriculum.id}",
+                "", "effective",
+                f"Generated from approved proposal {proposal.id}; programme {program.code}; version {version}",
+                commit=False)
+    return curriculum, program
 
 
 def _curriculum_proposal_payload(s, proposal):
@@ -3403,7 +3660,7 @@ def curriculum_proposals(state: str = "", ctx=Depends(auth), s=Depends(db)):
     return {"proposals": [_curriculum_proposal_payload(s, row) for row in query.order_by(desc(D.AcademicProposal.updated_at)).all()],
             "can_propose": ctx["office_n"] in CURRICULUM_PROPOSERS, "can_decide": ctx["office_n"] == 6,
             "proposal_departments": [{"id": row.id, "code": row.code, "name": row.name} for row in allowed_departments.order_by(D.Department.code).all()],
-            "programs": [{"id": row.id, "code": row.code, "name": row.name} for row in available_programs]}
+            "programs": [{"id": row.id, "code": row.code, "name": row.name, "dept_id": row.dept_id} for row in available_programs]}
 
 
 @router.get("/curriculum/proposals/{proposal_id}")
@@ -3418,8 +3675,11 @@ def curriculum_proposal_detail(proposal_id: str, ctx=Depends(auth), s=Depends(db
 def create_curriculum_proposal(body: CurriculumProposalIn, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view")[0])
     if ctx["office_n"] not in CURRICULUM_PROPOSERS:
-        raise HTTPException(403, "Only an HOD or Academic Coordinator can propose curriculum changes")
+        raise HTTPException(403, "Only the HOD can propose curriculum changes")
     dept = require_academic_object(s, ctx, s.query(D.Department).filter(D.Department.tenant_id == ctx["tenant_id"], D.Department.code == body.dept_code.strip()).first(), "create", "Department")
+    program = require_academic_object(s, ctx, s.get(D.Program, body.program_id), "create", "Programme")
+    if program.tenant_id != ctx["tenant_id"] or program.dept_id != dept.id:
+        raise HTTPException(403, "The selected programme is outside the selected department")
     existing = require_academic_object(s, ctx, s.get(D.Course, body.course_id), "create", "Course") if body.course_id else None
     if existing and existing.dept_id != dept.id: raise HTTPException(403, "Course is outside the selected department scope")
     code = body.code.strip().upper()
@@ -3430,7 +3690,7 @@ def create_curriculum_proposal(body: CurriculumProposalIn, ctx=Depends(auth), s=
     title = f"{'Revise' if existing else 'Add'} {code} — {body.title.strip()}"
     now = datetime.utcnow()
     proposal = D.AcademicProposal(id=uid(), tenant_id=TENANT, proposal_type="curriculum", title=title,
-                                  scope_level="department", scope_ref=dept.id, school_id=dept.school_id, dept_id=dept.id, program_id=getattr(existing, "program_id", None), state="DRAFT", version_no=1, submitted_by=ctx["sub"], submitted_office_n=ctx["office_n"],
+                                  scope_level="department", scope_ref=dept.id, school_id=dept.school_id, dept_id=dept.id, program_id=program.id, state="DRAFT", version_no=1, submitted_by=ctx["sub"], submitted_office_n=ctx["office_n"],
                                   assigned_to_office_n=6, due_at=now + timedelta(days=10), created_at=now, updated_at=now)
     s.add(proposal); s.flush()
     s.add(D.AcademicProposalVersion(id=uid(), tenant_id=TENANT, proposal_id=proposal.id, version_no=1,
@@ -3442,6 +3702,8 @@ def create_curriculum_proposal(body: CurriculumProposalIn, ctx=Depends(auth), s=
 
 @router.post("/curriculum/proposals/{proposal_id}/submit")
 def submit_curriculum_proposal(proposal_id: str, body: AcademicProposalTransitionIn, ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] not in CURRICULUM_PROPOSERS:
+        raise HTTPException(403, "Only the HOD can submit or resubmit curriculum changes")
     proposal = require_academic_object(s, ctx, s.get(D.AcademicProposal, proposal_id), "submit", "Curriculum proposal")
     if not proposal or proposal.proposal_type != "curriculum": raise HTTPException(404, "Curriculum proposal not found")
     if proposal.submitted_by != ctx["sub"] or proposal.state not in {"DRAFT", "RETURNED", "CLARIFICATION_REQUIRED"}: raise HTTPException(409, "Proposal cannot be submitted in its current state")
@@ -3460,6 +3722,9 @@ def decide_curriculum_proposal(proposal_id: str, decision: str, body: AcademicPr
     proposal = require_academic_object(s, ctx, s.query(D.AcademicProposal).filter(D.AcademicProposal.id == proposal_id).with_for_update().first(), "approve", "Curriculum proposal")
     prevent_self_approval(proposal, ctx)
     if proposal.proposal_type != "curriculum": raise HTTPException(404, "Curriculum proposal not found")
+    proposer = s.get(User, proposal.submitted_by)
+    if proposal.submitted_office_n not in CURRICULUM_PROPOSERS or not proposer or proposer.office_n not in CURRICULUM_PROPOSERS:
+        raise HTTPException(409, "This legacy curriculum proposal was not originated by the HOD and must be recreated through the current workflow")
     target = {"approve": "APPROVED", "reject": "REJECTED", "return": "RETURNED", "clarification": "CLARIFICATION_REQUIRED", "escalate": "ESCALATED"}.get(decision.lower())
     if not target or proposal.state not in {"SUBMITTED", "RESUBMITTED"}: raise HTTPException(409, "Invalid curriculum decision")
     validate_transition(s, proposal, target, body.expected_status_version, ctx, body.reason)
@@ -3480,12 +3745,49 @@ def decide_curriculum_proposal(proposal_id: str, decision: str, body: AcademicPr
         for key in ("code", "title", "credits", "semester", "regulation", "course_type", "category", "ltp", "prerequisite", "description"):
             setattr(course, key, payload.get(key, getattr(course, key, "")))
         course.status = "Active"; s.flush(); proposal.implementation_ref = course.id
+        curriculum, program = _publish_curriculum_version_from_approval(s, proposal, course, ctx, payload)
+        _notify_timetable_office(s, 17, "Approved curriculum ready for course offerings",
+                                 f"Curriculum proposal {proposal.id} created effective version {curriculum.id} for {program.code}, {curriculum.effective_term}.")
     elif target == "ESCALATED": proposal.escalated_to_office_n = 4
     _proposal_event(s, proposal, ctx, previous, target, body.reason)
     submitter = s.get(User, proposal.submitted_by)
     if submitter: _proposal_notice(s, submitter.id, f"Curriculum proposal {target.lower().replace('_', ' ')}", proposal.title, "info" if target == "APPROVED" else "action")
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.curriculum.proposal.decision", f"academic_proposal:{proposal.id}", previous, target, body.reason, commit=False); s.commit()
     return {"proposal": _curriculum_proposal_payload(s, proposal)}
+
+
+@router.post("/curriculum/proposals/{proposal_id}/materialize")
+def materialize_approved_curriculum_proposal(proposal_id: str, body: CurriculumMaterializeIn, ctx=Depends(auth), s=Depends(db)):
+    """One-time controlled remediation for an approved legacy proposal that
+    predates programme-bound effective curriculum versions.  It cannot approve
+    a proposal or alter its academic payload; it only completes downstream
+    versioning after an explicit Dean programme selection.
+    """
+    if ctx["office_n"] != 6:
+        raise HTTPException(403, "Only Dean Academics may complete legacy curriculum versioning")
+    proposal = require_academic_object(s, ctx, s.query(D.AcademicProposal).filter(D.AcademicProposal.id == proposal_id).with_for_update().first(), "approve", "Curriculum proposal")
+    if not proposal or proposal.proposal_type != "curriculum":
+        raise HTTPException(404, "Curriculum proposal not found")
+    proposer = s.get(User, proposal.submitted_by)
+    if proposal.state != "APPROVED" or proposal.submitted_office_n not in CURRICULUM_PROPOSERS or not proposer or proposer.office_n not in CURRICULUM_PROPOSERS:
+        raise HTTPException(409, "Only an HOD-originated approved curriculum proposal can be materialized")
+    if s.query(D.CurriculumVersion).filter(D.CurriculumVersion.tenant_id == proposal.tenant_id, D.CurriculumVersion.source_proposal_id == proposal.id).first():
+        raise HTTPException(409, "An effective curriculum version already exists for this proposal")
+    course = s.get(D.Course, proposal.implementation_ref)
+    if not course:
+        raise HTTPException(409, "The approved proposal has no course record to materialize")
+    payload = json.loads(_proposal_version(s, proposal).payload_json)
+    payload["program_id"] = body.program_id
+    proposal.program_id = body.program_id
+    curriculum, program = _publish_curriculum_version_from_approval(s, proposal, course, ctx, payload)
+    _notify_timetable_office(s, 17, "Approved curriculum ready for course offerings",
+                             f"Curriculum proposal {proposal.id} created effective version {curriculum.id} for {program.code}, {curriculum.effective_term}.")
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"],
+                "academic.curriculum.version.materialize", f"academic_proposal:{proposal.id}",
+                "APPROVED", "APPROVED", f"Materialized effective curriculum version {curriculum.id}", commit=False)
+    s.commit()
+    return {"proposal_id": proposal.id, "curriculum_version_id": curriculum.id,
+            "program_id": program.id, "status": curriculum.status, "version": curriculum.version}
 
 
 @router.post("/academics/courses")
@@ -3515,6 +3817,9 @@ def create_course(body: CourseIn, ctx=Depends(auth), s=Depends(db)):
 class CourseOfferingIn(BaseModel):
     course_id: str
     program_id: str
+    # Required when creating an offering. Kept optional in this shared update
+    # contract so legacy offerings can still receive non-curriculum edits.
+    curriculum_version_id: str = ""
     academic_year: str
     term: str
     semester: int
@@ -3567,7 +3872,7 @@ def _course_offering_payload(s, row):
         {"key": "session_created", "label": "Session created", "state": "completed" if sessions else "pending", "completed": bool(sessions)},
         {"key": "session_completed", "label": "Session completed", "state": "completed" if any(x.status == "Completed" for x in sessions) else "pending", "completed": any(x.status == "Completed" for x in sessions)},
     ]
-    return {"id": row.id, "course_id": row.course_id, "course_code": course.code if course else "",
+    return {"id": row.id, "course_id": row.course_id, "curriculum_version_id": row.curriculum_version_id or "", "course_code": course.code if course else "",
             "course_title": course.title if course else "", "program_id": row.program_id,
             "program": program.name if program else "", "program_code": program.code if program else "",
             "academic_year": row.academic_year, "term": row.term, "semester": row.semester,
@@ -3635,7 +3940,11 @@ def save_hod_input(offering_id: str, body: HODInputIn, ctx=Depends(auth), s=Depe
     dec, _ = gate(s, ctx, "academics", "edit"); require(dec); offering = s.query(D.CourseOffering).filter_by(id=offering_id).first()
     if not offering: raise HTTPException(404, "Course offering not found")
     if not _offering_in_academic_scope(s, offering, ctx): raise HTTPException(404, "Course offering not found")
+    if offering.status not in {"Draft", "HOD Input Pending", "Ready"}:
+        raise HTTPException(409, "HOD requirements cannot be changed after the offering enters timetable review")
     row = s.query(D.HODInput).filter_by(offering_id=offering_id).first() or D.HODInput(id=uid(), tenant_id=TENANT, offering_id=offering_id, created_by=ctx["sub"])
+    if row.status == "Submitted":
+        raise HTTPException(409, "Submitted HOD requirements are locked. Ask the Academic Coordinator to return the offering for revision if a change is required.")
     row.required_faculty_count, row.required_sections, row.expected_capacity, row.delivery_type, row.remarks = body.required_faculty_count, body.required_sections, body.expected_capacity, body.delivery_type, body.remarks.strip()
     row.updated_by, row.updated_at = ctx["sub"], datetime.utcnow(); s.add(row); s.commit(); return {"hod_input": {"id": row.id, "status": row.status}, "decision": dec.as_dict()}
 
@@ -3647,7 +3956,20 @@ def submit_hod_input(offering_id: str, ctx=Depends(auth), s=Depends(db)):
     offering = s.query(D.CourseOffering).filter_by(id=offering_id, tenant_id=TENANT).first()
     if not offering or not _offering_in_academic_scope(s, offering, ctx): raise HTTPException(404, "Course offering not found")
     if not row: raise HTTPException(404, "Save HOD input before submitting")
-    row.status, row.updated_by, row.updated_at = "Submitted", ctx["sub"], datetime.utcnow(); s.commit(); return {"status": row.status, "decision": dec.as_dict()}
+    if row.status == "Submitted":
+        raise HTTPException(409, "HOD requirements have already been submitted for this offering")
+    if offering.status not in {"Draft", "HOD Input Pending", "Ready"}:
+        raise HTTPException(409, "This offering is no longer awaiting HOD requirements")
+    if row.required_sections < 1:
+        raise HTTPException(422, "HOD requirements must request at least one section")
+    previous = offering.status
+    now = datetime.utcnow()
+    row.status, row.updated_by, row.updated_at = "Submitted", ctx["sub"], now
+    offering.status, offering.updated_by, offering.updated_at = "Ready", actor_name(s, ctx), now
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "course_offering.hod_requirements_submit", f"course_offering:{offering.id}", previous, offering.status, "HOD requirements submitted; offering ready for section planning")
+    _notify_timetable_office(s, 17, "Course offering HOD input completed", f"Offering {offering.id} is ready for section planning.")
+    return {"status": row.status, "offering_status": offering.status, "decision": dec.as_dict()}
 
 
 @router.get("/academics/course-offerings/{offering_id}/faculty-allocations")
@@ -3657,6 +3979,7 @@ def list_faculty_allocations(offering_id: str, ctx=Depends(auth), s=Depends(db))
 
 @router.post("/academics/course-offerings/{offering_id}/faculty-allocations")
 def create_faculty_allocation(offering_id: str, body: FacultyAllocationIn, ctx=Depends(auth), s=Depends(db)):
+    raise HTTPException(410, "Direct faculty assignment is retired. Create and submit a governed faculty allocation proposal for the section.")
     dec, _ = gate(s, ctx, "academics", "assign_faculty"); require(dec); offering = s.query(D.CourseOffering).filter_by(id=offering_id).first(); faculty = s.get(D.StaffMember, body.faculty_id)
     if not offering or not faculty: raise HTTPException(404, "Offering or faculty not found")
     section = s.query(D.Section).filter_by(id=body.section_id, offering_id=offering_id, course_id=offering.course_id).first() if body.section_id else None
@@ -3679,6 +4002,7 @@ def create_faculty_allocation(offering_id: str, body: FacultyAllocationIn, ctx=D
 
 @router.put("/academics/course-offerings/{offering_id}/faculty-allocations/{allocation_id}")
 def update_faculty_allocation(offering_id: str, allocation_id: str, body: FacultyAllocationIn, ctx=Depends(auth), s=Depends(db)):
+    raise HTTPException(410, "Direct faculty assignment is retired. Submit a revised governed faculty allocation proposal instead.")
     dec, _ = gate(s, ctx, "academics", "assign_faculty"); require(dec)
     offering = s.query(D.CourseOffering).filter_by(id=offering_id, tenant_id=TENANT).first()
     faculty = s.get(D.StaffMember, body.faculty_id)
@@ -3709,7 +4033,9 @@ def course_offering_readiness(offering_id: str, ctx=Depends(auth), s=Depends(db)
 
 
 class CurriculumExecutionIssueIn(BaseModel):
-    offering_id: str
+    offering_id: str = ""
+    course_id: str = ""
+    curriculum_version_id: str = ""
     issue_type: str
     description: str = ""
     responsible_role: str = "Curriculum Officer"
@@ -3745,9 +4071,12 @@ def _execution_payload(s, offering):
     completed_sessions = sum(x.status in {"Completed", "Complete"} for x in sessions)
     progress = round(completed_sessions * 100 / len(sessions)) if sessions else 0
     open_issue = any(i.status != "Resolved" for i in issues)
+    pipeline_gap = (not base["hod_input"] or base["hod_input"].get("status") != "Submitted" or not base["sections"] or not readiness["faculty_complete"] or timetable == "Not Ready")
     if offering.actual_completion_date:
         derived = "Completed"
     elif open_issue:
+        derived = "Gap / Issue"
+    elif pipeline_gap:
         derived = "Gap / Issue"
     elif offering.expected_completion_date and offering.expected_completion_date < date.today():
         derived = "Delayed"
@@ -3762,7 +4091,7 @@ def _execution_payload(s, offering):
             "department": s.get(D.Department, s.get(D.Program, offering.program_id).dept_id).name if s.get(D.Program, offering.program_id) else "",
             "student_year": (int(offering.semester) + 1) // 2 if offering.semester else None,
             "faculty": faculty_names or "—",
-            "faculty_readiness": "Ready" if readiness["faculty_complete"] else "Not Ready",
+            "curriculum_version_id": offering.curriculum_version_id or "", "faculty_readiness": "Ready" if readiness["faculty_complete"] else "Not Ready",
             "timetable_readiness": timetable, "execution_issues": issue_payload,
             "execution_status": derived, "course_start_date": offering.course_start_date.isoformat() if offering.course_start_date else "",
             "expected_completion_date": offering.expected_completion_date.isoformat() if offering.expected_completion_date else "",
@@ -3781,6 +4110,20 @@ def curriculum_execution(academic_year: str = "", student_year: int | None = Non
     require(gate(s, ctx, "academics", "view")[0])
     rows = s.query(D.CourseOffering).filter_by(tenant_id=TENANT).order_by(desc(D.CourseOffering.updated_at)).all()
     items = [_execution_payload(s, row) for row in rows if _offering_in_academic_scope(s, row, ctx)]
+    # An effective curriculum is the source of execution.  Surface courses
+    # omitted from term setup as actionable upstream gaps, instead of hiding
+    # them until an offering happens to exist.
+    offered = {(row.curriculum_version_id, row.course_id) for row in rows}
+    for version in s.query(D.CurriculumVersion).filter_by(tenant_id=ctx["tenant_id"], status="effective").all():
+        program = s.get(D.Program, version.program_id)
+        if not program or (actor_department_id(s, ctx) and program.dept_id != actor_department_id(s, ctx)):
+            continue
+        for snapshot in json.loads(version.snapshot_json or "[]"):
+            course = s.get(D.Course, snapshot.get("id"))
+            if not course or (version.id, course.id) in offered:
+                continue
+            gap_issues = s.query(D.CurriculumExecutionIssue).filter_by(tenant_id=TENANT, offering_id=None, course_id=course.id, curriculum_version_id=version.id).all()
+            items.append({"id": f"curriculum-gap:{version.id}:{course.id}", "course_id": course.id, "course_code": course.code, "course_title": course.title, "program_id": program.id, "program": program.name, "program_code": program.code, "department_id": program.dept_id, "academic_year": "", "term": version.effective_term, "semester": course.semester, "student_year": (course.semester + 1) // 2, "curriculum_version_id": version.id, "hod_input": None, "faculty": "No faculty assigned", "faculty_allocations": [], "faculty_readiness": "Not Ready", "timetable_readiness": "Not Ready", "execution_status": "Gap / Issue", "execution_remarks": "No course offering exists for this effective curriculum course.", "execution_issues": [{"id": i.id, "issue_type": i.issue_type, "description": i.description, "status": i.status, "responsible_role": i.responsible_role} for i in gap_issues], "progress": 0, "class_sessions": []})
     if ctx["office_n"] in {11, 12, 13, 14}:
         staff = s.query(D.StaffMember).filter_by(user_id=ctx["sub"], tenant_id=TENANT).first()
         section_ids = {x.section_id for x in active_allocations_for_faculty(s, staff.id)} if staff else set()
@@ -3836,16 +4179,20 @@ def update_curriculum_execution(offering_id: str, body: CurriculumExecutionUpdat
 def create_curriculum_execution_issue(body: CurriculumExecutionIssueIn, ctx=Depends(auth), s=Depends(db)):
     dec, _ = gate(s, ctx, "academics", "edit"); require(dec)
     if body.status not in {"Open", "Under Review", "Resolved"}: raise HTTPException(400, "Invalid issue status")
-    offering = s.query(D.CourseOffering).filter_by(id=body.offering_id, tenant_id=TENANT).first()
-    if not offering: raise HTTPException(404, "Course offering not found")
+    offering = s.query(D.CourseOffering).filter_by(id=body.offering_id, tenant_id=TENANT).first() if body.offering_id else None
+    course = s.get(D.Course, body.course_id) if body.course_id else None
+    version = s.get(D.CurriculumVersion, body.curriculum_version_id) if body.curriculum_version_id else None
+    if not offering and (not course or not version or version.status != "effective" or course.id not in {x.get("id") for x in json.loads(version.snapshot_json or "[]")}): raise HTTPException(404, "Offering or effective curriculum course not found")
     now, who = datetime.utcnow(), actor_name(s, ctx)
-    row = D.CurriculumExecutionIssue(id=uid(), tenant_id=TENANT, offering_id=offering.id,
+    row = D.CurriculumExecutionIssue(id=uid(), tenant_id=TENANT, offering_id=offering.id if offering else None, course_id=course.id if course else None, curriculum_version_id=version.id if version else None,
         issue_type=body.issue_type.strip(), description=body.description.strip(), status=body.status,
         responsible_role=body.responsible_role.strip() or "Curriculum Officer", created_by=who, updated_by=who,
         created_at=now, updated_at=now)
     s.add(row); s.commit()
     write_audit(s, ctx["sub"], who, ctx["office_n"], "curriculum_execution.issue", f"issue:{row.id}", "", row.status, row.issue_type)
-    return {"issue": _execution_payload(s, offering)["execution_issues"][0], "decision": dec.as_dict()}
+    if row.status != "Resolved":
+        _notify_timetable_office(s, 10, "Curriculum execution gap requires HOD action", f"Issue {row.id}; offering {offering.id if offering else 'missing'}; curriculum {(offering.curriculum_version_id if offering else version.id)}; {row.issue_type}.")
+    return {"issue": {"id": row.id, "status": row.status, "issue_type": row.issue_type}, "decision": dec.as_dict()}
 
 
 @router.put("/academics/curriculum-execution/issues/{issue_id}")
@@ -3857,6 +4204,11 @@ def update_curriculum_execution_issue(issue_id: str, body: CurriculumExecutionIs
     previous = row.status; row.issue_type, row.description, row.status, row.responsible_role = body.issue_type.strip(), body.description.strip(), body.status, body.responsible_role.strip() or row.responsible_role
     row.updated_by, row.updated_at = actor_name(s, ctx), datetime.utcnow(); s.commit()
     write_audit(s, ctx["sub"], row.updated_by, ctx["office_n"], "curriculum_execution.issue", f"issue:{row.id}", previous, row.status, row.issue_type)
+    offering = s.get(D.CourseOffering, row.offering_id)
+    if ctx["office_n"] == 10 and row.status in {"Under Review", "Resolved"}:
+        _notify_timetable_office(s, 17, "HOD updated curriculum execution gap", f"Issue {row.id}; offering {row.offering_id}; status {row.status}.")
+    if row.status == "Under Review" and row.responsible_role.lower().startswith("dean"):
+        _notify_timetable_office(s, 6, "Curriculum execution gap escalated", f"Issue {row.id}; offering {row.offering_id}; curriculum {offering.curriculum_version_id if offering else ''}.")
     return {"status": row.status, "decision": dec.as_dict()}
 
 
@@ -3892,11 +4244,20 @@ def create_course_offering(body: CourseOfferingIn, ctx=Depends(auth), s=Depends(
     dec, _ = gate(s, ctx, "academics", "create_course")
     require(dec)
     course, program = s.get(D.Course, body.course_id), s.get(D.Program, body.program_id)
+    curriculum = s.get(D.CurriculumVersion, body.curriculum_version_id)
+    if not curriculum or curriculum.tenant_id != ctx["tenant_id"] or curriculum.status != "effective": raise HTTPException(409, "An effective curriculum version is required")
+    if curriculum.effective_term.strip() != body.term.strip(): raise HTTPException(400, "Curriculum version is not effective for the selected term")
+    if curriculum.program_id != program.id: raise HTTPException(400, "Curriculum version does not belong to the selected programme")
+    if course.id not in {item.get("id") for item in json.loads(curriculum.snapshot_json or "[]")}: raise HTTPException(400, "Course is not included in the effective curriculum version")
     if not course or not program or course.program_id not in (None, program.id): raise HTTPException(400, "Choose a valid course and program")
     if course.dept_id and program.dept_id and course.dept_id != program.dept_id:
         raise HTTPException(400, "Choose a course and program from the same department")
     if body.semester != course.semester or body.semester not in range(1, 9): raise HTTPException(400, "Semester must match the catalog course")
-    if not body.academic_year.strip() or not body.term.strip(): raise HTTPException(400, "Academic year and term are required")
+    academic_year = body.academic_year.strip()
+    if not academic_year or not body.term.strip(): raise HTTPException(400, "Academic year and term are required")
+    year_parts = academic_year.split("-")
+    if len(year_parts) != 2 or not all(part.isdigit() for part in year_parts) or len(year_parts[0]) != 4 or len(year_parts[1]) != 2 or int(year_parts[1]) != (int(year_parts[0]) + 1) % 100:
+        raise HTTPException(400, "Academic year must use YYYY-YY consecutive-year format")
     actor_dept = actor_department_id(s, ctx)
     if actor_dept and (program.dept_id or course.dept_id) and (program.dept_id or course.dept_id) != actor_dept:
         raise HTTPException(403, "Course offering is outside your department scope")
@@ -3909,8 +4270,9 @@ def create_course_offering(body: CourseOfferingIn, ctx=Depends(auth), s=Depends(
     if start and expected and expected < start:
         raise HTTPException(400, "Expected completion cannot be before the course start date")
     now, who = datetime.utcnow(), actor_name(s, ctx)
-    row = D.CourseOffering(id=uid(), tenant_id=TENANT, course_id=course.id, program_id=program.id, academic_year=body.academic_year.strip(), term=body.term.strip(), semester=body.semester, course_start_date=start, expected_completion_date=expected, status="Draft", created_by=who, updated_by=who, created_at=now, updated_at=now)
+    row = D.CourseOffering(id=uid(), tenant_id=TENANT, course_id=course.id, program_id=program.id, curriculum_version_id=curriculum.id, academic_year=body.academic_year.strip(), term=body.term.strip(), semester=body.semester, course_start_date=start, expected_completion_date=expected, status="HOD Input Pending", created_by=who, updated_by=who, created_at=now, updated_at=now)
     s.add(row); s.commit(); write_audit(s, ctx["sub"], who, ctx["office_n"], "course_offering.create", f"course_offering:{row.id}", "", row.status, course.code)
+    _notify_timetable_office(s, 10, "Course offering requires HOD input", f"Offering {row.id} ({course.code}) requires department input.")
     return {"offering": _course_offering_payload(s, row), "decision": dec.as_dict()}
 
 
@@ -3924,6 +4286,15 @@ def update_course_offering(offering_id: str, body: CourseOfferingIn, ctx=Depends
     course, program = s.get(D.Course, body.course_id), s.get(D.Program, body.program_id)
     if not course or not program or body.semester != course.semester: raise HTTPException(400, "Choose a valid course, program, and catalog semester")
     previous = row.status
+    if body.curriculum_version_id and body.curriculum_version_id != row.curriculum_version_id:
+        curriculum = s.get(D.CurriculumVersion, body.curriculum_version_id)
+        if not curriculum or curriculum.tenant_id != ctx["tenant_id"] or curriculum.status != "effective":
+            raise HTTPException(409, "An effective curriculum version is required")
+        if curriculum.program_id != program.id or curriculum.effective_term.strip() != body.term.strip():
+            raise HTTPException(400, "Curriculum version is not compatible with this offering")
+        if course.id not in {item.get("id") for item in json.loads(curriculum.snapshot_json or "[]")}:
+            raise HTTPException(400, "Course is not included in the effective curriculum version")
+        row.curriculum_version_id = curriculum.id
     row.course_id, row.program_id, row.academic_year, row.term, row.semester = course.id, program.id, body.academic_year.strip(), body.term.strip(), body.semester
     row.updated_by, row.updated_at = actor_name(s, ctx), datetime.utcnow(); s.commit()
     write_audit(s, ctx["sub"], row.updated_by, ctx["office_n"], "course_offering.update", f"course_offering:{row.id}", previous, row.status, course.code)
@@ -3964,7 +4335,12 @@ def list_sections(ctx=Depends(auth), s=Depends(db)):
     elif ctx["office_n"] == 36:
         student = s.query(D.Student).filter(or_(D.Student.user_id == ctx["sub"], D.Student.id == ctx.get("scope_ref"))).first()
         section_ids = [x.section_id for x in s.query(D.Enrollment).filter_by(student_id=student.id, status="enrolled").all()] if student else []
-        section_query = section_query.filter(D.Section.id.in_(section_ids)) if section_ids else section_query.filter(text("1=0"))
+        # Enrollment is the student's authoritative academic scope. Do not
+        # apply coordinator/HOD department scoping before this relationship.
+        section_query = s.query(D.Section).filter(D.Section.tenant_id == ctx["tenant_id"], D.Section.id.in_(section_ids)) if section_ids else s.query(D.Section).filter(text("1=0"))
+        # The course labels are part of the enrolled-section projection, so
+        # resolve them from those sections instead of the staff-facing scope.
+        course_map = {c.id: (c.code, c.title, c.semester) for c in s.query(D.Course).filter(D.Course.tenant_id == ctx["tenant_id"]).all()}
     rows = section_query.limit(200).all()
     out = []
     for r in rows:
@@ -4029,19 +4405,155 @@ def create_section(body: SectionIn, ctx=Depends(auth), s=Depends(db)):
     return {"id": sid, "decision": dec.as_dict()}
 
 
+@router.get("/student/registration/sections")
+def student_registration_sections(ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] != 36: raise HTTPException(403, "Only students may access self-registration")
+    student = s.query(D.Student).filter(or_(D.Student.user_id == ctx["sub"], D.Student.id == ctx.get("scope_ref"))).first()
+    if not student or str(student.status).lower() != "active": raise HTTPException(403, "Active student profile required")
+    rows = []
+    for section in s.query(D.Section).filter(D.Section.tenant_id == ctx["tenant_id"]).all():
+        offering = s.get(D.CourseOffering, section.offering_id)
+        course = s.get(D.Course, section.course_id)
+        if not offering or not course or offering.status != "Ready" or not section.faculty_person_id or student.program_id != offering.program_id: continue
+        enrolled = s.query(D.Enrollment).filter_by(tenant_id=ctx["tenant_id"], student_id=student.id, section_id=section.id, status="enrolled").first()
+        count = s.query(D.Enrollment).filter_by(tenant_id=ctx["tenant_id"], section_id=section.id, status="enrolled").count()
+        faculty = s.get(D.StaffMember, section.faculty_person_id)
+        rows.append({"id":section.id,"course":course.title,"course_code":course.code,"section":section.section_code,"program":offering.program_id,"term":offering.term,"academic_year":offering.academic_year,"faculty":faculty.name if faculty else "","capacity":section.capacity,"enrolled":count,"status":"Already Enrolled" if enrolled else ("Section Full" if count >= section.capacity else "Available")})
+    return {"sections": rows}
+
+
+@router.post("/student/registration/sections/{section_id}/enroll")
+def student_self_enroll(section_id: str, ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] != 36: raise HTTPException(403, "Only students may self-enroll")
+    student = s.query(D.Student).filter(or_(D.Student.user_id == ctx["sub"], D.Student.id == ctx.get("scope_ref"))).first()
+    section = s.query(D.Section).filter_by(id=section_id, tenant_id=ctx["tenant_id"]).first()
+    if not student or str(student.status).lower() != "active": raise HTTPException(403, "Active student profile required")
+    if not section: raise HTTPException(404, "Section not found")
+    offering = s.get(D.CourseOffering, section.offering_id)
+    if not offering or offering.status != "Ready" or not section.faculty_person_id: raise HTTPException(409, "This section is not available for enrollment")
+    if student.program_id != offering.program_id: raise HTTPException(403, "You are not eligible for this programme section")
+    if student.semester and offering.semester and student.semester != offering.semester:
+        raise HTTPException(403, "You are not eligible for this semester's section")
+    if s.query(D.Enrollment).filter_by(tenant_id=ctx["tenant_id"],student_id=student.id,section_id=section.id).first(): raise HTTPException(409, "Already enrolled in this section")
+    if s.query(D.Enrollment).filter_by(tenant_id=ctx["tenant_id"],section_id=section.id,status="enrolled").count() >= section.capacity: raise HTTPException(409, "This section is full")
+    row=D.Enrollment(id=uid(),tenant_id=ctx["tenant_id"],student_id=student.id,section_id=section.id,status="enrolled",requested_at=datetime.utcnow()); s.add(row); s.commit()
+    write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"enrollment.self_register",f"enrollment:{row.id}","","enrolled",f"section:{section.id}; offering:{offering.id}; term:{offering.term}")
+    return {"enrollment":{"id":row.id,"section_id":section.id,"offering_id":offering.id,"status":row.status}}
+
+class TimetableChangeIn(BaseModel):
+    timetable_entry_id: str
+    class_session_id: str = ""
+    change_type: str
+    reason: str
+    room: str = ""
+    start_time: str = ""
+    end_time: str = ""
+    expected_version: int = Field(ge=1)
+
+@router.get("/academics/timetable-changes")
+def list_timetable_changes(ctx=Depends(auth), s=Depends(db)):
+    require(gate(s,ctx,"academics","view")[0])
+    rows=s.query(D.TimetableException).filter(D.TimetableException.tenant_id==ctx["tenant_id"],D.TimetableException.timetable_entry_id.is_not(None)).order_by(desc(D.TimetableException.detected_at)).all()
+    out=[]
+    for x in rows:
+        entry=s.get(D.TimetableEntry,x.timetable_entry_id); section=s.get(D.Section,x.section_id); offering=s.get(D.CourseOffering,section.offering_id) if section else None; course=s.get(D.Course,offering.course_id) if offering else None; faculty=s.get(D.StaffMember,section.faculty_person_id) if section and section.faculty_person_id else None
+        if offering and not _offering_in_academic_scope(s,offering,ctx): continue
+        out.append({"id":x.id,"entry_id":x.timetable_entry_id,"plan_id":x.timetable_plan_id,"session_id":x.class_session_id,"status":x.status,"type":x.kind,"reason":x.message,"base_version":x.base_version,"workflow_version_no":getattr(x,"workflow_version_no",1),"requested_by":x.requested_by,"payload":json.loads(x.change_payload_json or "{}"),"created_at":x.detected_at.isoformat() if x.detected_at else "","course":course.code if course else "","section":section.section_code if section else "","faculty":faculty.name if faculty else "","enrolled":s.query(D.Enrollment).filter_by(section_id=x.section_id,status="enrolled").count(),"current":{"room":entry.room if entry else "","start_time":entry.start_time if entry else "","end_time":entry.end_time if entry else "","version":entry.version_no if entry else 0}})
+    return {"changes":out}
+
+@router.post("/academics/timetable-changes")
+def create_timetable_change(body: TimetableChangeIn, ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] not in {10,17,43}: raise HTTPException(403,"Only HOD, Academic Coordinator, or Timetable Officer may request a change")
+    entry=s.query(D.TimetableEntry).filter_by(id=body.timetable_entry_id,tenant_id=ctx["tenant_id"]).first(); section=s.get(D.Section,entry.section_id) if entry else None
+    plan=s.query(D.TimetablePlanWorkflow).filter_by(timetable_entry_id=body.timetable_entry_id,status="Published").first()
+    if not entry or not section or not plan: raise HTTPException(409,"A published timetable entry is required")
+    if not _offering_in_academic_scope(s,s.get(D.CourseOffering,section.offering_id),ctx): raise HTTPException(403,"Timetable is outside your academic scope")
+    if entry.version_no != body.expected_version: raise HTTPException(409,"This timetable has changed; reload before requesting a change")
+    kind=body.change_type.lower()
+    if kind not in {"room_change","time_change","cancellation"}: raise HTTPException(422,"Unsupported timetable change type")
+    if not body.reason.strip() or (kind=="room_change" and not body.room.strip()): raise HTTPException(422,"Reason and proposed room are required")
+    if kind=="time_change": _validate_timetable_slot(s,section,type("Slot",(),{"day_of_week":entry.day_of_week,"start_time":body.start_time,"end_time":body.end_time,"room":entry.room})(),entry.id)
+    session=s.get(D.ClassSession,body.class_session_id) if body.class_session_id else s.query(D.ClassSession).filter_by(timetable_entry_id=entry.id).first()
+    row=D.TimetableException(id=uid(),tenant_id=ctx["tenant_id"],section_id=section.id,timetable_entry_id=entry.id,timetable_plan_id=plan.id,class_session_id=session.id if session else None,kind=kind,severity="change",message=body.reason.strip(),status="DRAFT",requested_by=ctx["sub"],change_payload_json=json.dumps({"room":body.room,"start_time":body.start_time,"end_time":body.end_time}),base_version=entry.version_no)
+    s.add(row);s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"timetable_change.create",f"timetable_exception:{row.id}","","DRAFT",row.message);return {"id":row.id,"status":row.status,"base_version":row.base_version,"workflow_version_no":row.workflow_version_no}
+
+@router.post("/academics/timetable-changes/{change_id}/{action}")
+def transition_timetable_change(change_id:str,action:str,body: dict | None = None,ctx=Depends(auth),s=Depends(db)):
+    row=s.query(D.TimetableException).filter_by(id=change_id,tenant_id=ctx["tenant_id"]).first(); entry=s.get(D.TimetableEntry,row.timetable_entry_id) if row else None
+    if not row or not entry: raise HTTPException(404,"Timetable change not found")
+    section=s.get(D.Section,row.section_id)
+    offering=s.get(D.CourseOffering,section.offering_id) if section else None
+    if not _offering_in_academic_scope(s,offering,ctx): raise HTTPException(403,"Timetable change is outside your academic scope")
+    # Publication is Coordinator-owned.  Enforce that boundary before exposing
+    # workflow or timetable-version state to another office.
+    if action=="publish" and ctx["office_n"] != 17:
+        raise HTTPException(403,"Only the Academic Coordinator may publish a timetable change")
+    rules={"submit":({"DRAFT","RETURNED"},"HOD_REVIEW",{10,17,43}),"hod_approve":({"HOD_REVIEW"},"DEAN_REVIEW",{10}),"dean_approve":({"DEAN_REVIEW"},"VP_REVIEW",{6}),"vp_approve":({"VP_REVIEW"},"APPROVED",{5}),"return":({"HOD_REVIEW","DEAN_REVIEW","VP_REVIEW"},"RETURNED",{10,6,5}),"reject":({"HOD_REVIEW","DEAN_REVIEW","VP_REVIEW"},"REJECTED",{10,6,5})}
+    if action != "publish":
+        if action not in rules: raise HTTPException(422,"Unsupported change action")
+        if ctx["office_n"] not in rules[action][2]: raise HTTPException(403,"This office is not authorized for this timetable-change action")
+    expected_version=(body or {}).get("expected_version")
+    if expected_version is not None and int(expected_version) != entry.version_no:
+        raise HTTPException(409,"This timetable has changed; refresh before deciding")
+    expected_workflow_version=(body or {}).get("expected_workflow_version")
+    if expected_workflow_version is not None and int(expected_workflow_version) != getattr(row,"workflow_version_no",1):
+        raise HTTPException(409,"Timetable-change workflow version is stale; refresh before deciding")
+    if action=="publish":
+        if row.status != "APPROVED": raise HTTPException(409,"Only an approved timetable change can be published")
+        if entry.version_no!=row.base_version: raise HTTPException(409,"This timetable has changed since this request was created. Review the latest version before publishing this change.")
+        if expected_version is not None and int(expected_version) != entry.version_no:
+            raise HTTPException(409,"This timetable has changed; refresh before publishing this change")
+        p=json.loads(row.change_payload_json or "{}"); session=s.get(D.ClassSession,row.class_session_id) if row.class_session_id else None
+        if row.kind=="cancellation":
+            entry.status="cancelled"
+            if session: session.status="Cancelled"
+        else:
+            entry.room=p.get("room") or entry.room; entry.start_time=p.get("start_time") or entry.start_time; entry.end_time=p.get("end_time") or entry.end_time
+            if session: session.room=entry.room
+        if session and row.kind == "time_change":
+            session.scheduled_start = datetime.combine(session.session_date, datetime.strptime(entry.start_time, "%H:%M").time())
+            session.scheduled_end = datetime.combine(session.session_date, datetime.strptime(entry.end_time, "%H:%M").time())
+        entry.version_no+=1;row.status="PUBLISHED";row.workflow_version_no=(getattr(row,"workflow_version_no",1) or 1)+1;row.published_at=datetime.utcnow();s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),17,"timetable_change.publish",f"timetable_exception:{row.id}","APPROVED","PUBLISHED",row.message)
+        section=s.get(D.Section,row.section_id); faculty=s.get(D.StaffMember,section.faculty_person_id) if section else None
+        if faculty and faculty.user_id: notify(s,faculty.user_id,"Timetable change published",f"Change {row.id}; entry {entry.id}; session {row.class_session_id or ''}.","info")
+        for enrollment in s.query(D.Enrollment).filter_by(section_id=row.section_id,status="enrolled").all():
+            student=s.get(D.Student,enrollment.student_id)
+            if student and student.user_id: notify(s,student.user_id,"Timetable change published",f"Change {row.id}; entry {entry.id}; session {row.class_session_id or ''}.","info")
+        return {"id":row.id,"status":row.status,"entry_version":entry.version_no,"workflow_version_no":row.workflow_version_no}
+    states,target,roles=rules[action]
+    if row.status not in states: raise HTTPException(409,"Change is not at this workflow stage")
+    reason = str((body or {}).get("reason", "")).strip()
+    if action in {"return", "reject"} and not reason:
+        raise HTTPException(422, "A reason is required when returning or rejecting a timetable change")
+    if action.endswith("approve") and row.requested_by==ctx["sub"]: raise HTTPException(403,"Requester cannot approve their own change")
+    previous = row.status
+    row.status=target; row.workflow_version_no=(getattr(row,"workflow_version_no",1) or 1)+1; s.commit();write_audit(s,ctx["sub"],actor_name(s,ctx),ctx["office_n"],"timetable_change."+action,f"timetable_exception:{row.id}",previous,target,reason or row.message)
+    recipients={"HOD_REVIEW":10,"DEAN_REVIEW":6,"VP_REVIEW":5}.get(target)
+    body_msg=f"Change {row.id}; entry {row.timetable_entry_id}; plan {row.timetable_plan_id}; session {row.class_session_id or ''}."
+    if recipients:
+        _notify_timetable_office(s,recipients,"Timetable change requires review",body_msg)
+    elif target=="APPROVED": notify(s,row.requested_by,"Timetable change ready to publish",body_msg,"action")
+    elif target in {"RETURNED","REJECTED"}: notify(s,row.requested_by,f"Timetable change {target.lower()}",body_msg,"action")
+    return {"id":row.id,"status":row.status,"workflow_version_no":row.workflow_version_no}
+
+
 @router.get("/academics/section/{section_id}/timetable")
 def section_timetable(section_id: str, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view")[0])
-    section = require_academic_object(s, ctx, _section_or_404(s, section_id), "read", "Section")
-    if ctx["office_n"] in {11, 12, 13, 14}:
-        staff = s.query(D.StaffMember).filter_by(user_id=ctx["sub"], tenant_id=TENANT).first()
-        if not staff or not any(row.section_id == section.id for row in active_allocations_for_faculty(s, staff.id)):
-            raise HTTPException(403, "Not your section")
-    elif ctx["office_n"] == 36:
+    section = _section_or_404(s, section_id)
+    # Students may read only their own enrolled sections.  Check that explicit
+    # relationship before applying staff/office scope rules.
+    if ctx["office_n"] == 36:
         student = s.query(D.Student).filter(or_(D.Student.user_id == ctx["sub"], D.Student.id == ctx.get("scope_ref"))).first()
         enrolled = s.query(D.Enrollment).filter_by(student_id=student.id, section_id=section.id, status="enrolled").first() if student else None
         if not enrolled:
             raise HTTPException(403, "Section is not assigned to this student")
+    else:
+        section = require_academic_object(s, ctx, section, "read", "Section")
+    if ctx["office_n"] in {11, 12, 13, 14}:
+        staff = s.query(D.StaffMember).filter_by(user_id=ctx["sub"], tenant_id=TENANT).first()
+        if not staff or not any(row.section_id == section.id for row in active_allocations_for_faculty(s, staff.id)):
+            raise HTTPException(403, "Not your section")
     rows = (s.query(D.TimetableEntry)
             .filter(D.TimetableEntry.section_id == section.id)
             .order_by(D.TimetableEntry.day_of_week, D.TimetableEntry.start_time).all())
@@ -4180,6 +4692,8 @@ class TimetableEntryIn(BaseModel):
 def _validate_timetable_slot(s, section, body, exclude_id=""):
     """Validate time ranges and prevent section, room, or faculty clashes."""
     from datetime import datetime as _dt
+    if int(body.day_of_week) not in range(7):
+        raise HTTPException(422, "Teaching day must be between Monday (0) and Sunday (6)")
     try:
         start = _dt.strptime(body.start_time, "%H:%M").time()
         end = _dt.strptime(body.end_time, "%H:%M").time()
@@ -4187,12 +4701,22 @@ def _validate_timetable_slot(s, section, body, exclude_id=""):
         raise HTTPException(422, "Start and end time must use HH:MM format")
     if end <= start:
         raise HTTPException(422, "End time must be later than start time")
+    room_value = (body.room or section.room or "").strip()
+    if not room_value:
+        raise HTTPException(422, "A teaching room is required")
+    try:
+        effective_from = date.fromisoformat(body.effective_from) if body.effective_from else None
+        effective_to = date.fromisoformat(body.effective_to) if body.effective_to else None
+    except ValueError:
+        raise HTTPException(422, "Effective dates must use YYYY-MM-DD format")
+    if effective_from and effective_to and effective_to < effective_from:
+        raise HTTPException(422, "Effective end date cannot be earlier than the start date")
     rows = s.query(D.TimetableEntry, D.Section).join(D.Section, D.Section.id == D.TimetableEntry.section_id).filter(
         D.TimetableEntry.tenant_id == section.tenant_id,
         D.TimetableEntry.status == "active",
         D.TimetableEntry.day_of_week == int(body.day_of_week),
     ).all()
-    room = (body.room or section.room or "").strip().lower()
+    room = room_value.lower()
     for row, other in rows:
         if row.id == exclude_id or row.start_time >= body.end_time or row.end_time <= body.start_time:
             continue
@@ -4241,6 +4765,15 @@ def update_timetable_entry(entry_id: str, body: TimetableEntryIn, ctx=Depends(au
     if not _can_manage_section_for_timetable(s, ctx, section):
         raise HTTPException(403, "You are not authorized to manage the timetable for this section")
     _validate_timetable_slot(s, section, body, row.id)
+    changed = any((
+        row.day_of_week != max(0, min(6, int(body.day_of_week))), row.start_time != body.start_time,
+        row.end_time != body.end_time, row.room != (body.room or section.room), row.building != body.building,
+        (row.effective_from.isoformat() if row.effective_from else "") != (body.effective_from or ""),
+        (row.effective_to.isoformat() if row.effective_to else "") != (body.effective_to or ""),
+    ))
+    plan = s.query(D.TimetablePlanWorkflow).filter_by(timetable_entry_id=row.id).first()
+    if changed and plan and plan.status in {"Published", "Closed"}:
+        raise HTTPException(409, "A published timetable cannot be changed. Use the timetable exception workflow.")
     prev_state = row.status
     row.day_of_week = max(0, min(6, int(body.day_of_week)))
     row.start_time = body.start_time
@@ -4255,6 +4788,15 @@ def update_timetable_entry(entry_id: str, body: TimetableEntryIn, ctx=Depends(au
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "timetable.update",
                 f"timetable:{row.id}", prev_state, row.status,
                 f"Updated timetable entry for section {section.section_code}")
+    # A changed draft must travel through every governance stage again.  Keep the
+    # same plan identity so reviewers and the audit history retain the version lineage.
+    if changed and plan and plan.status in {"HOD Review", "Dean Review", "VP Review", "Approved"}:
+        before = plan.status
+        plan.status, plan.last_action, plan.reason = "HOD Returned", "Timetable changed; re-submission required", "Timetable changed after submission; HOD, Dean, and VP review are required again."
+        plan.updated_by, plan.updated_at = ctx["sub"], datetime.utcnow()
+        s.commit()
+        write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "timetable_plan.invalidate", f"timetable_plan:{plan.id}", before, plan.status, plan.reason)
+        notify(s, plan.submitted_by, "Timetable re-review required", f"A timetable you submitted was changed and must be re-submitted for HOD, Dean, and VP review.", "action")
     return {"id": row.id, "decision": dec.as_dict()}
 
 
@@ -4280,7 +4822,7 @@ def deactivate_timetable_entry(entry_id: str, ctx=Depends(auth), s=Depends(db)):
 
 
 def _timetable_plan_payload(row, s=None):
-    payload = {"id": row.id, "offering_id": row.offering_id, "section_id": row.section_id, "timetable_entry_id": row.timetable_entry_id, "status": row.status, "last_action": row.last_action, "reason": row.reason, "submitted_by": row.submitted_by, "updated_by": row.updated_by, "updated_at": row.updated_at.isoformat() if row.updated_at else ""}
+    payload = {"id": row.id, "offering_id": row.offering_id, "section_id": row.section_id, "timetable_entry_id": row.timetable_entry_id, "status": row.status, "last_action": row.last_action, "reason": row.reason, "submitted_by": row.submitted_by, "updated_by": row.updated_by, "updated_at": row.updated_at.isoformat() if row.updated_at else "", "version_no": getattr(row, "version_no", 1)}
     if not s:
         return payload
     offering, section, entry = s.get(D.CourseOffering, row.offering_id), s.get(D.Section, row.section_id), s.get(D.TimetableEntry, row.timetable_entry_id)
@@ -4294,6 +4836,55 @@ def _timetable_plan_payload(row, s=None):
             "submitted_actor": (getattr(submitted, "name", "") or getattr(submitted, "username", "") or row.submitted_by)}
 
 
+def _notify_timetable_office(s, office_n, title, body):
+    for user in s.query(User).filter(User.office_n == office_n, User.status == "active").all():
+        notify(s, user.id, title, body, "action")
+
+
+def _notify_timetable_recipients(s, plan):
+    section = s.get(D.Section, plan.section_id)
+    if not section:
+        return
+    faculty = s.get(D.StaffMember, section.faculty_person_id) if section.faculty_person_id else None
+    if faculty and faculty.user_id:
+        notify(s, faculty.user_id, "Timetable published", f"Timetable plan {plan.id}; entry {plan.timetable_entry_id}; section {section.section_code} is published.", "info")
+    for enrollment in s.query(D.Enrollment).filter_by(section_id=section.id, status="enrolled").all():
+        student = s.get(D.Student, enrollment.student_id)
+        if student and student.user_id:
+            notify(s, student.user_id, "Timetable published", f"Timetable plan {plan.id}; entry {plan.timetable_entry_id}; section {section.section_code} is published.", "info")
+
+
+def _materialize_published_timetable_sessions(s, plan):
+    """Create the bounded, recurring session register for a published slot.
+
+    A timetable is operational only when professors can see concrete class
+    sessions.  The materialization is idempotent and bounded by the configured
+    effective range (or a 16-week planning horizon when no end date is given).
+    """
+    entry = s.get(D.TimetableEntry, plan.timetable_entry_id)
+    if not entry or entry.status != "active":
+        return 0
+    allocation = active_allocation_for_section(s, entry.section_id, entry.effective_from or date.today())
+    if not allocation:
+        return 0
+    start = entry.effective_from or date.today()
+    end = entry.effective_to or (start + timedelta(days=111))
+    if end < start:
+        return 0
+    first = start + timedelta(days=(entry.day_of_week - start.weekday()) % 7)
+    created = 0
+    current = first
+    while current <= end:
+        exists = s.query(D.ClassSession).filter(
+            D.ClassSession.timetable_entry_id == entry.id,
+            D.ClassSession.session_date == current,
+        ).first()
+        if not exists and class_session_for_timetable(s, entry, current, allocation):
+            created += 1
+        current += timedelta(days=7)
+    return created
+
+
 @router.get("/academics/timetable-plans")
 def list_timetable_plans(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view")[0])
@@ -4305,8 +4896,24 @@ def list_timetable_plans(ctx=Depends(auth), s=Depends(db)):
 @router.post("/academics/timetable-plans/submit")
 def submit_timetable_plan(body: dict, ctx=Depends(auth), s=Depends(db)):
     dec, _ = gate(s, ctx, "academics", "manage_timetable"); require(dec)
+    if ctx["office_n"] not in {17, 43}: raise HTTPException(403, "Only the Academic Coordinator or Timetable Officer may submit a timetable for review")
     entry = s.get(D.TimetableEntry, body.get("timetable_entry_id")); section = s.get(D.Section, body.get("section_id"))
-    if not entry or not section or entry.section_id != section.id or not section.faculty_person_id or not entry.room or not entry.day_of_week >= 0 or not entry.start_time or not entry.end_time: raise HTTPException(400, "A complete section timetable with assigned faculty is required")
+    if not entry or not section or entry.section_id != section.id:
+        raise HTTPException(404, "The timetable entry does not belong to the selected section. Refresh the workspace and try again.")
+    if entry.status != "active":
+        raise HTTPException(409, "Only an active timetable entry can be submitted for review.")
+    if not section.faculty_person_id:
+        raise HTTPException(409, "Faculty allocation must be approved by Dean Academics before HOD timetable review can begin.")
+    missing = [
+        label for label, value in (
+            ("room", entry.room),
+            ("teaching day", entry.day_of_week is not None and entry.day_of_week >= 0),
+            ("start time", entry.start_time),
+            ("end time", entry.end_time),
+        ) if not value
+    ]
+    if missing:
+        raise HTTPException(422, f"Complete the timetable entry before review: {', '.join(missing)}.")
     offering_id = body.get("offering_id") or section.offering_id
     if not offering_id: raise HTTPException(400, "Timetable plan must belong to a course offering")
     # Existing conflict engine is authoritative; reject any active overlap involving this entry.
@@ -4314,10 +4921,26 @@ def submit_timetable_plan(body: dict, ctx=Depends(auth), s=Depends(db)):
     for other in others:
         if other.day_of_week == entry.day_of_week and _clock_minutes(entry.start_time) < _clock_minutes(other.end_time) and _clock_minutes(other.start_time) < _clock_minutes(entry.end_time):
             other_section = s.get(D.Section, other.section_id)
-            if (entry.room and entry.room == other.room) or (section.faculty_person_id and other_section and section.faculty_person_id == other_section.faculty_person_id): raise HTTPException(409, "Unresolved timetable conflict exists")
+            if entry.room and entry.room == other.room:
+                raise HTTPException(
+                    409,
+                    f"Room conflict: {entry.room} is already booked on this day from {other.start_time} to {other.end_time}. Choose another room or time.",
+                )
+            if section.faculty_person_id and other_section and section.faculty_person_id == other_section.faculty_person_id:
+                faculty = s.get(D.StaffMember, section.faculty_person_id)
+                course = s.get(D.Course, other_section.course_id)
+                assignment = f"{course.code} · Section {other_section.section_code}" if course else f"Section {other_section.section_code}"
+                raise HTTPException(
+                    409,
+                    f"Faculty conflict: {(faculty.name if faculty else 'The assigned faculty member')} is already scheduled for {assignment} from {other.start_time} to {other.end_time} on this day. Choose another time or submit a revised allocation.",
+                )
     row = s.query(D.TimetablePlanWorkflow).filter_by(timetable_entry_id=entry.id).first() or D.TimetablePlanWorkflow(id=uid(), tenant_id=TENANT, offering_id=offering_id, section_id=section.id, timetable_entry_id=entry.id, created_at=datetime.utcnow())
+    if row.status in {"Published", "Closed"}:
+        raise HTTPException(409, "A published timetable cannot be re-submitted")
+    before = row.status or "Draft"
     row.status, row.last_action, row.reason, row.submitted_by, row.updated_by, row.updated_at = "HOD Review", "Submitted for HOD review", "", ctx["sub"], ctx["sub"], datetime.utcnow(); s.add(row); s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "timetable_plan.submit", f"timetable_plan:{row.id}", "Draft", row.status, "Submitted for HOD review")
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "timetable_plan.submit", f"timetable_plan:{row.id}", before, row.status, "Submitted for HOD review")
+    _notify_timetable_office(s, 10, "Timetable awaiting HOD review", f"Timetable plan {row.id} is ready for HOD review.")
     return {"plan": _timetable_plan_payload(row), "decision": dec.as_dict()}
 
 
@@ -4331,8 +4954,15 @@ def timetable_hod_decision(plan_id: str, body: dict, ctx=Depends(auth), s=Depend
     action = body.get("action")
     if action not in {"approve", "return"}: raise HTTPException(422, "Action must be approve or return")
     if action == "return" and not body.get("reason", "").strip(): raise HTTPException(422, "A return reason is required")
+    if body.get("expected_version") is not None and int(body.get("expected_version")) != row.version_no:
+        raise HTTPException(409, "Timetable plan version is stale; refresh before deciding")
     row.status = "Dean Review" if action == "approve" else "HOD Returned"
-    row.last_action, row.reason, row.updated_by, row.updated_at = f"HOD {action}", body.get("reason", "").strip(), ctx["sub"], datetime.utcnow(); s.commit(); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "timetable_plan.hod_decision", f"timetable_plan:{row.id}", "HOD Review", row.status, row.reason)
+    row.last_action, row.reason, row.updated_by, row.updated_at = f"HOD {action}", body.get("reason", "").strip(), ctx["sub"], datetime.utcnow()
+    row.version_no = (row.version_no or 1) + 1
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "timetable_plan.hod_decision", f"timetable_plan:{row.id}", "HOD Review", row.status, row.reason)
+    if action == "approve": _notify_timetable_office(s, 6, "Timetable awaiting Dean review", f"Timetable plan {row.id} passed HOD review and awaits academic-governance review.")
+    else: notify(s, row.submitted_by, "Timetable returned by HOD", row.reason, "action")
     return {"plan": _timetable_plan_payload(row), "decision": dec.as_dict()}
 
 
@@ -4342,11 +4972,19 @@ def timetable_dean_decision(plan_id: str, body: dict, ctx=Depends(auth), s=Depen
     dec, _ = gate(s, ctx, "approvals", "approve" if body.get("action") == "approve" else "reject"); require(dec)
     row = s.get(D.TimetablePlanWorkflow, plan_id)
     if not row or row.status != "Dean Review": raise HTTPException(409, "Plan is not awaiting Dean review")
+    if not _offering_in_academic_scope(s, s.get(D.CourseOffering, row.offering_id), ctx): raise HTTPException(404, "Timetable plan not found")
     action = body.get("action")
     if action not in {"approve", "return"}: raise HTTPException(422, "Action must be approve or return")
     if action == "return" and not body.get("reason", "").strip(): raise HTTPException(422, "A return reason is required")
+    if body.get("expected_version") is not None and int(body.get("expected_version")) != row.version_no:
+        raise HTTPException(409, "Timetable plan version is stale; refresh before deciding")
     row.status = "VP Review" if action == "approve" else "Dean Returned"
-    row.last_action, row.reason, row.updated_by, row.updated_at = f"Dean {action}", body.get("reason", "").strip(), ctx["sub"], datetime.utcnow(); s.commit(); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "timetable_plan.dean_decision", f"timetable_plan:{row.id}", "Dean Review", row.status, row.reason)
+    row.last_action, row.reason, row.updated_by, row.updated_at = f"Dean {action}", body.get("reason", "").strip(), ctx["sub"], datetime.utcnow()
+    row.version_no = (row.version_no or 1) + 1
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "timetable_plan.dean_decision", f"timetable_plan:{row.id}", "Dean Review", row.status, row.reason)
+    if action == "approve": _notify_timetable_office(s, 5, "Timetable awaiting VP approval", f"Timetable plan {row.id} passed HOD and Dean review and awaits operational approval.")
+    else: notify(s, row.submitted_by, "Timetable returned by Dean", row.reason, "action")
     return {"plan": _timetable_plan_payload(row), "decision": dec.as_dict()}
 
 
@@ -4354,27 +4992,38 @@ def timetable_dean_decision(plan_id: str, body: dict, ctx=Depends(auth), s=Depen
 def timetable_vp_decision(plan_id: str, body: dict, ctx=Depends(auth), s=Depends(db)):
     if ctx["office_n"] != 5: raise HTTPException(403, "Only the Vice Principal office may review this stage")
     dec, _ = gate(s, ctx, "approvals", "approve" if body.get("action") == "approve" else "reject"); require(dec)
-    delegation = active_delegation_for(s, ctx["sub"])
-    if not delegation or delegation.get("authority") != "approve:academic":
-        raise HTTPException(403, "An active approve:academic delegation is required for VP timetable approval")
     row = s.get(D.TimetablePlanWorkflow, plan_id)
     if not row or row.status != "VP Review": raise HTTPException(409, "Plan is not awaiting VP review")
+    if not _offering_in_academic_scope(s, s.get(D.CourseOffering, row.offering_id), ctx): raise HTTPException(404, "Timetable plan not found")
     action = body.get("action")
     if action not in {"approve", "return"}: raise HTTPException(422, "Action must be approve or return")
     if action == "return" and not body.get("reason", "").strip(): raise HTTPException(422, "A return reason is required")
-    row.status = "Approved" if action == "approve" else "VP Returned"; row.last_action, row.reason, row.updated_by, row.updated_at = f"VP {action}", body.get("reason", "").strip(), ctx["sub"], datetime.utcnow(); s.commit(); write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "timetable_plan.vp_decision", f"timetable_plan:{row.id}", "VP Review", row.status, row.reason)
+    expected_version = body.get("expected_version")
+    if expected_version is not None and int(expected_version) != row.version_no:
+        raise HTTPException(409, "Timetable plan version is stale; refresh before deciding")
+    row.status = "Approved" if action == "approve" else "VP Returned"
+    row.last_action, row.reason, row.updated_by, row.updated_at = f"VP {action}", body.get("reason", "").strip(), ctx["sub"], datetime.utcnow()
+    row.version_no = (row.version_no or 1) + 1
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "timetable_plan.vp_decision", f"timetable_plan:{row.id}", "VP Review", row.status, row.reason)
+    if action == "approve": notify(s, row.submitted_by, "Timetable ready to publish", f"Timetable plan {row.id} has HOD, Dean, and VP approval. Publish it when ready.", "action")
+    else: notify(s, row.submitted_by, "Timetable returned by VP", row.reason, "action")
     return {"plan": _timetable_plan_payload(row), "decision": dec.as_dict()}
 
 
 @router.post("/academics/timetable-plans/{plan_id}/publish")
 def publish_timetable_plan(plan_id: str, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] != 5: raise HTTPException(403, "Only the Vice Principal office may publish a timetable")
-    dec, _ = gate(s, ctx, "approvals", "approve"); require(dec)
+    if ctx["office_n"] != 17: raise HTTPException(403, "Only the Academic Coordinator may publish an approved timetable")
+    dec, _ = gate(s, ctx, "academics", "manage_timetable"); require(dec)
     row = s.get(D.TimetablePlanWorkflow, plan_id)
     if not row or row.status != "Approved": raise HTTPException(409, "Only approved plans can be published")
-    row.status, row.last_action, row.updated_by, row.updated_at = "Published", "Timetable published", ctx["sub"], datetime.utcnow(); s.commit()
+    if not _offering_in_academic_scope(s, s.get(D.CourseOffering, row.offering_id), ctx): raise HTTPException(404, "Timetable plan not found")
+    row.status, row.last_action, row.updated_by, row.updated_at = "Published", "Timetable published", ctx["sub"], datetime.utcnow()
+    sessions_generated = _materialize_published_timetable_sessions(s, row)
+    s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "timetable_plan.publish", f"timetable_plan:{row.id}", "Approved", "Published", "Timetable published")
-    return {"plan": _timetable_plan_payload(row), "decision": dec.as_dict()}
+    _notify_timetable_recipients(s, row)
+    return {"plan": _timetable_plan_payload(row), "sessions_generated": sessions_generated, "decision": dec.as_dict()}
 
 
 @router.post("/academics/timetable-plans/{plan_id}/close")
@@ -5332,7 +5981,11 @@ def publish_result(body: PublishResultIn, ctx=Depends(auth), s=Depends(db)):
                 mark.published_by = who
                 mark.updated_at = rs.published_at
     published_rows = _publish_section_subject_results(s, section, rs, who)
-    auto_progressed = _auto_rollover_after_results(s, rs.academic_year, rs.semester, ctx["sub"], who)
+    # Result publication is evidence for progression, not progression itself.
+    # F046 reserves confirmation to the Academic Coordinator and review of
+    # exceptions to the academic workflow; publishing one section must never
+    # silently mutate a student's semester.
+    auto_progressed = 0
     s.commit()
     write_audit(s, ctx["sub"], who, ctx["office_n"], "result.publish",
                 f"section:{body.section_id}", "moderated", "published",
@@ -5504,6 +6157,11 @@ class RolloverDecisionIn(BaseModel):
     note: str = ""
 
 
+class RolloverActionIn(BaseModel):
+    version_no: int = Field(..., ge=1)
+    reason: str = Field("", max_length=2000)
+
+
 def _rollover_payload(s, row):
     students = {student.id: student for student in s.query(D.Student).all()}
     decisions = s.query(D.AcademicRolloverDecision).filter(D.AcademicRolloverDecision.rollover_id == row.id).all()
@@ -5522,31 +6180,79 @@ def _rollover_payload(s, row):
             "outstanding_amount": item.outstanding_amount, "carry_forward_amount": item.carry_forward_amount})
     return {"id": row.id, "source_academic_year": row.source_academic_year, "source_semester": row.source_semester,
             "target_academic_year": row.target_academic_year, "target_semester": row.target_semester,
-            "status": row.status, "created_at": row.created_at.isoformat() if row.created_at else "",
-            "executed_at": row.executed_at.isoformat() if row.executed_at else "", "summary": summary, "decisions": items}
+            "dept_id": row.dept_id or "", "version_no": row.version_no or 1, "status": row.status,
+            "workflow_reason": row.workflow_reason or "", "created_at": row.created_at.isoformat() if row.created_at else "",
+            "executed_at": row.executed_at.isoformat() if row.executed_at else "", "summary": summary,
+            "has_exceptions": any(item.decision == "exception" for item in decisions), "decisions": items}
+
+
+ROLLOVER_COORDINATOR = 17
+ROLLOVER_HOD = 10
+ROLLOVER_DEAN = 6
+ROLLOVER_PRINCIPAL = 4
+ROLLOVER_FINANCE = 22
+
+
+def _rollover_scope(row, ctx, s):
+    """Keep a departmental rollover inside the Coordinator/HOD's academic scope."""
+    if ctx["office_n"] not in {ROLLOVER_COORDINATOR, ROLLOVER_HOD}:
+        return
+    department_id = actor_department_id(s, ctx)
+    if not department_id or row.dept_id != department_id:
+        raise HTTPException(403, "This rollover is outside your academic scope")
+
+
+def _rollover_notice(s, office_n, title, body, severity="action"):
+    for user in s.query(User).filter(User.office_n == office_n, User.status == "active").all():
+        notify(s, user.id, title, body, severity)
+
+
+def _rollover_transition(s, ctx, row, target, action, reason=""):
+    previous = row.status
+    row.status, row.workflow_reason = target, reason.strip()
+    s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], action,
+                f"academic_rollover:{row.id}:v{row.version_no}", previous, target, row.workflow_reason)
 
 
 @router.get("/academic-rollover")
 def academic_rollovers(ctx=Depends(auth), s=Depends(db)):
     if ctx["office_n"] not in {4, 6, 10, 17, 22}:
         raise HTTPException(403, "Academic rollover is restricted to academic leadership and Finance")
-    rows = s.query(D.AcademicRollover).order_by(desc(D.AcademicRollover.created_at)).all()
+    rows = s.query(D.AcademicRollover).filter(D.AcademicRollover.tenant_id == ctx["tenant_id"])
+    if ctx["office_n"] in {ROLLOVER_COORDINATOR, ROLLOVER_HOD}:
+        department_id = actor_department_id(s, ctx)
+        rows = rows.filter(D.AcademicRollover.dept_id == department_id) if department_id else rows.filter(false())
+    rows = rows.order_by(desc(D.AcademicRollover.created_at)).all()
     years = [row.name for row in s.query(D.AcademicYear).filter(D.AcademicYear.is_active == True).order_by(D.AcademicYear.name).all()]
     return {"rollovers": [_rollover_payload(s, row) for row in rows], "academic_years": years,
-            "can_review": ctx["office_n"] in {6, 10, 17}, "can_approve": ctx["office_n"] == 4,
-            "finance_ready": [row.id for row in rows if row.status == "approved"]}
+            "can_create": ctx["office_n"] == ROLLOVER_COORDINATOR,
+            "role": {ROLLOVER_COORDINATOR: "Coordinator", ROLLOVER_HOD: "HOD", ROLLOVER_DEAN: "Dean Academics", ROLLOVER_PRINCIPAL: "Principal", ROLLOVER_FINANCE: "Finance Manager"}.get(ctx["office_n"], ""),
+            "finance_ready": [row.id for row in rows if row.status == "Finance Review"]}
 
 
 @router.post("/academic-rollover")
 def start_academic_rollover(body: RolloverStartIn, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] not in {6, 10, 17}: raise HTTPException(403, "Only the Academic Coordinator or academic leadership may start rollover")
-    students = s.query(D.Student).filter(D.Student.status == "active", D.Student.semester == body.source_semester).all()
+    if ctx["office_n"] != ROLLOVER_COORDINATOR: raise HTTPException(403, "Only the Academic Coordinator may start a rollover")
+    department_id = actor_department_id(s, ctx)
+    if not department_id: raise HTTPException(403, "An Academic Coordinator department scope is required")
+    if body.target_semester < 1 or body.source_semester < 1 or not body.source_academic_year.strip() or not body.target_academic_year.strip():
+        raise HTTPException(422, "A valid source and target academic term is required")
+    duplicate = s.query(D.AcademicRollover).filter_by(tenant_id=ctx["tenant_id"], dept_id=department_id,
+        source_academic_year=body.source_academic_year.strip(), source_semester=body.source_semester,
+        target_academic_year=body.target_academic_year.strip(), target_semester=body.target_semester).first()
+    if duplicate: raise HTTPException(409, "A rollover already exists for this department and academic transition")
+    students = s.query(D.Student).filter(D.Student.tenant_id == ctx["tenant_id"], D.Student.dept_id == department_id,
+        D.Student.status == "active", D.Student.semester == body.source_semester).all()
     if not students: raise HTTPException(409, "No active students found in the selected source semester")
-    row = D.AcademicRollover(id=uid(), tenant_id=TENANT, **body.model_dump(), created_by=ctx["sub"])
+    row = D.AcademicRollover(id=uid(), tenant_id=TENANT, source_academic_year=body.source_academic_year.strip(),
+        source_semester=body.source_semester, target_academic_year=body.target_academic_year.strip(),
+        target_semester=body.target_semester, dept_id=department_id, created_by=ctx["sub"])
     s.add(row); s.flush()
     for student in students:
         outstanding = float(s.query(func.coalesce(func.sum(D.FeeInvoice.amount - D.FeeInvoice.paid), 0)).filter(D.FeeInvoice.student_id == student.id).scalar() or 0)
-        result = s.query(D.StudentSubjectResult).filter(D.StudentSubjectResult.student_id == student.id, D.StudentSubjectResult.status == "published").first()
+        result = s.query(D.StudentSubjectResult).filter(D.StudentSubjectResult.student_id == student.id,
+            D.StudentSubjectResult.published_at.isnot(None)).first()
         academic_status = "ELIGIBLE" if result else "RESULT_PENDING"
         finance_status = "DUE_EXISTS" if outstanding > 0 else "CLEAR"
         s.add(D.AcademicRolloverDecision(id=uid(), rollover_id=row.id, student_id=student.id,
@@ -5558,42 +6264,75 @@ def start_academic_rollover(body: RolloverStartIn, ctx=Depends(auth), s=Depends(
 
 @router.post("/academic-rollover/{rollover_id}/decision")
 def decide_academic_rollover(rollover_id: str, body: RolloverDecisionIn, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] not in {6, 10, 17}: raise HTTPException(403, "Only academic leadership may review progression")
+    if ctx["office_n"] != ROLLOVER_COORDINATOR: raise HTTPException(403, "Only the Academic Coordinator may prepare progression decisions")
     row = s.get(D.AcademicRollover, rollover_id); item = s.query(D.AcademicRolloverDecision).filter_by(rollover_id=rollover_id, student_id=body.student_id).first()
     if not row or not item or row.status != "draft": raise HTTPException(409, "This rollover is not open for review")
+    _rollover_scope(row, ctx, s)
     if body.decision not in {"promoted", "detained", "repeating", "hold", "exception"}: raise HTTPException(422, "Choose a valid progression decision")
+    if body.decision == "exception" and not body.note.strip(): raise HTTPException(422, "An exception requires a documented reason")
     item.decision, item.note = body.decision, body.note.strip(); s.commit()
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.rollover.decision",
+                f"academic_rollover:{row.id}:v{row.version_no}:student:{item.student_id}", "", body.decision, item.note)
     return _rollover_payload(s, row)
 
 
 @router.post("/academic-rollover/{rollover_id}/submit")
-def submit_academic_rollover(rollover_id: str, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] not in {6, 10, 17}: raise HTTPException(403, "Only academic leadership may submit rollover")
+def submit_academic_rollover(rollover_id: str, body: RolloverActionIn, ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] != ROLLOVER_COORDINATOR: raise HTTPException(403, "Only the Academic Coordinator may submit rollover")
     row = s.get(D.AcademicRollover, rollover_id)
     if not row or row.status != "draft": raise HTTPException(409, "Rollover is not in draft")
+    _rollover_scope(row, ctx, s)
+    if body.version_no != row.version_no: raise HTTPException(409, "STALE_ROLLOVER_VERSION")
     pending = s.query(D.AcademicRolloverDecision).filter_by(rollover_id=row.id, decision="pending").count()
     if pending: raise HTTPException(409, f"Review all students before submission ({pending} pending)")
-    row.status = "awaiting_principal"; s.commit()
-    for user in s.query(User).filter(User.office_n == 4, User.active == True).all(): notify(s, user.id, "Academic rollover approval", f"Review progression for Semester {row.source_semester} before Finance is notified.", "warning")
+    if row.workflow_reason.startswith("Returned"):
+        row.version_no += 1
+    _rollover_transition(s, ctx, row, "HOD Review", "academic.rollover.submit", body.reason)
+    _rollover_notice(s, ROLLOVER_HOD, "Academic rollover awaiting HOD review", f"Rollover {row.id}, version {row.version_no}, requires department review.")
     return _rollover_payload(s, row)
 
 
-@router.post("/academic-rollover/{rollover_id}/approve")
-def approve_academic_rollover(rollover_id: str, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] != 4: raise HTTPException(403, "Principal approval is required")
+@router.post("/academic-rollover/{rollover_id}/action")
+def action_academic_rollover(rollover_id: str, body: RolloverActionIn, action: str = Query(...), ctx=Depends(auth), s=Depends(db)):
     row = s.get(D.AcademicRollover, rollover_id)
-    if not row or row.status != "awaiting_principal": raise HTTPException(409, "Rollover is not awaiting Principal approval")
-    row.status, row.approved_by, row.approved_at = "approved", ctx["sub"], datetime.utcnow(); s.commit()
-    for user in s.query(User).filter(User.office_n == 22, User.active == True).all(): notify(s, user.id, "Next-semester fee setup ready", f"Rollover approved: publish fee structure for {row.target_academic_year}, Semester {row.target_semester}.", "warning")
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.rollover.approve", f"rollover:{row.id}", "awaiting_principal", "approved", "Finance notified")
+    if not row: raise HTTPException(404, "Academic rollover not found")
+    if body.version_no != row.version_no: raise HTTPException(409, "STALE_ROLLOVER_VERSION")
+    _rollover_scope(row, ctx, s)
+    action = action.strip().lower()
+    if action == "hod_approve" and ctx["office_n"] == ROLLOVER_HOD and row.status == "HOD Review":
+        row.hod_reviewed_by = ctx["sub"]
+        _rollover_transition(s, ctx, row, "Dean Review", "academic.rollover.hod_approve", body.reason)
+        _rollover_notice(s, ROLLOVER_DEAN, "Academic rollover awaiting Dean review", f"Rollover {row.id}, version {row.version_no}, passed HOD review.")
+    elif action == "dean_approve" and ctx["office_n"] == ROLLOVER_DEAN and row.status == "Dean Review":
+        row.dean_reviewed_by = ctx["sub"]
+        target = "Principal Review" if s.query(D.AcademicRolloverDecision).filter_by(rollover_id=row.id, decision="exception").count() else "Finance Review"
+        _rollover_transition(s, ctx, row, target, "academic.rollover.dean_approve", body.reason)
+        _rollover_notice(s, ROLLOVER_PRINCIPAL if target == "Principal Review" else ROLLOVER_FINANCE,
+                         "Academic rollover exception requires Principal review" if target == "Principal Review" else "Academic rollover awaiting Finance check",
+                         f"Rollover {row.id}, version {row.version_no}, requires your review.")
+    elif action == "principal_approve" and ctx["office_n"] == ROLLOVER_PRINCIPAL and row.status == "Principal Review":
+        _rollover_transition(s, ctx, row, "Finance Review", "academic.rollover.principal_approve", body.reason)
+        _rollover_notice(s, ROLLOVER_FINANCE, "Academic rollover awaiting Finance check", f"Rollover {row.id}, version {row.version_no}, includes approved exception(s).")
+    elif action == "finance_confirm" and ctx["office_n"] == ROLLOVER_FINANCE and row.status == "Finance Review":
+        row.finance_reviewed_by = ctx["sub"]
+        _rollover_transition(s, ctx, row, "Ready to Execute", "academic.rollover.finance_confirm", body.reason)
+        _rollover_notice(s, ROLLOVER_COORDINATOR, "Academic rollover ready to execute", f"Rollover {row.id}, version {row.version_no}, passed all required reviews.")
+    elif action == "return" and ctx["office_n"] in {ROLLOVER_HOD, ROLLOVER_DEAN, ROLLOVER_PRINCIPAL, ROLLOVER_FINANCE} and row.status in {"HOD Review", "Dean Review", "Principal Review", "Finance Review"}:
+        if not body.reason.strip(): raise HTTPException(422, "A return reason is required")
+        _rollover_transition(s, ctx, row, "draft", f"academic.rollover.{ctx['office_n']}_return", f"Returned: {body.reason.strip()}")
+        _rollover_notice(s, ROLLOVER_COORDINATOR, "Academic rollover returned for correction", f"Rollover {row.id}, version {row.version_no}: {body.reason.strip()}", "warning")
+    else:
+        raise HTTPException(403, "This role cannot perform that rollover action in the current state")
     return _rollover_payload(s, row)
 
 
 @router.post("/academic-rollover/{rollover_id}/execute")
-def execute_academic_rollover(rollover_id: str, ctx=Depends(auth), s=Depends(db)):
-    if ctx["office_n"] not in {4, 6, 10, 17}: raise HTTPException(403, "Academic leadership may execute an approved rollover")
+def execute_academic_rollover(rollover_id: str, body: RolloverActionIn, ctx=Depends(auth), s=Depends(db)):
+    if ctx["office_n"] != ROLLOVER_COORDINATOR: raise HTTPException(403, "Only the Academic Coordinator may execute an approved rollover")
     row = s.get(D.AcademicRollover, rollover_id)
-    if not row or row.status != "approved": raise HTTPException(409, "Rollover must be approved before execution")
+    if not row or row.status != "Ready to Execute": raise HTTPException(409, "Rollover must complete HOD, Dean, exception and Finance reviews before execution")
+    _rollover_scope(row, ctx, s)
+    if body.version_no != row.version_no: raise HTTPException(409, "STALE_ROLLOVER_VERSION")
     target_year = s.query(D.AcademicYear).filter(D.AcademicYear.name == row.target_academic_year, D.AcademicYear.is_active == True).first()
     if not target_year: raise HTTPException(409, "NEXT_ACADEMIC_YEAR_NOT_ACTIVE")
     target_semester = s.query(D.Semester).filter(D.Semester.academic_year_id == target_year.id, D.Semester.sequence == row.target_semester, D.Semester.is_active == True).first()
@@ -5612,7 +6351,11 @@ def execute_academic_rollover(rollover_id: str, ctx=Depends(auth), s=Depends(db)
         item.processed_at = datetime.utcnow()
     row.status, row.executed_by, row.executed_at = "completed", ctx["sub"], datetime.utcnow()
     s.commit()
-    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.rollover.execute", f"rollover:{row.id}", "approved", "completed", f"Processed {len(promoted)} promoted students")
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "academic.rollover.execute", f"academic_rollover:{row.id}:v{row.version_no}", "Ready to Execute", "completed", f"Processed {len(promoted)} promoted students")
+    for item in s.query(D.AcademicRolloverDecision).filter_by(rollover_id=row.id).all():
+        student = s.get(D.Student, item.student_id)
+        if student and student.user_id:
+            notify(s, student.user_id, "Academic progression processed", f"Your progression decision for Semester {row.source_semester} is {item.decision}.", "info")
     return _rollover_payload(s, row)
 
 def _format_fee_category(value: str | None):
@@ -5668,10 +6411,21 @@ def list_invoices(ctx=Depends(auth), s=Depends(db)):
     for r in rows:
         roll, name = stu_map.get(r.student_id, ("", ""))
         invoice_details = _invoice_fee_category_details(s, r)
+        condonation = None
+        if r.invoice_type == "condonation":
+            condonation = (s.query(D.AttendanceCondonationRequest)
+                           .filter(D.AttendanceCondonationRequest.invoice_id == r.id,
+                                   D.AttendanceCondonationRequest.tenant_id == ctx["tenant_id"])
+                           .first())
+        workflow = s.get(WorkflowInstance, condonation.workflow_id) if condonation else None
         row = {"id": r.id, "roll_no": roll, "name": name, "term": r.term,
                "amount": r.amount, "paid": r.paid, "balance": r.amount - r.paid,
                "status": r.status, "fee_category_id": invoice_details["fee_category_id"],
-               "fee_category": invoice_details["fee_category"], "categories": invoice_details["categories"]}
+               "fee_category": invoice_details["fee_category"], "categories": invoice_details["categories"],
+               "invoice_type": r.invoice_type,
+               "accounts_settlement_required": bool(condonation),
+               "workflow_id": workflow.id if workflow else None,
+               "workflow_version_no": workflow.version_no if workflow else None}
         out.append(row)
         for category in invoice_details["categories"]:
             key = category["fee_category"]
@@ -5721,11 +6475,13 @@ class RecordPaymentIn(BaseModel):
     amount: float
     method: str = "cash"
     reference: str = ""
+    expected_workflow_version: int | None = None
 
 
 class CondonationInvoiceIn(BaseModel):
     request_id: str
     amount: float
+    expected_workflow_version: int | None = None
 
 
 @router.post("/finance/payment")
@@ -5735,6 +6491,28 @@ def record_payment(body: RecordPaymentIn, ctx=Depends(auth), s=Depends(db)):
     inv = s.query(D.FeeInvoice).get(body.invoice_id)
     if not inv:
         raise HTTPException(404, "Invoice not found")
+    condonation_request = None
+    condonation_workflow = None
+    if inv.invoice_type == "condonation":
+        # Accounts owns settlement after Finance has issued the condonation
+        # invoice.  Finance may not bypass this final workflow stage.
+        if ctx.get("office_n") != 23:
+            raise HTTPException(403, "Only Accounts may settle a condonation invoice")
+        condonation_request = (s.query(D.AttendanceCondonationRequest)
+                               .filter(D.AttendanceCondonationRequest.invoice_id == inv.id,
+                                       D.AttendanceCondonationRequest.tenant_id == ctx["tenant_id"])
+                               .with_for_update().first())
+        condonation_workflow = (s.query(WorkflowInstance)
+                                .filter(WorkflowInstance.id == (condonation_request.workflow_id if condonation_request else ""),
+                                        WorkflowInstance.tenant_id == ctx["tenant_id"],
+                                        WorkflowInstance.process_key == "attendance_condonation")
+                                .with_for_update().first())
+        if not condonation_request or not condonation_workflow:
+            raise HTTPException(409, "Condonation invoice is missing its workflow source")
+        if condonation_workflow.state != "under_review" or condonation_workflow.current_stage != 3:
+            raise HTTPException(409, "Condonation workflow is not awaiting Accounts settlement")
+        if body.expected_workflow_version is not None and body.expected_workflow_version != (condonation_workflow.version_no or 1):
+            raise HTTPException(409, "Condonation workflow changed; reload before settling")
     if body.amount <= 0:
         raise HTTPException(400, "Amount must be greater than zero")
     if body.amount > (inv.amount - inv.paid):
@@ -5752,11 +6530,30 @@ def record_payment(body: RecordPaymentIn, ctx=Depends(auth), s=Depends(db)):
     if not pending:
         from portal_api import _settle_payment
         _settle_payment(s, payment, ctx["sub"])
+        if condonation_workflow and inv.status == "paid":
+            previous = condonation_workflow.state
+            condonation_workflow.current_stage = 4
+            condonation_workflow.state = "approved"
+            condonation_workflow.version_no = (condonation_workflow.version_no or 1) + 1
+            condonation_workflow.updated_at = datetime.utcnow()
+            s.add(Approval(id=uid(), tenant_id=ctx["tenant_id"], workflow_id=condonation_workflow.id,
+                           actor_id=ctx["sub"], actor_name=actor_name(s, ctx), stage=3,
+                           stage_label="Accounts", decision="ALLOW", authority="Full",
+                           reason=f"Condonation payment settled: invoice {inv.id}; payment {payment.id}"))
+            write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"],
+                        "attendance.condonation.accounts_settle", f"wf:{condonation_workflow.id}",
+                        previous, condonation_workflow.state,
+                        f"Invoice {inv.id}; payment {payment.id}")
+            notify(s, condonation_request.requested_by, "Condonation payment settled",
+                   f"Condonation {condonation_request.id}; invoice {inv.id}; payment {payment.id}; workflow {condonation_workflow.id} is complete.",
+                   severity="info")
     s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "fee.payment",
                 f"invoice:{inv.id}", "", inv.status,
                 f"Recorded ₹{body.amount:,.0f} via {method} ({reference})")
-    return {"status": "pending_clearance" if pending else inv.status, "paid": inv.paid, "payment_id": payment.id, "decision": dec.as_dict(), "method": method, "reference": reference}
+    return {"status": "pending_clearance" if pending else inv.status, "paid": inv.paid, "payment_id": payment.id, "decision": dec.as_dict(), "method": method, "reference": reference,
+            "workflow_id": condonation_workflow.id if condonation_workflow else None,
+            "workflow_version_no": condonation_workflow.version_no if condonation_workflow else None}
 
 
 @router.post("/finance/condonation-invoice")
@@ -5770,18 +6567,46 @@ def create_condonation_invoice(body: CondonationInvoiceIn, ctx=Depends(auth), s=
     ).first()
     if not request:
         raise HTTPException(404, "Approved condonation request not found")
-    if request.invoice_id:
-        return {"invoice_id": request.invoice_id, "status": "already_issued"}
+    workflow = (s.query(WorkflowInstance)
+                .filter(WorkflowInstance.id == request.workflow_id,
+                        WorkflowInstance.tenant_id == ctx["tenant_id"],
+                        WorkflowInstance.process_key == "attendance_condonation")
+                .with_for_update().first())
+    if not workflow:
+        raise HTTPException(409, "Condonation request is missing its workflow")
+    if workflow.state != "under_review" or workflow.current_stage != 2:
+        raise HTTPException(409, "Condonation workflow is not awaiting Finance invoice issuance")
+    if body.expected_workflow_version is not None and body.expected_workflow_version != (workflow.version_no or 1):
+        raise HTTPException(409, "Condonation workflow changed; reload before issuing the invoice")
     if body.amount <= 0:
         raise HTTPException(422, "Invoice amount must be greater than zero")
-    invoice = D.FeeInvoice(id=uid(), tenant_id=ctx["tenant_id"], student_id=request.student_id,
-                           term="Condonation", invoice_type="condonation", amount=body.amount,
-                           gross_amount=body.amount, net_amount=body.amount, status="due")
-    s.add(invoice); s.flush(); request.invoice_id = invoice.id; request.updated_at = datetime.utcnow(); s.commit()
+    if request.invoice_id:
+        invoice = s.get(D.FeeInvoice, request.invoice_id)
+        if not invoice:
+            raise HTTPException(409, "Condonation request references a missing invoice")
+    else:
+        invoice = D.FeeInvoice(id=uid(), tenant_id=ctx["tenant_id"], student_id=request.student_id,
+                               term="Condonation", invoice_type="condonation", amount=body.amount,
+                               gross_amount=body.amount, net_amount=body.amount, status="due")
+        s.add(invoice); s.flush(); request.invoice_id = invoice.id
+    previous = workflow.state
+    workflow.current_stage = 3
+    workflow.state = "under_review"
+    workflow.version_no = (workflow.version_no or 1) + 1
+    workflow.updated_at = datetime.utcnow()
+    request.updated_at = datetime.utcnow(); s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"],
                 "attendance.condonation.invoice", f"invoice:{invoice.id}", "", "due", request.id)
-    notify(s, request.requested_by, "Condonation invoice issued", f"Invoice {invoice.id} is ready for payment", severity="action")
-    return {"invoice_id": invoice.id, "status": invoice.status}
+    write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"],
+                "attendance.condonation.finance_issue", f"wf:{workflow.id}", previous, workflow.state,
+                f"Condonation {request.id}; invoice {invoice.id}")
+    for accounts_user in s.query(User).filter(User.tenant_id == ctx["tenant_id"], User.office_n == 23, User.status == "active").all():
+        notify(s, accounts_user.id, "Condonation awaiting Accounts settlement",
+               f"Condonation {request.id}; invoice {invoice.id}; workflow {workflow.id} awaits payment settlement.", severity="action")
+    notify(s, request.requested_by, "Condonation invoice issued",
+           f"Condonation {request.id}; invoice {invoice.id}; workflow {workflow.id} is awaiting Accounts settlement.", severity="action")
+    return {"invoice_id": invoice.id, "status": invoice.status, "workflow_id": workflow.id,
+            "workflow_version_no": workflow.version_no}
 
 
 @router.get("/finance/invoices/{invoice_id}/receipt.pdf")

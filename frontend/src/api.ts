@@ -38,7 +38,9 @@ async function req(path: string, opts: RequestInit = {}) {
             return message ? (missing ? `${message}: ${missing}` : message) : JSON.stringify(data.detail)
           })()
         : data.detail
-    throw new Error(detail || `Request failed (${res.status})`)
+    const error = new Error(detail || `Request failed (${res.status})`) as Error & { status?: number }
+    error.status = res.status
+    throw error
   }
   return data
 }
@@ -258,6 +260,9 @@ export const api = {
   deleteAcademicCalendarEntry: (id: string) => req(`/academic-calendar/${id}`, { method: 'DELETE' }),
   submitAcademicCalendarEntry: (id: string) => req(`/academic-calendar/${id}/submit`, { method: 'POST' }),
   decideAcademicCalendarEntry: (id: string, body: any) => req(`/academic-calendar/${id}/decision`, { method: 'POST', body: JSON.stringify(body) }),
+  publishAcademicCalendarEntry: (id: string) => req(`/academic-calendar/${id}/publish`, { method: 'POST' }),
+  registrationSections: () => req('/student/registration/sections'),
+  enrollInSection: (id: string) => req(`/student/registration/sections/${id}/enroll`, { method: 'POST' }),
   createAcademicCalendarProposal: (body: any) => req('/academic-calendar/proposals', { method: 'POST', body: JSON.stringify(body) }),
   submitAcademicCalendarProposal: (id: string, expected_status_version: number) => req(`/academic-calendar/proposals/${id}/submit`, { method: 'POST', body: JSON.stringify({ expected_status_version }) }),
   decideAcademicCalendarProposal: (id: string, decision: string, expected_status_version: number, reason = '') => req(`/academic-calendar/proposals/${id}/decision/${decision}`, { method: 'POST', body: JSON.stringify({ expected_status_version, reason }) }),
@@ -315,6 +320,9 @@ export const api = {
   recordQualityEffectiveness: (id: string, body: any) => req(`/academics/quality/reviews/${id}/effectiveness`, { method: 'POST', body: JSON.stringify(body) }),
   transitionNextSemesterPlan: (id: string, body: any) => req(`/academics/next-semester-plans/${id}/transition`, { method: 'POST', body: JSON.stringify(body) }),
   resolveTimetableException: (id: string) => req(`/academics/timetable/readiness/${id}/resolve`, { method: 'POST' }),
+  createTimetableChange: (body: any) => req('/academics/timetable-changes', { method: 'POST', body: JSON.stringify(body) }),
+  timetableChanges: () => req('/academics/timetable-changes'),
+  transitionTimetableChange: (id: string, action: string, expected_version?: number, reason = '', expected_workflow_version?: number) => req(`/academics/timetable-changes/${id}/${action}`, { method: 'POST', body: JSON.stringify({ expected_version, reason, expected_workflow_version }) }),
   governancePolicies: () => req('/academic-governance/policies'),
   governanceInbox: (state = '') => req(`/academic-governance/inbox${state ? `?state=${encodeURIComponent(state)}` : ''}`),
   governanceTransition: (id: string, body: any) => req(`/academic-governance/proposals/${id}/transition`, { method: 'POST', body: JSON.stringify(body) }),
@@ -406,9 +414,9 @@ export const api = {
   deactivateTimetableEntry: (entryId: string) => req(`/academics/timetable/${entryId}/deactivate`, { method: 'POST' }),
   timetablePlans: () => req('/academics/timetable-plans'),
   submitTimetablePlan: (body: any) => req('/academics/timetable-plans/submit', { method: 'POST', body: JSON.stringify(body) }),
-  timetableHodDecision: (id: string, action: string, reason = '') => req(`/academics/timetable-plans/${id}/hod-decision`, { method: 'POST', body: JSON.stringify({ action, reason }) }),
-  timetableDeanDecision: (id: string, action: string, reason = '') => req(`/academics/timetable-plans/${id}/dean-decision`, { method: 'POST', body: JSON.stringify({ action, reason }) }),
-  timetableVpDecision: (id: string, action: string, reason = '') => req(`/academics/timetable-plans/${id}/vp-decision`, { method: 'POST', body: JSON.stringify({ action, reason }) }),
+  timetableHodDecision: (id: string, action: string, reason = '', expected_version?: number) => req(`/academics/timetable-plans/${id}/hod-decision`, { method: 'POST', body: JSON.stringify({ action, reason, expected_version }) }),
+  timetableDeanDecision: (id: string, action: string, reason = '', expected_version?: number) => req(`/academics/timetable-plans/${id}/dean-decision`, { method: 'POST', body: JSON.stringify({ action, reason, expected_version }) }),
+  timetableVpDecision: (id: string, action: string, reason = '', expected_version?: number) => req(`/academics/timetable-plans/${id}/vp-decision`, { method: 'POST', body: JSON.stringify({ action, reason, expected_version }) }),
   publishTimetablePlan: (id: string) => req(`/academics/timetable-plans/${id}/publish`, { method: 'POST' }),
   closeTimetablePlan: (id: string) => req(`/academics/timetable-plans/${id}/close`, { method: 'POST' }),
   classSessions: () => req('/academics/class-sessions'),
@@ -590,12 +598,12 @@ export const api = {
   updateAcademicRolloverPolicy: (body: any) => req('/academic-rollover/policy', { method: 'PUT', body: JSON.stringify(body) }),
   startAcademicRollover: (body: any) => req('/academic-rollover', { method: 'POST', body: JSON.stringify(body) }),
   decideAcademicRollover: (id: string, body: any) => req(`/academic-rollover/${id}/decision`, { method: 'POST', body: JSON.stringify(body) }),
-  submitAcademicRollover: (id: string) => req(`/academic-rollover/${id}/submit`, { method: 'POST' }),
-  approveAcademicRollover: (id: string) => req(`/academic-rollover/${id}/approve`, { method: 'POST' }),
-  executeAcademicRollover: (id: string) => req(`/academic-rollover/${id}/execute`, { method: 'POST' }),
+  submitAcademicRollover: (id: string, body: any) => req(`/academic-rollover/${id}/submit`, { method: 'POST', body: JSON.stringify(body) }),
+  actionAcademicRollover: (id: string, action: string, body: any) => req(`/academic-rollover/${id}/action?action=${encodeURIComponent(action)}`, { method: 'POST', body: JSON.stringify(body) }),
+  executeAcademicRollover: (id: string, body: any) => req(`/academic-rollover/${id}/execute`, { method: 'POST', body: JSON.stringify(body) }),
   budget: () => req('/finance/budget'),
-  recordPayment: (invoice_id: string, amount: number, method = 'cash', reference = '') =>
-    req('/finance/payment', { method: 'POST', body: JSON.stringify({ invoice_id, amount, method, reference }) }),
+  recordPayment: (invoice_id: string, amount: number, method = 'cash', reference = '', expected_workflow_version?: number) =>
+    req('/finance/payment', { method: 'POST', body: JSON.stringify({ invoice_id, amount, method, reference, expected_workflow_version }) }),
   clearOfflinePayment: (payment_id: string, action: 'cleared' | 'bounced') =>
     req(`/finance/payments/${payment_id}/clear`, { method: 'POST', body: JSON.stringify({ action }) }),
   downloadFinanceReceipt: (invoice_id: string, payment_id = '') => download(`/finance/invoices/${invoice_id}/receipt.pdf${payment_id ? `?payment_id=${encodeURIComponent(payment_id)}` : ''}`),

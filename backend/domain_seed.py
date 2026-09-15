@@ -4632,9 +4632,24 @@ def _seed_assignment_submission_demo(s):
     demo_student = s.query(D.Student).filter(D.Student.user_id == "user_36").first()
     if demo_student:
         enrollment_id = f"phase4_demo_enrollment_{demo_student.id}_{section.id}"
-        enrollment = _ensure(s, D.Enrollment, enrollment_id, lambda: D.Enrollment(id=enrollment_id, tenant_id=TENANT, student_id=demo_student.id, section_id=section.id))
-        enrollment.student_id = demo_student.id; enrollment.section_id = section.id; enrollment.status = "enrolled"
-        s.flush()
+        # Enrollment identity is the student/section pair, not its fixture ID.
+        # A score-history fixture may already own this pair under a different ID;
+        # preserve that historical record rather than attempting a duplicate row.
+        enrollment = s.query(D.Enrollment).filter(
+            D.Enrollment.tenant_id == TENANT,
+            D.Enrollment.student_id == demo_student.id,
+            D.Enrollment.section_id == section.id,
+        ).first()
+        if enrollment is None:
+            enrollment = D.Enrollment(
+                id=enrollment_id,
+                tenant_id=TENANT,
+                student_id=demo_student.id,
+                section_id=section.id,
+                status="enrolled",
+            )
+            s.add(enrollment)
+            s.flush()
     roster = s.query(D.Enrollment).filter(D.Enrollment.section_id == section.id, D.Enrollment.status == "enrolled").all()
     if not roster:
         return

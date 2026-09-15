@@ -90,7 +90,7 @@ GOVERNANCE_PATHS = ("/api/academics/timetable/readiness", "/api/academics/qualit
 # Keep this transport-level guard aligned with domain_api's authorization
 # policy; otherwise an authorized source office can see a form but every
 # mutation is rejected before its endpoint executes.
-GOVERNANCE_ROUTE_OFFICES = {6, 10, 17}
+GOVERNANCE_ROUTE_OFFICES = {6, 10, 17, 41}
 
 
 @app.middleware("http")
@@ -1012,10 +1012,24 @@ def scope_matrix(ctx=Depends(non_front_office)):
 # --------------------------------------------------------------------------- #
 #  Workflows & approvals (Document §7, §10) — the end-to-end engine            #
 # --------------------------------------------------------------------------- #
+# Principal workflows are decision and monitoring records.  Source-owned
+# requests (procurement, facilities, admissions, HR, and student services)
+# must originate in their accountable module so the workflow carries a real
+# source record which can be reconciled and executed after approval.  A generic
+# Principal-started request would be an orphan and must fail closed.
+PRINCIPAL_INITIATABLE_WORKFLOWS: set[str] = set()
+
+
+def _initiable_workflow_processes(ctx):
+    if ctx.get("office_n") == 4:
+        return [proc for proc in APPROVAL_MATRIX if proc["key"] in PRINCIPAL_INITIATABLE_WORKFLOWS]
+    return APPROVAL_MATRIX
+
+
 @app.get("/api/workflows/processes")
 def workflow_processes(ctx=Depends(non_front_office)):
-    """Processes this office can initiate or participate in."""
-    return {"processes": APPROVAL_MATRIX}
+    """Return only workflow types that the calling office may initiate."""
+    return {"processes": _initiable_workflow_processes(ctx)}
 
 
 PROCESS_CATEGORY_MAP = {
@@ -1136,6 +1150,31 @@ def _workflow_visible_to(wf, proc, ctx):
     return ctx["office_n"] in _workflow_stage_offices(proc, wf.current_stage)
 
 
+def _workflow_actionable_by(wf, proc, ctx):
+    """True only when this actor owns the current, non-terminal review stage.
+
+    Visibility is intentionally broader so users can read their own requests
+    and approval history.  The inbox must not use that broader rule: doing so
+    surfaces old records from the office that started a workflow and invites a
+    decision that the server must reject.
+    """
+    if not _workflow_visible_to(wf, proc, ctx):
+        return False
+    if wf.initiator_id == ctx["sub"]:
+        return False
+    if wf.state not in {"submitted", "under_review", "reviewed", "escalated"}:
+        return False
+    return ctx["office_n"] in _workflow_stage_offices(proc, wf.current_stage)
+
+
+def _workflow_available_actions(wf, proc, ctx):
+    """Server-calculated decision controls for an approval card or modal."""
+    if not ctx or not _workflow_actionable_by(wf, proc, ctx):
+        return []
+    candidates = ("review", "approve", "return", "reject", "escalate")
+    return [action for action in candidates if wf.state in WF_VALID.get(action, [])]
+
+
 def _semester_meta_for_date(dt_value: datetime | None):
     current = dt_value or datetime.utcnow()
     year = current.year
@@ -1243,6 +1282,8 @@ def _start_workflow_record(
     proc = _workflow_process(process_key)
     if not proc:
         raise HTTPException(404, "Unknown process")
+    if not any(candidate["key"] == process_key for candidate in _initiable_workflow_processes(ctx)):
+        raise HTTPException(403, "Your role cannot initiate this workflow; submit it through the responsible office")
     clean_title = (title or "").strip()
     if not clean_title:
         raise HTTPException(400, "Describe the request")
@@ -1314,9 +1355,16 @@ def _notify_stage(s, wf, proc):
         return
     label = proc["chain"][stage]
     recipients = []
-    owner = s.query(User).filter(User.office_n == proc["office_n"]).first()
-    if owner:
-        recipients.append(owner)
+    # The notification must follow the active approval stage, not the office
+    # that originally created the process.  The latter caused Finance-stage
+    # condonation work to be sent back to the HOD.
+    stage_offices = _workflow_stage_offices(proc, stage)
+    if stage_offices:
+        recipients.extend(s.query(User).filter(
+            User.tenant_id == wf.tenant_id,
+            User.status == "active",
+            User.office_n.in_(stage_offices),
+        ).all())
     # Fee structures are prepared by Finance and begin at the Principal/Campus
     # Head review stage.  Surface the request in the actual decision-makers'
     # notification inboxes as well as in their workflow inbox.
@@ -1329,8 +1377,21 @@ def _notify_stage(s, wf, proc):
         if not recipient or recipient.id in seen:
             continue
         seen.add(recipient.id)
-        notify(s, recipient.id, f"Action needed: {proc['label']}",
-               f"{wf.title} - awaiting {label}", severity="action")
+        title = f"Action needed: {proc['label']}"
+        body = f"{wf.title}; workflow {wf.id}; source {wf.source_type}:{wf.source_id} - awaiting {label}"
+        # A retry, reload, or repeated escalation must not fill an approver's
+        # inbox with identical open tasks.  The workflow card is the source of
+        # truth; retain a single unread notification until that task is read or
+        # moves to another stage.
+        already_notified = (s.query(Notification.id)
+                            .filter(Notification.tenant_id == wf.tenant_id,
+                                    Notification.user_id == recipient.id,
+                                    Notification.title == title,
+                                    Notification.body == body,
+                                    Notification.read == False)
+                            .first())
+        if not already_notified:
+            notify(s, recipient.id, title, body, severity="action")
     return
     # Notify the owning office head as a representative approver.
     owner = s.query(User).filter(User.office_n == proc["office_n"]).first()
@@ -1366,9 +1427,9 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
         row = decide_attendance_correction_request(s, correction.id, body.action, body.reason, ctx)
         refreshed = s.query(WorkflowInstance).get(wf.id)
         return {"decision": {"outcome": "ALLOW", "reason": "Attendance correction decision recorded", "authority": "Full", "escalate_to": None},
-                "workflow": _wf_payload(s, refreshed, proc)}
+                "workflow": _wf_payload(s, refreshed, proc, ctx)}
     stage_offices = _workflow_stage_offices(proc, wf.current_stage)
-    if ctx["office_n"] != wf.office_n and ctx["office_n"] not in stage_offices:
+    if ctx["office_n"] not in stage_offices:
         raise HTTPException(403, "Only the current workflow stage owner may act")
     u = s.query(User).get(ctx["sub"])
     p = s.query(Person).get(u.person_id)
@@ -1400,6 +1461,11 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
         target_scope_level="campus" if wf.process_key in {"fee_structure", "attendance_condonation"} else wf.scope_level,
         escalate_to=proc["escalation"] if proc else None,
     )
+    # A rejected authorization is not a workflow decision.  Fail before any
+    # Approval/audit/outbox row is written, so callers receive an explicit
+    # authorization error and failed attempts cannot masquerade as history.
+    if dec.outcome == DENY:
+        raise HTTPException(403, dec.reason)
 
     # Record the approval decision.
     stage_label = proc["chain"][min(wf.current_stage, len(proc["chain"]) - 1)] if proc else body.action
@@ -1455,10 +1521,10 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
     if proc:
         _notify_stage(s, wf, proc)
 
-    return {"decision": dec.as_dict(), "workflow": _wf_payload(s, wf, proc)}
+    return {"decision": dec.as_dict(), "workflow": _wf_payload(s, wf, proc, ctx)}
 
 
-def _wf_payload(s, wf, proc):
+def _wf_payload(s, wf, proc, ctx=None):
     approvals = (s.query(Approval).filter(Approval.workflow_id == wf.id)
                  .order_by(Approval.created_at).all())
     profile = s.query(WorkflowProfile).filter(WorkflowProfile.workflow_id == wf.id).first()
@@ -1479,6 +1545,10 @@ def _wf_payload(s, wf, proc):
         "scope_level": wf.scope_level,
         "scope_ref": getattr(wf, "scope_ref", "") or "",
         "version_no": getattr(wf, "version_no", 1) or 1,
+        "available_actions": _workflow_available_actions(wf, proc, ctx),
+        "current_owner": (proc["chain"][wf.current_stage] if proc and 0 <= wf.current_stage < len(proc["chain"]) else ""),
+        "campus": wf.scope_ref if wf.scope_level == "campus" else "",
+        "updated_at": wf.updated_at.isoformat() if wf.updated_at else None,
         "source_type": getattr(wf, "source_type", "") or "",
         "source_id": getattr(wf, "source_id", "") or "",
         "request_student": request_student, "correction_id": correction_id,
@@ -1590,7 +1660,7 @@ def list_workflows(scope: str = "all", ctx=Depends(non_front_office), s=Depends(
                 .order_by(desc(WorkflowInstance.updated_at)).limit(100).all())
     elif scope == "inbox":
         candidates = q.order_by(desc(WorkflowInstance.updated_at)).limit(250).all()
-        rows = [row for row in candidates if _workflow_visible_to(row, _workflow_process(row.process_key), ctx)]
+        rows = [row for row in candidates if _workflow_actionable_by(row, _workflow_process(row.process_key), ctx)]
         delegated = active_delegations_for(s, ctx["sub"])
         if delegated:
             seen = {row.id for row in rows}
@@ -1607,7 +1677,7 @@ def list_workflows(scope: str = "all", ctx=Depends(non_front_office), s=Depends(
     out = []
     for wf in rows:
         proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
-        out.append(_wf_payload(s, wf, proc))
+        out.append(_wf_payload(s, wf, proc, ctx))
     return {"workflows": out}
 
 
@@ -1619,7 +1689,7 @@ def get_workflow(wid: str, ctx=Depends(non_front_office), s=Depends(db)):
     proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
     if not _workflow_visible_to(wf, proc, ctx):
         raise HTTPException(403, "Workflow is outside your scope")
-    return _wf_payload(s, wf, proc)
+    return _wf_payload(s, wf, proc, ctx)
 
 
 class ChairmanStartWF(BaseModel):

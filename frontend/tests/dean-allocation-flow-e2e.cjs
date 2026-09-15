@@ -18,8 +18,7 @@ async function login(browser, username) {
   let hod, dean
   try {
     hod = await login(browser, 'hod')
-    await hod.page.getByRole('button', { name: 'Academics', exact: true }).click()
-    await hod.page.getByText('Faculty allocation', { exact: true }).click()
+    await hod.page.getByText('Faculty Allocation', { exact: true }).click()
     await hod.page.getByText('Propose allocation', { exact: true }).waitFor()
     const initial = await (await hod.page.request.get(`${api}/api/academics/allocation/proposals`, { headers: { Authorization: `Bearer ${hod.token}` } })).json()
     await hod.page.getByText('Propose allocation', { exact: true }).click()
@@ -35,9 +34,10 @@ async function login(browser, username) {
     dean = await login(browser, 'dean_academics')
     const before = await (await dean.page.request.get(`${api}/api/academics/dean-dashboard`, { headers: { Authorization: `Bearer ${dean.token}` } })).json()
     await dean.page.getByText('Faculty Allocation', { exact: true }).first().click()
-    await dean.page.getByText(proposal.title, { exact: true }).waitFor()
-    await dean.page.locator('.dean-workspace-row').filter({ hasText: proposal.title }).getByText('Approve', { exact: true }).click()
-    await dean.page.locator('.dean-workspace-row').filter({ hasText: proposal.title }).getByText('APPROVED', { exact: true }).waitFor()
+    const proposalRow = dean.page.locator(`.dean-workspace-row[data-proposal-id="${proposal.id}"]`)
+    await proposalRow.waitFor()
+    await proposalRow.getByText('Approve', { exact: true }).click()
+    await proposalRow.getByText('APPROVED', { exact: true }).waitFor()
     const finalSource = await (await hod.page.request.get(`${api}/api/academics/allocation/proposals`, { headers: { Authorization: `Bearer ${hod.token}` } })).json()
     const final = finalSource.proposals.find(p => p.id === proposal.id)
     if (!final || final.state !== 'APPROVED' || !final.implementation_ref || !final.events.some(e => e.to === 'APPROVED')) throw new Error('Dean approval did not propagate allocation state/implementation/history')

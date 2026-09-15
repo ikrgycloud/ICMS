@@ -203,17 +203,18 @@ ACTION_OFFICE_ALLOW = {
     ("calendar", "create"): set(range(1, 36)) | {40},
     ("calendar", "edit"): set(range(1, 36)) | {40},
     ("calendar", "delete"): set(range(1, 36)) | {40},
-    ("academic_calendar", "create"): {1, 2, 4, 5, 17},
-    ("academic_calendar", "edit"): {1, 2, 4, 5, 17},
-    ("academic_calendar", "delete"): {1, 2, 4, 5, 17},
-    ("academic_calendar", "create"): {42},
-    ("academic_calendar", "edit"): {42},
-    ("academic_calendar", "delete"): {42},
-    ("academic_calendar", "approve_proposal"): {6},
-    ("academic_calendar", "reject_proposal"): {6},
+    ("academic_calendar", "create"): {17},
+    ("academic_calendar", "edit"): {17},
+    ("academic_calendar", "delete"): {17},
+    ("academic_calendar", "approve_proposal"): {5, 6},
+    ("academic_calendar", "reject_proposal"): {5, 6},
     ("students", "add"): {15},                        # Admissions owns student creation
     ("students", "edit"): {10, 15},                   # HOD and Admissions maintain records
-    ("academics", "create_section"): {6, 10, 17},     # Dean Acad, HOD, Acad Coordinator
+    # HOD confirms departmental demand; the Academic Coordinator creates the
+    # operational section records from that approved input.  Keeping this
+    # single owner prevents a department reviewer from bypassing the setup
+    # handoff through a generic Academics screen or direct API request.
+    ("academics", "create_section"): {17},
     ("academics", "create_program"): {6, 10, 17},     # Academic programme master owners
     ("academics", "create_course"): {6, 10, 17},      # Curriculum owners
     ("academics", "assign_faculty"): {6, 10, 17},
@@ -227,7 +228,10 @@ ACTION_OFFICE_ALLOW = {
     ("academics", "reject_proposal"): {6},
     ("academics", "resolve_exception"): {6},
     ("academics", "manage_quality"): {6, 10, 17},
-    ("academics", "manage_committee"): {6, 9, 17},
+    # Academic committees are a Dean Academics governance responsibility.
+    # Members receive notifications and evidence context, but may not create,
+    # alter, approve, or verify committee records through a copied endpoint.
+    ("academics", "manage_committee"): {6},
     ("academics", "manage_outcomes"): {6, 9, 17},
     ("academics", "manage_planning"): {6, 17},
     ("attendance", "mark"): {10, 11, 12, 13, 14, 17},  # HOD + faculty + coordinator

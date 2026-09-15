@@ -45,6 +45,14 @@ class WorkflowStageAccessTests(unittest.TestCase):
             decide_workflow(DecideWF(workflow_id="fee_request", action="approve"), ctx, self.session)
         self.assertEqual(action_error.exception.status_code, 403)
 
+    def test_process_owner_cannot_bypass_the_current_stage_owner(self):
+        # The workflow is owned by Finance, but its active stage is Principal.
+        # Process ownership must never grant a standing approval bypass.
+        ctx = {**self.ctx, "office_n": 22}
+        with self.assertRaises(HTTPException) as action_error:
+            decide_workflow(DecideWF(workflow_id="fee_request", action="approve"), ctx, self.session)
+        self.assertEqual(action_error.exception.status_code, 403)
+
     def test_alternative_roles_and_specific_titles(self):
         self.assertEqual(_workflow_stage_offices({"chain": ["Principal / Campus Head"]}, 0), {3, 4})
         self.assertEqual(_workflow_stage_offices({"chain": ["Vice Principal"]}, 0), {5})

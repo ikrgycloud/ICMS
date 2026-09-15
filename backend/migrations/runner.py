@@ -62,6 +62,8 @@ from migrations import v0021_execution_marks
 from migrations import v0022_mid_execution_progress
 from migrations import v0009_faculty_teaching
 from migrations import v0047_faculty_allocation_offering
+from migrations import v0048_academic_calendar_governance
+from migrations import v0049_offering_curriculum_and_enrollment
 
 MIGRATIONS = [v0001_admissions_foundation, v0002_repair_legacy_application_status,
               v0003_admission_seat_pool_identity, v0004_admissions_phase2_application_context]
@@ -124,6 +126,18 @@ MIGRATIONS.append(v0021_execution_marks)
 MIGRATIONS.append(v0022_mid_execution_progress)
 MIGRATIONS.append(v0009_faculty_teaching)
 MIGRATIONS.append(v0047_faculty_allocation_offering)
+MIGRATIONS.append(v0048_academic_calendar_governance)
+MIGRATIONS.append(v0049_offering_curriculum_and_enrollment)
+from migrations import v0050_timetable_plan_workflow_version
+MIGRATIONS.append(v0050_timetable_plan_workflow_version)
+from migrations import v0050_timetable_exception_changes
+MIGRATIONS.append(v0050_timetable_exception_changes)
+from migrations import v0051_academic_rollover_governance
+MIGRATIONS.append(v0051_academic_rollover_governance)
+from migrations import v0052_curriculum_execution_upstream_gaps
+MIGRATIONS.append(v0052_curriculum_execution_upstream_gaps)
+from migrations import v0053_timetable_change_workflow_version
+MIGRATIONS.append(v0053_timetable_change_workflow_version)
 
 
 def upgrade(engine):

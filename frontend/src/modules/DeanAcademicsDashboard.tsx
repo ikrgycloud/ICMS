@@ -245,8 +245,8 @@ function valueColoredSegments(segments: Array<{ label: string; value: number }>)
 }
 
 function valueColor(index: number, total: number, relativeValue: number) {
-  // Hue separates categories; saturation and lightness are derived from the
-  // live value, so a larger value is visibly stronger rather than predefined.
+  // Match the reference Dean dashboard palette: hue separates live categories
+  // and larger values are visibly stronger without fixed category colours.
   const hue = Math.round((index / Math.max(1, total)) * 300 + 30)
   const intensity = Math.max(0, Math.min(1, relativeValue))
   return `hsl(${hue} ${48 + intensity * 38}% ${88 - intensity * 42}%)`

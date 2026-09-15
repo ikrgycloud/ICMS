@@ -19,12 +19,16 @@ RBAC_MATRIX = {
     2:  {"view": F, "create": L, "edit": L, "delete": X, "approve": L, "reject": F, "verify": V, "publish": V, "export": F, "configure": L, "delegate": F, "audit": V},
     3:  {"view": F, "create": L, "edit": L, "delete": X, "approve": L, "reject": L, "verify": V, "publish": C, "export": F, "configure": X, "delegate": D, "audit": V},
     4:  {"view": F, "create": L, "edit": L, "delete": X, "approve": F, "reject": F, "verify": V, "publish": C, "export": F, "configure": X, "delegate": F, "audit": V},
-    5:  {"view": F, "create": L, "edit": L, "delete": X, "approve": D, "reject": L, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
+    # VP operational approvals are an assigned institutional workflow stage,
+    # not an ad-hoc delegation. Module/action reservations and each workflow's
+    # stage checks still restrict which approvals this office may perform.
+    5:  {"view": F, "create": L, "edit": L, "delete": X, "approve": L, "reject": L, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
     6:  {"view": F, "create": F, "edit": L, "delete": X, "approve": L, "reject": L, "verify": F, "publish": X, "export": F, "configure": X, "delegate": X, "audit": V},
     10: {"view": F, "create": F, "edit": L, "delete": X, "approve": L, "reject": L, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
     14: {"view": L, "create": L, "edit": L, "delete": X, "approve": X, "reject": X, "verify": V, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
     15: {"view": F, "create": F, "edit": L, "delete": X, "approve": L, "reject": L, "verify": F, "publish": X, "export": F, "configure": X, "delegate": X, "audit": V},
     16: {"view": F, "create": F, "edit": L, "delete": X, "approve": F, "reject": F, "verify": F, "publish": F, "export": F, "configure": L, "delegate": X, "audit": F},
+    17: {"view": F, "create": F, "edit": L, "delete": L, "approve": X, "reject": X, "verify": L, "publish": X, "export": L, "configure": X, "delegate": X, "audit": V},
     22: {"view": F, "create": F, "edit": L, "delete": X, "approve": F, "reject": F, "verify": F, "publish": X, "export": F, "configure": L, "delegate": X, "audit": F},
     24: {"view": F, "create": F, "edit": L, "delete": X, "approve": L, "reject": L, "verify": F, "publish": X, "export": F, "configure": X, "delegate": X, "audit": V},
     27: {"view": F, "create": F, "edit": F, "delete": L, "approve": L, "reject": L, "verify": V, "publish": X, "export": F, "configure": F, "delegate": X, "audit": F},

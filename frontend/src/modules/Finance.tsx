@@ -258,7 +258,7 @@ export default function Finance({ caps, user, onOpenApprovals, overviewOnly = fa
       const amt = Number(amount)
       const method = (modal.method || 'cash').toLowerCase()
       const reference = (modal.reference || '').trim() || `${method.toUpperCase()}-${Date.now().toString().slice(-6)}`
-      const r = await api.recordPayment(modal.inv.id, amt, method, reference)
+      const r = await api.recordPayment(modal.inv.id, amt, method, reference, modal.inv.workflow_version_no)
       if (method === 'cash' && r.status !== 'pending_clearance') api.downloadFinanceReceipt(modal.inv.id, r.payment_id)
       setDecision(r.decision || { outcome: 'APPROVE', reason: `Recorded via ${method}` }); setModal(null); setAmount(''); load(); if (tab === 'students') loadStudents(studentQuery)
     } catch (e: any) { setDecision({ outcome: 'DENY', reason: e.message }); setModal(null) }
@@ -502,7 +502,7 @@ export default function Finance({ caps, user, onOpenApprovals, overviewOnly = fa
                     <td><span className={`pill s-${r.status}`}>{r.status}</span></td>
                     <td style={{ textAlign: 'right' }}>
                       <div className="row-actions">
-                        <button className="btn btn-sm btn-teal" disabled={!caps.record_payment || r.balance <= 0} onClick={() => { setModal({ kind: 'pay', inv: r, method: 'cash', reference: '' }); setAmount(String(r.balance)) }}>{r.balance > 0 ? 'Record payment' : 'Settled'}</button>
+                        <button className="btn btn-sm btn-teal" disabled={!caps.record_payment || r.balance <= 0 || (r.accounts_settlement_required && user?.office_n !== 23)} onClick={() => { setModal({ kind: 'pay', inv: r, method: 'cash', reference: '' }); setAmount(String(r.balance)) }}>{r.balance <= 0 ? 'Settled' : r.accounts_settlement_required ? (user?.office_n === 23 ? 'Settle condonation' : 'Accounts settlement') : 'Record payment'}</button>
                         <button className="btn btn-sm btn-out" onClick={() => reviewInvoice(r)}>Review</button>
                         <button className="btn btn-sm btn-out" onClick={() => requestAdjustment(r)}>Adjust</button>
                         <button className="btn btn-sm btn-out" disabled={Number(r.paid || 0) <= 0} onClick={() => requestRefund(r)}>{Number(r.paid || 0) > 0 ? 'Refund' : 'No paid balance'}</button>
@@ -625,7 +625,7 @@ export function PrincipalFinance({ caps, readOnly = false }: { caps: any; readOn
     try {
       const value = Number(amount)
       const result = modal.kind === 'pay'
-        ? await api.recordPayment(modal.inv.id, value)
+        ? await api.recordPayment(modal.inv.id, value, 'cash', '', modal.inv.workflow_version_no)
         : await api.waiveFee({ invoice_id: modal.inv.id, amount: value, reason: 'Approved waiver' })
       setDecision(result.decision || { outcome: 'APPROVE', reason: modal.kind === 'pay' ? 'Payment recorded.' : 'Fee waiver submitted.' })
       setModal(null)

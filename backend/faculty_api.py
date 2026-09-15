@@ -661,6 +661,19 @@ def create_attendance_condonation(body: AttendanceCondonationIn, ctx=Depends(aut
     section = s.query(D.Section).filter(D.Section.id == body.section_id, D.Section.tenant_id == ctx["tenant_id"]).first()
     if not student or not section:
         raise HTTPException(404, "Student or section not found")
+    # A condonation is tied to an actual class registration.  Without this
+    # guard, an HOD could create a financial/governance request for an
+    # unrelated student and section merely by knowing their identifiers.
+    enrollment = s.query(D.Enrollment).filter(
+        D.Enrollment.tenant_id == ctx["tenant_id"],
+        D.Enrollment.student_id == student.id,
+        D.Enrollment.section_id == section.id,
+        D.Enrollment.status == "enrolled",
+    ).first()
+    if not enrollment:
+        raise HTTPException(422, "The student must be actively enrolled in the selected section")
+    if ctx.get("scope_level") == "department" and ctx.get("scope_ref") and section.dept_id != ctx["scope_ref"]:
+        raise HTTPException(403, "The selected section is outside your department scope")
     existing = s.query(D.AttendanceCondonationRequest).filter(
         D.AttendanceCondonationRequest.student_id == student.id,
         D.AttendanceCondonationRequest.section_id == section.id,
@@ -676,6 +689,10 @@ def create_attendance_condonation(body: AttendanceCondonationIn, ctx=Depends(aut
         current_stage=1, scope_level="campus", scope_ref=student.campus,
         version_no=1, source_type="attendance_condonation",
     )
+    # Persist the workflow first: attendance_condonation_requests.workflow_id
+    # has a real database foreign key in PostgreSQL.
+    s.add(wf)
+    s.flush()
     request = D.AttendanceCondonationRequest(
         id=uid(), tenant_id=ctx["tenant_id"], student_id=student.id,
         section_id=section.id, attendance_percent=body.attendance_percent,
@@ -683,8 +700,15 @@ def create_attendance_condonation(body: AttendanceCondonationIn, ctx=Depends(aut
         requested_by=ctx["sub"], workflow_id=wf.id,
     )
     wf.source_id = request.id
-    s.add(wf); s.add(request); s.commit()
-    notify(s, "user_4", "Attendance condonation approval", wf.title, severity="action")
+    s.add(request); s.commit()
+    principals = s.query(User).filter(
+        User.tenant_id == ctx["tenant_id"], User.office_n == 4,
+        User.status == "active", User.scope_level == "campus",
+        User.scope_ref == student.campus,
+    ).all()
+    for principal in principals:
+        notify(s, principal.id, "Attendance condonation approval",
+               f"{wf.title}; condonation {request.id}; workflow {wf.id}.", severity="action")
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"],
                 "attendance.condonation.submit", f"condonation:{request.id}", "", "submitted", body.reason)
     return {"request_id": request.id, "workflow_id": wf.id, "status": request.status}

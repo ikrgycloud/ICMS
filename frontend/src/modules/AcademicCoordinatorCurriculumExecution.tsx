@@ -89,12 +89,9 @@ export default function AcademicCoordinatorCurriculumExecution({ onNavigate }: {
 
       <PageHead
         title="Curriculum Execution"
-        sub="Track approved curriculum delivery across offerings, sections, faculty and timetable readiness."
+        sub="Monitor delivery progress, timetable coverage and academic risks after offering setup is complete."
         right={
           <div className="curriculum-head-actions">
-            <button className="btn btn-crimson" onClick={() => onNavigate?.("coordinator_course_offerings")}>
-              Create Curriculum
-            </button>
             <button className="btn btn-out curriculum-refresh" onClick={load}>
               Refresh
             </button>
@@ -239,9 +236,9 @@ export default function AcademicCoordinatorCurriculumExecution({ onNavigate }: {
       <section className="curriculum-list-section">
         <div className="curriculum-section-head">
           <div>
-            <div className="curriculum-eyebrow">ACADEMIC OPERATIONS</div>
-            <h2>Course Execution</h2>
-            <p>Monitor completion targets, actual progress and execution issues.</p>
+            <div className="curriculum-eyebrow">DELIVERY CONTROL TOWER</div>
+            <h2>Curriculum delivery health</h2>
+            <p>Track progress, timetable coverage and academic risks. Configure offerings in Course Offerings.</p>
           </div>
           <div className="curriculum-result-count">
             <strong>{items.length}</strong>
@@ -254,18 +251,17 @@ export default function AcademicCoordinatorCurriculumExecution({ onNavigate }: {
             <thead>
               <tr>
                 <th>Course</th>
-                <th>Program</th>
-                <th>Academic Year</th>
                 <th>Semester / Term</th>
-                <th>HOD Input</th>
-                <th>Faculty</th>
-                <th>Execution</th>
+                <th>Delivery progress</th>
+                <th>Timetable</th>
+                <th>Risks</th>
                 <th aria-label="Action" />
               </tr>
             </thead>
             <tbody>
               {items.map((x) => {
-                const hod = x.hod_input;
+                const isCurriculumGap = String(x.id).startsWith("curriculum-gap:");
+                const issueCount = (x.execution_issues || []).filter((i: any) => i.status !== "Resolved").length;
 
                 return (
                   <tr key={x.id}>
@@ -273,23 +269,16 @@ export default function AcademicCoordinatorCurriculumExecution({ onNavigate }: {
                       <strong>{x.course_code || "—"}</strong>
                       <span>{x.course_title || "Course title unavailable"}</span>
                     </td>
-                    <td><strong>{x.program_code || x.program || "—"}</strong></td>
-                    <td>{x.academic_year || "—"}</td>
                     <td>
                       <strong>{x.semester || "—"}</strong>
                       <span className="curriculum-muted">{x.term || "Term unavailable"}</span>
                     </td>
-                    <td><Pill s={hod?.status || "Pending"} /></td>
-                    <td>{x.faculty || "No faculty assigned"}</td>
                     <td className="curriculum-execution-cell">
-                      <strong>
-                        L {x.lab_marks ?? "—"} · M {x.mid_marks ?? "—"} · S {x.semester_marks ?? "—"}
-                      </strong>
-                      <span>Mid-1 complete: {x.mid1_completion_percentage ?? "—"}%</span>
-                      <span>Mid-2 remaining: {x.mid2_remaining_syllabus_percentage ?? "—"}%</span>
-                      <span>{x.execution_status || "Not Started"}</span>
-                      {x.execution_remarks && <span>{x.execution_remarks}</span>}
+                      <strong>{x.execution_status || "Not Started"}</strong>
+                      <span>{x.progress || 0}% delivery progress</span>
                     </td>
+                    <td><Pill s={isCurriculumGap ? "Offering Required" : (x.timetable_readiness || "Not Ready")} /></td>
+                    <td><Pill s={issueCount ? `${issueCount} Open` : "No Open Risks"} /></td>
                     <td className="curriculum-action-cell">
                       <button
                         className="linkish curriculum-details-btn"
@@ -297,6 +286,7 @@ export default function AcademicCoordinatorCurriculumExecution({ onNavigate }: {
                       >
                         View details
                       </button>
+                      {!isCurriculumGap && <button className="linkish curriculum-details-btn" onClick={() => onNavigate?.("coordinator_course_offerings")}>Offering setup</button>}
                     </td>
                   </tr>
                 );
@@ -354,6 +344,10 @@ export default function AcademicCoordinatorCurriculumExecution({ onNavigate }: {
             <Info l="Timetable readiness" v={selected.timetable_readiness} />
           </DetailSection>
 
+          {String(selected.id).startsWith("curriculum-gap:") && (
+            <div className="calendar-banner warn curriculum-banner">No offering exists for this approved curriculum course. Create its offering from the Course Offerings workspace before HOD setup and delivery can begin.</div>
+          )}
+
           <DetailSection title="Execution">
             <Info l="Execution status" v={selected.execution_status} />
             <Info l="Progress" v={`${selected.progress || 0}%`} />
@@ -365,7 +359,7 @@ export default function AcademicCoordinatorCurriculumExecution({ onNavigate }: {
             <Info l="Remarks" v={selected.execution_remarks} />
           </DetailSection>
 
-          {canManage && (
+          {canManage && !String(selected.id).startsWith("curriculum-gap:") && (
             <div className="curriculum-modal-actions">
               <button className="btn btn-out" onClick={() => setEdit(selected)}>
                 Edit execution
@@ -651,7 +645,9 @@ function IssueModal({
   onSaved: (m: string) => void;
 }) {
   const [f, setF] = useState({
-    offering_id: offering.id,
+    offering_id: String(offering.id).startsWith("curriculum-gap:") ? "" : offering.id,
+    course_id: offering.course_id || "",
+    curriculum_version_id: offering.curriculum_version_id || "",
     issue_type: "",
     description: "",
     responsible_role: "Curriculum Officer",
