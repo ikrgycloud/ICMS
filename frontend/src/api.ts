@@ -200,6 +200,48 @@ export const api = {
   // ---- workspace / capabilities ----
   workspace: () => req('/workspace'),
   overview: () => req('/overview'),
+  hodDashboard: () => req('/portal/hod/dashboard'),
+  hodReviews: (kind = 'all') => req(`/portal/hod/reviews?kind=${encodeURIComponent(kind)}`),
+  hodFacultyWorkload: (q = '', designation = '') => req(`/portal/hod/faculty-workload?q=${encodeURIComponent(q)}&designation=${encodeURIComponent(designation)}`),
+  hodProgramsCourses: (q = '') => req(`/portal/hod/programs-courses?q=${encodeURIComponent(q)}`),
+  hodSections: () => req('/portal/hod/sections'),
+  hodStudents: (filters: any = {}) => {
+    const source = typeof filters === 'string' ? { q: filters } : filters
+    const params = new URLSearchParams()
+    ;['course_id', 'section_id', 'q', 'semester', 'status'].forEach(key => {
+      const value = source[key]
+      if (value !== undefined && value !== null && value !== '') params.set(key, String(value))
+    })
+    return req(`/portal/hod/students${params.size ? `?${params.toString()}` : ''}`)
+  },
+  hodAttendanceMonitoring: () => req('/portal/hod/attendance-monitoring'),
+  hodAtRiskStudents: (q = '') => req(`/portal/hod/at-risk-students?q=${encodeURIComponent(q)}`),
+  hodExaminations: () => req('/portal/hod/examinations'),
+  hodReports: () => req('/portal/hod/reports'),
+  hodDepartmentPlanning: (semester: number | '' = '') => req(`/portal/hod/department-planning${semester === '' ? '' : `?semester=${encodeURIComponent(String(semester))}`}`),
+  hodCurriculumRequests: () => req('/portal/hod/curriculum-requests'),
+  hodCurriculumRequest: (id:string) => req(`/portal/hod/curriculum-requests/${id}`),
+  createHodCurriculumRequest: (body: any) => req('/portal/hod/curriculum-requests', { method: 'POST', body: JSON.stringify(body) }),
+  hodResourceRequests: () => req('/portal/hod/resource-requests'),
+  hodResourceRequest: (id:string) => req(`/portal/hod/resource-requests/${id}`),
+  createHodResourceRequest: (body: any) => req('/portal/hod/resource-requests', { method: 'POST', body: JSON.stringify(body) }),
+  hodStaffingRequests: () => req('/portal/hod/staffing-requests'),
+  hodStaffingRequest: (id:string) => req(`/portal/hod/staffing-requests/${id}`),
+  createHodStaffingRequest: (body: any) => req('/portal/hod/staffing-requests', { method: 'POST', body: JSON.stringify(body) }),
+  hodStudentWelfareEscalations: () => req('/portal/hod/student-welfare-escalations'),
+  hodStudentWelfareEscalation: (id:string) => req(`/portal/hod/student-welfare-escalations/${id}`),
+  createHodStudentWelfareEscalation: (body:any) => req('/portal/hod/student-welfare-escalations', {method:'POST',body:JSON.stringify(body)}),
+  hodDepartmentAudit: (params:any={}) => { const q=new URLSearchParams(params); return req(`/portal/hod/department-audit${q.toString()?`?${q}`:''}`) },
+  hodResearchIqac: () => req('/portal/hod/research-iqac'),
+  hodProfile: () => req('/portal/hod/profile'),
+  updateHodProfile: (body: any) => req('/portal/hod/profile', { method: 'PUT', body: JSON.stringify(body) }),
+  hodMyRequests: () => req('/portal/hod/my-requests'),
+  hodProcessedReviews: () => req('/portal/hod/processed-reviews'),
+  hodLeaveRequests: () => req('/portal/hod/leave-requests'),
+  hodLeaveRequest: (id:string) => req(`/portal/hod/leave-requests/${id}`),
+  createHodLeaveRequest: (body:any) => req('/portal/hod/leave-requests', { method: 'POST', body: JSON.stringify(body) }),
+  cancelHodLeaveRequest: (id:string) => req(`/portal/hod/leave-requests/${id}/cancel`, { method: 'POST' }),
+  hodDigitalId: () => req('/portal/hod/digital-id'),
   principalOverview: (academic_year = '', student_semester = '') => {
     const params = new URLSearchParams({ academic_year })
     if (student_semester) params.set('student_semester', student_semester)

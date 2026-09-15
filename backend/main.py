@@ -44,6 +44,8 @@ from faculty_api import router as faculty_router, decide_attendance_correction_r
 from faculty_portal_api import router as faculty_portal_router
 from admissions_api import router as admissions_router
 from portal_api import router as portal_router
+from hod_dashboard_api import router as hod_dashboard_router
+from hod_portal_api import leadership_router as hod_leadership_router, router as hod_portal_router
 from integrations_api import router as integrations_router
 from sms_api import router as sms_router
 from frontdesk_api import router as frontdesk_router, seed_frontdesk
@@ -111,6 +113,9 @@ app.include_router(faculty_router)
 app.include_router(faculty_portal_router)
 app.include_router(admissions_router)
 app.include_router(portal_router)
+app.include_router(hod_dashboard_router)
+app.include_router(hod_portal_router)
+app.include_router(hod_leadership_router)
 app.include_router(integrations_router)
 app.include_router(sms_router)
 app.include_router(frontdesk_router)
