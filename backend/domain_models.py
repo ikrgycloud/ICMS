@@ -227,84 +227,6 @@ class TeachingAllocation(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 
-class CurriculumRequest(Base):
-    """Approval-only academic proposal; workflow state remains authoritative."""
-    __tablename__ = "curriculum_requests"
-    id = Column(String, primary_key=True)
-    tenant_id = Column(String, index=True)
-    requester_user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
-    department_id = Column(String, ForeignKey("departments.id"), nullable=False, index=True)
-    program_id = Column(String, ForeignKey("programs.id"), nullable=False, index=True)
-    course_id = Column(String, ForeignKey("courses.id"), nullable=True, index=True)
-    request_type = Column(String, nullable=False, index=True)
-    proposed_change = Column(Text, nullable=False)
-    rationale = Column(Text, nullable=False)
-    effective_semester = Column(Integer, nullable=True)
-    workflow_instance_id = Column(String, ForeignKey("workflow_instances.id"), nullable=False, unique=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
-
-
-class DepartmentResourceRequest(Base):
-    """Approval-only department operational requirement.
-
-    WorkflowInstance owns state; this record intentionally has no procurement,
-    inventory, asset, facilities, or budget linkage.
-    """
-    __tablename__ = "department_resource_requests"
-    id = Column(String, primary_key=True)
-    tenant_id = Column(String, index=True)
-    requester_user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
-    department_id = Column(String, ForeignKey("departments.id"), nullable=False, index=True)
-    category = Column(String, nullable=False, index=True)
-    title = Column(String, nullable=False)
-    description = Column(Text, nullable=False)
-    quantity = Column(Integer, nullable=True)
-    estimated_cost = Column(Float, nullable=True)
-    justification = Column(Text, nullable=False)
-    workflow_instance_id = Column(String, ForeignKey("workflow_instances.id"), nullable=False, unique=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
-
-
-class StaffingRequest(Base):
-    """ICMS-only department staffing requirement; workflow owns its state."""
-    __tablename__ = "staffing_requests"
-    id = Column(String, primary_key=True)
-    tenant_id = Column(String, index=True)
-    requester_user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
-    department_id = Column(String, ForeignKey("departments.id"), nullable=False, index=True)
-    request_type = Column(String, nullable=False, index=True)
-    designation_or_role = Column(String, nullable=False)
-    number_required = Column(Integer, nullable=False)
-    required_by_date = Column(Date, nullable=True)
-    justification = Column(Text, nullable=False)
-    workflow_instance_id = Column(String, ForeignKey("workflow_instances.id"), nullable=False, unique=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
-
-
-class StudentWelfareEscalation(Base):
-    """Restricted HOD-to-Student-Affairs escalation; workflow owns its state.
-
-    Narrative fields remain on this protected domain record and are deliberately
-    absent from WorkflowInstance metadata and broad workflow/audit surfaces.
-    """
-    __tablename__ = "student_welfare_escalations"
-    id = Column(String, primary_key=True)
-    tenant_id = Column(String, index=True)
-    requester_user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
-    department_id = Column(String, ForeignKey("departments.id"), nullable=False, index=True)
-    student_id = Column(String, ForeignKey("students.id"), nullable=False, index=True)
-    source_mentoring_case_id = Column(String, ForeignKey("mentoring_cases.id"), nullable=True, index=True)
-    concern_type = Column(String, nullable=False)
-    summary = Column(Text, nullable=False)
-    escalation_reason = Column(Text, nullable=False)
-    workflow_instance_id = Column(String, ForeignKey("workflow_instances.id"), nullable=False, unique=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
-
-
 class CourseMaterial(Base):
     __tablename__ = "course_materials"
     id = Column(String, primary_key=True)
@@ -1388,29 +1310,6 @@ class Campus(Base):
     name = Column(String, nullable=False, unique=True)
     code = Column(String, nullable=False, unique=True)
     is_active = Column(Boolean, default=True)
-
-
-class CampusLeadershipAssignment(Base):
-    """An effective-dated, campus-scoped leadership office assignment.
-
-    The assigned account is intentionally stored by stable user id; names and
-    free-text role labels are derived from the authoritative account record.
-    """
-    __tablename__ = "campus_leadership_assignments"
-    id = Column(String, primary_key=True)
-    tenant_id = Column(String, index=True)
-    campus_id = Column(String, ForeignKey("campuses.id"), nullable=False, index=True)
-    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
-    office_n = Column(Integer, nullable=False, index=True)
-    active = Column(Boolean, default=True, nullable=False, index=True)
-    effective_from = Column(Date, nullable=False, default=date.today, index=True)
-    effective_to = Column(Date, nullable=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    __table_args__ = (
-        UniqueConstraint("campus_id", "office_n", "effective_from", name="uq_campus_leadership_role_from"),
-        Index("ix_campus_leadership_resolution", "campus_id", "office_n", "active", "effective_from", "effective_to"),
-    )
 
 
 class Batch(Base):
