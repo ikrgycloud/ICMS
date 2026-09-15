@@ -140,19 +140,6 @@ def _allocation_payload(s, row):
     }
 
 
-def _notify_allocation_change(s, row, state: str):
-    """Use the existing in-app notification channel for the affected faculty only."""
-    faculty = s.query(D.StaffMember).get(row.faculty_id)
-    section = s.query(D.Section).get(row.section_id)
-    course = s.query(D.Course).get(row.course_id)
-    if not faculty or not faculty.user_id or not section:
-        return
-    course_label = course.code if course else "Course"
-    effective_from = row.effective_from.isoformat() if row.effective_from else "today"
-    notify(s, faculty.user_id, "Teaching allocation updated",
-           f"{course_label} - Section {section.section_code}. {state}. Effective from {effective_from}.")
-
-
 def _can_manage_allocation(s, ctx, section):
     staff = _staff_profile(s, ctx)
     return bool(ctx["office_n"] in {6, 17} or (ctx["office_n"] == 10 and staff and staff.dept_id == section.dept_id))
@@ -241,7 +228,6 @@ def create_teaching_allocation(body: TeachingAllocationIn, ctx=Depends(auth), s=
     )
     s.add(row); s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "allocation.create", f"allocation:{row.id}", "", "pending", "Teaching allocation created")
-    _notify_allocation_change(s, row, "Allocation created and awaiting activation")
     return {"allocation": _allocation_payload(s, row), "decision": dec.as_dict()}
 
 
@@ -259,7 +245,6 @@ def update_teaching_allocation(allocation_id: str, body: TeachingAllocationUpdat
         for entry in s.query(D.TimetableEntry).filter(D.TimetableEntry.section_id == section.id, D.TimetableEntry.status == "active").all():
             if timetable_conflicts(s, faculty.id, entry.day_of_week, entry.start_time, entry.end_time, section.id):
                 raise HTTPException(409, "Faculty has an overlapping active timetable entry")
-    reassigned = faculty.id != row.faculty_id
     row.faculty_id = faculty.id; row.allocation_type = body.allocation_type or row.allocation_type
     row.lecture_hours = max(0, body.lecture_hours); row.lab_hours = max(0, body.lab_hours); row.tutorial_hours = max(0, body.tutorial_hours)
     row.workload_units = max(0, body.workload_units or row.lecture_hours + row.lab_hours + row.tutorial_hours)
@@ -267,7 +252,6 @@ def update_teaching_allocation(allocation_id: str, body: TeachingAllocationUpdat
     row.effective_to = date.fromisoformat(body.effective_to) if body.effective_to else None; row.is_coordinator = body.is_coordinator; row.updated_at = datetime.utcnow()
     s.commit(); sync_section_faculty(s, section.id); s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "allocation.update", f"allocation:{row.id}", "", row.status, "Teaching allocation updated")
-    _notify_allocation_change(s, row, "Allocation reassigned" if reassigned else "Allocation updated")
     return {"allocation": _allocation_payload(s, row), "decision": dec.as_dict()}
 
 
@@ -286,7 +270,6 @@ def activate_teaching_allocation(allocation_id: str, ctx=Depends(auth), s=Depend
     row.status = "active"; row.effective_from = row.effective_from or date.today(); row.updated_at = datetime.utcnow()
     s.flush(); sync_section_faculty(s, section.id); s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "allocation.activate", f"allocation:{row.id}", "pending", "active", "Teaching allocation activated")
-    _notify_allocation_change(s, row, "Allocation is active")
     return {"allocation": _allocation_payload(s, row), "decision": dec.as_dict()}
 
 
@@ -299,7 +282,6 @@ def end_teaching_allocation(allocation_id: str, ctx=Depends(auth), s=Depends(db)
     if not _can_manage_allocation(s, ctx, section): raise HTTPException(403, "You are not authorized to end this allocation")
     row.status = "ended"; row.effective_to = date.today(); row.updated_at = datetime.utcnow(); s.flush(); sync_section_faculty(s, section.id); s.commit()
     write_audit(s, ctx["sub"], actor_name(s, ctx), ctx["office_n"], "allocation.end", f"allocation:{row.id}", "active", "ended", "Teaching allocation ended")
-    _notify_allocation_change(s, row, "Allocation ended")
     return {"allocation": _allocation_payload(s, row), "decision": dec.as_dict()}
 class FacultyAssignmentIn(BaseModel):
     section_id: str

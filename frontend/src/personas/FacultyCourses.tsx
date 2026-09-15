@@ -3,10 +3,6 @@ import { api } from '../api'
 import { Empty, Spinner } from '../modules/kit'
 
 const hours = (value: number | undefined) => Number(value || 0)
-const inEffect = (allocation: any) => {
-  const today = new Date().toISOString().slice(0, 10)
-  return allocation.status === 'active' && (!allocation.effective_from || allocation.effective_from <= today) && (!allocation.effective_to || allocation.effective_to >= today)
-}
 
 export default function FacultyCourses({ go }: { go: (view: string) => void }) {
   const [data, setData] = useState<any>(null)
@@ -16,7 +12,7 @@ export default function FacultyCourses({ go }: { go: (view: string) => void }) {
       .then(([sectionsResponse, allocationsResponse]) => {
         const sections = new Map((sectionsResponse.sections || []).map((section: any) => [section.id, section]))
         const rows = (allocationsResponse.allocations || [])
-          .filter((allocation: any) => inEffect(allocation) && sections.has(allocation.section_id))
+          .filter((allocation: any) => allocation.status === 'active' && sections.has(allocation.section_id))
           .map((allocation: any) => ({ ...allocation, sectionData: sections.get(allocation.section_id) }))
         setData({ rows })
       })
