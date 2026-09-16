@@ -242,10 +242,25 @@ def list_admission_programmes(ctx=Depends(auth), s=Depends(db)):
 @router.get("/admissions/program-intake")
 def admission_program_intake(ctx=Depends(auth), s=Depends(db)):
     _staff(s, ctx, "view_cycle")
-    rows=s.query(D.AdmissionCycleProgram).filter_by(tenant_id=ctx["tenant_id"]).all();out=[]
+    rows = (s.query(D.AdmissionCycleProgram)
+            .filter_by(tenant_id=ctx["tenant_id"])
+            .order_by(D.AdmissionCycleProgram.cycle_id, D.AdmissionCycleProgram.program_id,
+                      D.AdmissionCycleProgram.campus)
+            .all())
+    out = []
     for row in rows:
-        cycle=s.get(D.AdmissionCycle,row.cycle_id);program=s.get(D.Program,row.program_id);dept=s.get(D.Department,program.dept_id) if program else None
-        out.append({"id":row.id,"cycle":cycle.name if cycle else "","academic_year":cycle.academic_year if cycle else "","program":program.name if program else "","department":dept.name if dept else "","campus":row.campus,"intake":row.intake,"active":row.active})
+        cycle = s.get(D.AdmissionCycle, row.cycle_id)
+        program = s.get(D.Program, row.program_id)
+        dept = s.get(D.Department, program.dept_id) if program else None
+        # IDs are supplied with display labels so UI consumers can match a
+        # binding to its cycle without relying on a potentially reused name.
+        out.append({"id": row.id, "cycle_id": row.cycle_id, "program_id": row.program_id,
+                    "cycle": cycle.name if cycle else "", "academic_year": cycle.academic_year if cycle else "",
+                    "program": program.name if program else "", "department": dept.name if dept else "",
+                    "campus": row.campus, "intake": row.intake, "active": row.active,
+                    "application_fee": row.application_fee, "admission_fee": row.admission_fee,
+                    "assessment_mode": row.assessment_mode,
+                    "settings": json.loads(row.settings_json or "{}")})
     return {"program_intake":out}
 
 
@@ -355,6 +370,10 @@ def publish_cycle(cycle_id: str, ctx=Depends(auth), s=Depends(db)):
     if not row or row.tenant_id != ctx["tenant_id"]: raise HTTPException(404, "Admission cycle not found")
     if not row.opens_at or not row.closes_at or row.closes_at < row.opens_at:
         raise HTTPException(422, "A valid application window is required before publishing")
+    if not (s.query(D.AdmissionCycleProgram.id)
+            .filter_by(tenant_id=ctx["tenant_id"], cycle_id=row.id, active=True)
+            .first()):
+        raise HTTPException(422, "Add at least one active programme intake before publishing")
     previous, row.status, row.updated_at = row.status, "PUBLISHED", now_utc()
     s.commit(); write_audit(s, ctx["sub"], ctx["sub"], ctx["office_n"], "admission.cycle.publish", f"admission_cycle:{row.id}", previous, row.status, row.name)
     return {"id": row.id, "status": row.status}
@@ -400,6 +419,47 @@ def configure_cycle_program(cycle_id: str, body: CycleProgramIn, ctx=Depends(aut
     s.commit()
     write_audit(s, ctx["sub"], ctx["sub"], ctx["office_n"], "admission.cycle_program.configure", f"admission_cycle_program:{row.id}", previous, "active" if row.active else "inactive", program.name)
     return {"id": row.id}
+
+
+@router.delete("/admissions/cycles/{cycle_id}/programs/{cycle_program_id}")
+def remove_cycle_program(cycle_id: str, cycle_program_id: str, ctx=Depends(auth), s=Depends(db)):
+    """Remove an unused programme intake from an editable admission cycle.
+
+    Historic admissions and allocation records are never cascaded from this
+    configuration action.  Once a programme intake has been used, it must be
+    retained as an auditable record rather than deleted.
+    """
+    _staff(s, ctx, "manage_cycle")
+    cycle = s.get(D.AdmissionCycle, cycle_id)
+    if not cycle or cycle.tenant_id != ctx["tenant_id"]:
+        raise HTTPException(404, "Admission cycle not found")
+    # A closed cycle may contain unused setup entries that were created in
+    # error. They can be safely removed only after the dependency checks
+    # below. Published cycles remain immutable while applications are open.
+    if cycle.status.upper() == "PUBLISHED":
+        raise HTTPException(409, "Programme intake cannot be removed while a cycle is published")
+    row = s.get(D.AdmissionCycleProgram, cycle_program_id)
+    if not row or row.tenant_id != ctx["tenant_id"] or row.cycle_id != cycle.id:
+        raise HTTPException(404, "Programme intake not found")
+    applications = (s.query(D.Application.id)
+                    .filter_by(tenant_id=ctx["tenant_id"], cycle_program_id=row.id)
+                    .count())
+    if applications:
+        raise HTTPException(409, "Programme intake cannot be removed because applicant records already exist")
+    pools = (s.query(D.AdmissionSeatPool.id)
+             .filter_by(tenant_id=ctx["tenant_id"], cycle_id=cycle.id,
+                        program_id=row.program_id, campus=row.campus)
+             .count())
+    if pools:
+        raise HTTPException(409, "Remove the linked seat pool configuration before removing this programme intake")
+    programme = s.get(D.Program, row.program_id)
+    previous = "active" if row.active else "inactive"
+    programme_label = programme.name if programme else row.program_id
+    s.delete(row)
+    s.commit()
+    write_audit(s, ctx["sub"], ctx["sub"], ctx["office_n"], "admission.cycle_program.delete",
+                f"admission_cycle_program:{cycle_program_id}", previous, "deleted", programme_label)
+    return {"id": cycle_program_id, "decision": {"outcome": "ALLOW", "reason": "Programme intake removed"}}
 
 
 @router.get("/admissions/open-programs")
@@ -1128,13 +1188,19 @@ def class_allocation_options(application_id: str, ctx=Depends(auth), s=Depends(d
     _assert_application_scope(app, ctx)
     preference_ids = [row.program_id for row in s.query(D.ApplicationPreference).filter_by(application_id=app.id).order_by(D.ApplicationPreference.preference_rank).all()]
     if app.selected_program_id and app.selected_program_id not in preference_ids: preference_ids.insert(0, app.selected_program_id)
-    programs = [row for row in s.query(D.Program).filter(D.Program.id.in_(preference_ids)).all()] if preference_ids else []
+    programs = [row for row in s.query(D.Program).filter(D.Program.tenant_id == app.tenant_id,
+                                                          D.Program.id.in_(preference_ids)).all()] if preference_ids else []
     sections = [row for row in s.query(D.Section).filter_by(tenant_id=app.tenant_id).all() if row.dept_id in {program.dept_id for program in programs}]
     cycle = s.get(D.AdmissionCycle, app.cycle_id) if app.cycle_id else None
     campuses = list(dict.fromkeys([value for value in (app.campus, cycle.campus if cycle else "") if value]))
+    setup_required = bool(programs) and not sections
     return {"programmes": [{"id": row.id, "name": row.name, "dept_id": row.dept_id} for row in programs],
             "sections": [{"id": row.id, "code": row.section_code, "dept_id": row.dept_id, "term": row.term} for row in sections],
-            "campuses": campuses}
+            "campuses": campuses,
+            "setup_required": setup_required,
+            "setup_message": ("No class sections exist for the applicant's programme department. "
+                              "Create course offerings and class sections in Academics before completing admission allocation.")
+                             if setup_required else ""}
 
 
 @router.post("/admissions/{application_id}/class-allocation")

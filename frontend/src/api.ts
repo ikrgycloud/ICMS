@@ -606,6 +606,7 @@ export const api = {
   publishAdmissionCycle: (id: string) => req(`/admissions/cycles/${id}/publish`, { method: 'POST' }),
   closeAdmissionCycle: (id: string) => req(`/admissions/cycles/${id}/close`, { method: 'POST' }),
   bindAdmissionProgram: (cycleId: string, body: any) => req(`/admissions/cycles/${cycleId}/programs`, { method: 'POST', body: JSON.stringify(body) }),
+  removeAdmissionProgram: (cycleId: string, cycleProgramId: string) => req(`/admissions/cycles/${cycleId}/programs/${cycleProgramId}`, { method: 'DELETE' }),
   openAdmissionPrograms: () => req('/admissions/open-programs'),
   startApplicantApplication: (body: any) => req('/admissions/applicant/start', { method: 'POST', body: JSON.stringify(body) }),
   applicantSession: () => req('/admissions/applicant/session', { method: 'POST' }),

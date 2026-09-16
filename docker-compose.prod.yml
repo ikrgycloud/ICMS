@@ -36,8 +36,12 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
+      ICMS_ENVIRONMENT: production
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS}
       DEMO_DATA_ENABLED: "false"
-      PROVISION_PAYROLL_DATA: "true"
+      # Production data must be provisioned through approved migrations and
+      # imports, never through development/demo seed routines on container start.
+      PROVISION_PAYROLL_DATA: "false"
 
     depends_on:
       db:

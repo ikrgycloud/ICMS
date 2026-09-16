@@ -1189,6 +1189,7 @@ export default function Admissions({
         <Cycles
           cycles={cycles}
           programmes={programmes}
+          programIntake={programIntake}
           manage={manage}
           setCycle={setCycle}
           binding={binding}
@@ -1204,6 +1205,7 @@ export default function Admissions({
           binding={binding}
           setBinding={setBinding}
           programmes={programmes}
+          programIntake={programIntake}
           save={saveCycle}
           act={act}
           loadCycles={loadCycles}
@@ -1215,6 +1217,7 @@ export default function Admissions({
           setRule={setRule}
           cycles={cycles}
           programmes={programmes}
+          programIntake={programIntake}
           quotas={quotas}
           save={saveRule}
         />
@@ -1659,6 +1662,7 @@ export default function Admissions({
           }}>Complete allocation & send credentials</button></>}
         >
           <p className="hint">This is the final Admission Office decision. Hostel and Transport requests update automatically with these details.</p>
+          {classAllocation.options.setup_required && <div className="calendar-banner warn"><b>Class setup required</b><br />{classAllocation.options.setup_message}</div>}
           <label>Programme preference</label>
           <select className="inp" value={classAllocation.program_id} onChange={(e) => setClassAllocation({ ...classAllocation, program_id: e.target.value, section_id: "" })}>
             <option value="">Select programme</option>
@@ -1674,6 +1678,7 @@ export default function Admissions({
             <option value="">Select section</option>
             {(classAllocation.options.sections || []).filter((section: any) => section.dept_id === (classAllocation.options.programmes || []).find((program: any) => program.id === classAllocation.program_id)?.dept_id).map((section: any) => <option key={section.id} value={section.id}>Section {section.code} · {section.term}</option>)}
           </select>
+          {!classAllocation.options.setup_required && classAllocation.program_id && !(classAllocation.options.sections || []).some((section: any) => section.dept_id === (classAllocation.options.programmes || []).find((program: any) => program.id === classAllocation.program_id)?.dept_id) && <p className="hint">No section is available for the selected programme. Create a section in Academics or choose another eligible programme.</p>}
           <label>Group</label>
           <input className="inp" value={classAllocation.group_name} onChange={(e) => setClassAllocation({ ...classAllocation, group_name: e.target.value })} placeholder="For example: Group 1" />
         </Modal>
@@ -3185,12 +3190,19 @@ function CycleModal({
   binding,
   setBinding,
   programmes,
+  programIntake,
   save,
   act,
   loadCycles,
 }: any) {
   const isNew = !cycle.id;
+  const [pendingRemoval, setPendingRemoval] = useState<any>(null);
+  const cycleProgrammes = (programIntake || []).filter((item: any) =>
+    item.cycle_id ? item.cycle_id === cycle.id : item.cycle === cycle.name,
+  );
+  const canRemoveProgramme = cycle.status !== "PUBLISHED";
   return (
+    <>
     <Modal
       className="admission-cycle-modal"
       title={isNew ? "Create admission cycle" : "Configure admission cycle"}
@@ -3230,6 +3242,12 @@ function CycleModal({
       {cycle.id && (
         <section className="admission-cycle-section admission-cycle-intake-section">
           <div className="admission-cycle-section-head"><div><span>Step 2</span><h4>Add programme intake</h4></div><p>Every programme must be active in this cycle before its quota, fees, and seat pools can be configured.</p></div>
+          <div className="tbl-scroll" style={{ marginBottom: 16 }}>
+            <table className="tbl">
+              <thead><tr><th>Configured programme</th><th>Campus</th><th>Intake</th><th>Application status</th><th /></tr></thead>
+              <tbody>{cycleProgrammes.length ? cycleProgrammes.map((item: any) => <tr key={item.id}><td><b>{item.program}</b><div className="hint">Application fee: {Number(item.application_fee || 0).toLocaleString()} | Admission fee: {Number(item.admission_fee || 0).toLocaleString()}</div></td><td>{item.campus}</td><td>{item.intake}</td><td>{item.active ? "Active" : "Inactive"}</td><td>{canRemoveProgramme && <button className="btn btn-sm btn-rose" type="button" onClick={() => setPendingRemoval(item)}>Remove</button>}</td></tr>) : <tr><td colSpan={5} className="hint">No programme intake has been configured yet.</td></tr>}</tbody>
+            </table>
+          </div>
           <div className="admission-cycle-intake-grid">
             <label className="admission-cycle-field admission-cycle-field-wide"><span>Programme <em>*</em></span><select className="inp" value={binding.program_id || ""} onChange={(e) => setBinding({ ...binding, program_id: e.target.value, campus: cycle.campus, active: true })}><option value="">Select programme</option>{programmes.map((p: any) => <option value={p.id} key={p.id}>{p.code} - {p.name}</option>)}</select></label>
             <label className="admission-cycle-field"><span>Approved intake <em>*</em></span><input className="inp" type="number" min="1" placeholder="e.g. 60" value={binding.intake || ""} onChange={(e) => setBinding({ ...binding, intake: Number(e.target.value), campus: cycle.campus, active: true })} /></label>
@@ -3247,11 +3265,23 @@ function CycleModal({
         </section>
       )}
     </Modal>
+    {pendingRemoval && <Modal title="Remove programme intake" onClose={() => setPendingRemoval(null)} footer={<><button className="btn btn-out" onClick={() => setPendingRemoval(null)}>Cancel</button><button className="btn btn-rose" onClick={() => act(() => api.removeAdmissionProgram(cycle.id, pendingRemoval.id), () => { setPendingRemoval(null); loadCycles(); })}>Remove intake</button></>}><p>Remove <b>{pendingRemoval.program}</b> from this admission cycle?</p><div className="calendar-banner warn"><b>This action cannot be undone.</b><br />Removal is allowed only when this intake has no applicant records and no linked seat pools.</div></Modal>}
+    </>
   );
 }
-function RuleModal({ rule, setRule, cycles, programmes, quotas, save }: any) {
+function RuleModal({ rule, setRule, cycles, programmes, programIntake, quotas, save }: any) {
+  const cycleProgrammes = rule.cycle_id
+    ? (programIntake || []).filter((item: any) => item.cycle_id === rule.cycle_id && item.active)
+    : [];
+  const availableProgrammes = rule.cycle_id
+    ? programmes.filter((programme: any) => cycleProgrammes.some((item: any) => item.program_id === programme.id))
+    : programmes;
+  const canSave = Boolean(rule.cycle_id && (rule.rule_key === "REQUIRED_DOCUMENT"
+    ? String(rule.document_type || "").trim()
+    : String(rule.field || "").trim() && String(rule.value ?? "").trim()));
   return (
     <Modal
+      className="eligibility-rule-modal"
       title={rule.id ? "Edit eligibility rule" : "Create eligibility rule"}
       onClose={() => setRule(null)}
       footer={
@@ -3259,16 +3289,20 @@ function RuleModal({ rule, setRule, cycles, programmes, quotas, save }: any) {
           <button className="btn btn-out" onClick={() => setRule(null)}>
             Cancel
           </button>
-          <button className="btn btn-brass" onClick={save}>
+          <button className="btn btn-brass" disabled={!canSave} title={canSave ? "Save eligibility rule" : "Complete the required rule fields before saving"} onClick={save}>
             Save
           </button>
         </>
       }
     >
+      <div className="admission-cycle-next" style={{ marginBottom: 16 }}>
+        <b>Rule setup</b><span> Define who the rule applies to, then choose the eligibility condition. Mandatory rules apply to every applicant in scope; quota rules apply only to the selected quota.</span>
+      </div>
+      <p className="hint"><b>1. Admission scope</b></p>
       <select
         className="inp"
         value={rule.cycle_id}
-        onChange={(e) => setRule({ ...rule, cycle_id: e.target.value })}
+        onChange={(e) => setRule({ ...rule, cycle_id: e.target.value, program_id: "", quota_code: "" })}
       >
         <option value="">Select cycle</option>
         {cycles.map((c: any) => (
@@ -3283,25 +3317,30 @@ function RuleModal({ rule, setRule, cycles, programmes, quotas, save }: any) {
         onChange={(e) => setRule({ ...rule, program_id: e.target.value })}
       >
         <option value="">All cycle programmes</option>
-        {programmes.map((p: any) => (
+        {availableProgrammes.map((p: any) => (
           <option key={p.id} value={p.id}>
             {p.name}
           </option>
         ))}
       </select>
+      {rule.cycle_id && !availableProgrammes.length && <p className="hint">No active programme intake is configured for this cycle yet. You can still create a cycle-wide rule.</p>}
+      <p className="hint"><b>2. Eligibility condition</b></p>
       <select
         className="inp"
         value={rule.rule_key}
-        onChange={(e) => setRule({ ...rule, rule_key: e.target.value })}
+        onChange={(e) => {
+          const ruleKey = e.target.value;
+          setRule({ ...rule, rule_key: ruleKey, operator: ruleKey === "MINIMUM_VALUE" ? ">=" : ruleKey === "MAXIMUM_VALUE" ? "<=" : "==", field: ruleKey === "REQUIRED_DOCUMENT" ? "" : rule.field });
+        }}
       >
         {[
-          "FIELD_COMPARISON",
-          "MINIMUM_VALUE",
-          "MAXIMUM_VALUE",
-          "EQUALS",
-          "REQUIRED_DOCUMENT",
-        ].map((x) => (
-          <option key={x}>{x}</option>
+          ["MINIMUM_VALUE", "Minimum value (for example, percentage)"],
+          ["MAXIMUM_VALUE", "Maximum value"],
+          ["EQUALS", "Exact value match"],
+          ["FIELD_COMPARISON", "Custom field comparison"],
+          ["REQUIRED_DOCUMENT", "Required verified document"],
+        ].map(([value, label]) => (
+          <option key={value} value={value}>{label}</option>
         ))}
       </select>
       {rule.rule_key === "REQUIRED_DOCUMENT" ? (
@@ -3359,10 +3398,17 @@ function RuleModal({ rule, setRule, cycles, programmes, quotas, save }: any) {
         <>
           <input
             className="inp"
-            placeholder="Persisted profile field"
+            list="admission-profile-fields"
+            placeholder="Choose or enter an applicant profile field"
             value={rule.field}
             onChange={(e) => setRule({ ...rule, field: e.target.value })}
           />
+          <datalist id="admission-profile-fields">
+            <option value="qualifying_percentage">Qualifying percentage</option>
+            <option value="category">Applicant category</option>
+            <option value="board">Qualifying board</option>
+            <option value="sports_category">Sports category</option>
+          </datalist>
           <select
             className="inp"
             value={rule.operator}
@@ -3374,7 +3420,9 @@ function RuleModal({ rule, setRule, cycles, programmes, quotas, save }: any) {
           </select>
           <input
             className="inp"
-            placeholder="Configured value"
+            type={["MINIMUM_VALUE", "MAXIMUM_VALUE"].includes(rule.rule_key) ? "number" : "text"}
+            step={["MINIMUM_VALUE", "MAXIMUM_VALUE"].includes(rule.rule_key) ? "any" : undefined}
+            placeholder={["MINIMUM_VALUE", "MAXIMUM_VALUE"].includes(rule.rule_key) ? "Enter threshold value" : "Enter required value"}
             value={rule.value}
             onChange={(e) => setRule({ ...rule, value: e.target.value })}
           />
@@ -3394,6 +3442,7 @@ function RuleModal({ rule, setRule, cycles, programmes, quotas, save }: any) {
             </option>
           ))}
       </select>
+      <p className="hint"><b>3. Application</b> {rule.quota_code ? "This rule applies only to the selected quota." : "This is a mandatory rule for every applicant in the selected scope."}</p>
       <label>
         <input
           type="checkbox"

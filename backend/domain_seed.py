@@ -3829,6 +3829,10 @@ def _seed_admissions_phase2(s):
         return
     now = datetime.utcnow()
     published = s.query(D.AdmissionCycle).filter(D.AdmissionCycle.id == "adm_cycle_phase2_published").first()
+    # Seed data is a bootstrap aid, not a reconciliation authority.  Once an
+    # admissions fixture exists, an administrator's later removal of an unused
+    # programme intake must survive backend restarts.
+    bootstrap_admissions = published is None
     if not published:
         published = D.AdmissionCycle(id="adm_cycle_phase2_published", tenant_id=TENANT,
             code="ADM-PH2-OPEN", name="Undergraduate Admissions", academic_year=f"{now.year}-{str(now.year + 1)[-2:]}",
@@ -3841,9 +3845,9 @@ def _seed_admissions_phase2(s):
             name="Next Admissions Cycle", academic_year=f"{now.year + 1}-{str(now.year + 2)[-2:]}",
             campus=CAMPUS_SCOPES[0], status="DRAFT", configuration_json="{}"))
     s.flush()
-    for index, program in enumerate(programs):
-        binding_id = f"adm_cycle_program_phase2_{index + 1}"
-        if not s.get(D.AdmissionCycleProgram, binding_id):
+    if bootstrap_admissions:
+        for index, program in enumerate(programs):
+            binding_id = f"adm_cycle_program_phase2_{index + 1}"
             s.add(D.AdmissionCycleProgram(id=binding_id, tenant_id=TENANT, cycle_id=published.id,
                 program_id=program.id, campus=CAMPUS_SCOPES[0], application_fee=1000, admission_fee=75000,
                 intake=60, assessment_mode="merit", active=True, settings_json='{"entrance_required": false, "counselling_required": false}'))
