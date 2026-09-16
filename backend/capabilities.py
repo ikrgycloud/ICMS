@@ -280,7 +280,10 @@ ACTION_OFFICE_ALLOW = {
     ("admissions", "withdraw"): {15},
     ("finance", "create_invoice"): {22, 23},
     ("finance", "record_payment"): {22, 23},
-    ("finance", "waive"): {4, 22, 23},                 # Principal/CFO, Finance, Accounts
+    # A Principal decides a submitted waiver in the approval workflow; it must
+    # never be able to apply a waiver directly to an invoice.  Accounts also
+    # executes financial postings rather than authorising the waiver itself.
+    ("finance", "waive"): {22},
     ("finance", "approve_budget"): {1, 2, 3, 4, 22, 40},
     ("hr", "post_job"): {24, 25, 26},
     ("hr", "approve_leave"): {10, 24, 26},             # HOD, HR Mgr, Admin Mgr

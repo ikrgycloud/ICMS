@@ -34,6 +34,7 @@ import Admissions from './modules/Admissions'
 import Finance, { PrincipalFinance } from './modules/Finance'
 import Library from './modules/Library'
 import HR from './modules/HR'
+import PrincipalRecruitment from './modules/PrincipalRecruitment'
 import FacultyStaff from './modules/FacultyStaff'
 import Assets from './modules/Assets'
 import Hostel from './modules/Hostel'
@@ -85,6 +86,8 @@ import SpecialistQueue from './modules/SpecialistQueue'
 import { PageHead } from './modules/kit'
 import AccountantReport from './modules/AccountantReport'
 import PrincipalDashboard from './modules/PrincipalDashboard'
+import ViceChairmanCampusReports from './modules/ViceChairmanCampusReports'
+import { CampusHeadApprovals, CampusHeadDashboard, CampusHeadEscalations, CampusHeadOperationalPlan, CampusHeadReports, CampusProfile, DepartmentsPrograms, LeadershipTeam, CampusOverview, InfrastructureOverview, CampusRiskWorkspace } from './modules/CampusHeadPortal'
 import PrincipalAtRisk from './modules/PrincipalAtRisk'
 import PrincipalCompliance from './modules/PrincipalCompliance'
 import PrincipalExaminations from './modules/PrincipalExaminations'
@@ -166,6 +169,28 @@ const PRINCIPAL_NAV = [
   ['Reference', 'Directory', 'directory'], ['Reference', 'Authority & Permissions', 'permissions'],
 ] as const
 
+const CAMPUS_HEAD_NAV = [
+  ['OVERVIEW', 'Dashboard', 'overview'],
+  ['CAMPUS MANAGEMENT', 'Campus Profile', 'campus_profile'],
+  ['CAMPUS MANAGEMENT', 'Branch Operational Plan', 'branch_operational_plan'],
+  ['CAMPUS MANAGEMENT', 'Departments & Programs', 'departments_programs'],
+  ['CAMPUS MANAGEMENT', 'Leadership Team', 'leadership_team'],
+  ['CAMPUS MANAGEMENT', 'Campus Calendar', 'calendar'],
+  ['PERFORMANCE', 'Campus Overview', 'campus_overview'],
+  ['PERFORMANCE', 'Finance', 'finance'],
+  ['PERFORMANCE', 'Infrastructure', 'infrastructure'],
+  ['PERFORMANCE', 'Placements', 'placements'],
+  ['PERFORMANCE', 'Risk & Issues', 'risk_issues'],
+  ['AUTHORITY', 'My Approvals', 'campus_head_approvals'],
+  ['AUTHORITY', 'Delegation', 'delegation'],
+  ['AUTHORITY', 'My Requests', 'my_requests'],
+  ['AUTHORITY', 'Escalations', 'escalations'],
+  ['REPORTS', 'Reports & Analytics', 'analytics'],
+  ['REPORTS', 'Audit Trail', 'audit'],
+  ['REFERENCE', 'Directory', 'directory'],
+  ['REFERENCE', 'Policy Repository', 'policy_repository'],
+] as const
+
 // Faculty offices share the same functional modules, but need the focused
 // teaching workspace described by the Professor Office information layout.
 // A link is only interactive when its backing module is authorised.
@@ -182,7 +207,7 @@ const FACULTY_NAV = [
 const COORDINATOR_NAV = [
   ['Workspace', 'Overview', 'overview'],
   ['Academic planning', 'Academic Calendar', 'academic_calendar'], ['Academic planning', 'Curriculum Execution', 'curriculum'],
-  ['Academic planning', 'Academic Rollover', 'rollover'],
+  ['End-of-term operations', 'Student Progression & Rollover', 'rollover'],
   ['scheduling', 'Course Offerings', 'coordinator_course_offerings'], ['scheduling', 'Sections & Timetable', 'coordinator_sections'], ['scheduling', 'Faculty Allocation', 'source_allocation'], ['scheduling', 'Conflict Center', 'coordinator_conflicts'],
   ['scheduling', 'Timetable Changes', 'timetable_changes'],
   ['coordination', 'Academic Notices', 'coordinator_notices'],
@@ -238,6 +263,7 @@ const ADMISSION_MANAGER_TAB: Record<string, string> = {
 export default function App({ onLogout }: { onLogout: () => void }) {
   const [user, setUser] = useState<any>(getUser())
   const [ws, setWs] = useState<any>(null)
+  const [identityReady, setIdentityReady] = useState(false)
   const [view, setView] = useState(() => {
     const currentUser = getUser()
     if (currentUser?.office_n === 31) return 'transport'
@@ -276,7 +302,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
       if ([10, 17].includes(nextUser?.office_n) && window.location.hash && window.location.hash !== '#overview') {
         window.location.hash = 'overview'
       }
-    }).catch(() => {})
+    }).catch(() => {}).finally(() => setIdentityReady(true))
     loadWs()
     loadNotifs()
     loadApprovalCount()
@@ -313,6 +339,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
       // they are not returned as generic workspace modules by the API.
       || (user?.office_n === 6 && ['courses_subjects', 'decision_inbox', 'dean_programs', 'dean_academic_operations', 'dean_academic_quality', 'dean_timetable', 'dean_allocation', 'dean_risk', 'dean_committees', 'dean_corrective', 'dean_outcomes', 'dean_planning', 'dean_reports', 'analytics'].includes(view))
       || ([10, 17].includes(user?.office_n) && view === 'source_allocation')
+      || (user?.office_n === 10 && view === 'rollover')
       || (user?.office_n === 10 && view === 'hod_course_offerings')
       || (user?.office_n === 10 && view === 'hod_timetable_review')
       || (user?.office_n === 5 && view === 'vp_academic_approvals')
@@ -320,6 +347,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
       || ([5, 6, 10, 17].includes(user?.office_n) && view === 'timetable_changes')
       || (user?.office_n === 7 && view.startsWith('administration_'))
       || (user?.office_n === 4 && PRINCIPAL_NAV.some(([, , key]) => key === view))
+      || (user?.office_n === 3 && CAMPUS_HEAD_NAV.some(([, , key]) => key === view))
       || (user?.persona === 'faculty' && FACULTY_NAV.some(([, , key]) => key === view))
       || (user?.persona && !['student', 'parent', 'faculty'].includes(user.persona) && view === 'my_payroll')
       || (user?.office_n === 23 && ['finance_fees', 'finance_payments', 'finance_students', 'finance_payroll'].includes(view))
@@ -406,6 +434,11 @@ export default function App({ onLogout }: { onLogout: () => void }) {
       if (Number(user?.office_n) === 10 && !modules.some((module: any) => module.key === 'hod_timetable_review')) {
         modules.push({ key: 'hod_timetable_review', label: 'Sections & Timetable', group: 'Academics', enabled: true })
       }
+      // Progression is a departmental HOD review duty.  The API has always
+      // enforced the scope; provide the matching production entry point.
+      if (Number(user?.office_n) === 10 && !modules.some((module: any) => module.key === 'rollover')) {
+        modules.push({ key: 'rollover', label: 'Student Progression & Rollover', group: 'End-of-term operations', enabled: true })
+      }
       if (Number(user?.office_n) === 5 && !modules.some((module: any) => module.key === 'vp_academic_approvals')) {
         modules.push({ key: 'vp_academic_approvals', label: 'Academic Approvals', group: 'Authority', enabled: true })
       }
@@ -417,7 +450,10 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     [rawModules, user],
   )
 
-  if (!user || !ws) {
+  // Never render role-specific screens from cached browser state.  This is
+  // particularly important after role switching: a stale Principal shell
+  // would otherwise call Principal-only endpoints using a different token.
+  if (!identityReady || !user || !ws) {
     return <div className="center-load"><div className="spinner" /></div>
   }
 
@@ -427,6 +463,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
 
   const color = LEVEL_COLORS[user.level] || '#c9a24a'
   const chairmanShell = user.office_n === 1
+  const campusHeadShell = user.office_n === 3
   const principalShell = user.office_n === 4
   const deanAcademicsShell = user.office_n === 6
   const deanAdministrationShell = user.office_n === 7
@@ -439,7 +476,13 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const admissionsOperationsShell = directorAdmissionsShell || admissionManagerShell
   const admissionOfficeSingleRole = user.office_n === 15
   const coordinatorShell = user.office_n === 17
-  const sidebarModules = transportOfficeShell
+  const campusHeadModules = CAMPUS_HEAD_NAV.map(([group, label, key]) => {
+    const source = displayModules.find((module: any) => module.key === key)
+    return { key, label, group, actions: source?.actions || {}, enabled: true }
+  })
+  const sidebarModules = campusHeadShell
+    ? campusHeadModules
+    : transportOfficeShell
     ? displayModules.filter((module: any) => !['Academics', 'Reference', 'Authority', 'Workspace'].includes(module.group))
     : displayModules
   const groups: Record<string, any[]> = {}
@@ -514,16 +557,16 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     || (moduleKey === 'dean_academic_quality' && view === 'dean_risk')
 
   return (
-    <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''} ${facultyShell ? 'faculty-shell' : ''} ${deanAcademicsShell ? 'dean-academics-shell' : ''} ${deanAdministrationShell ? 'dean-administration-shell' : ''} ${directorAdmissionsShell ? 'director-admissions-shell' : ''} ${admissionManagerShell ? 'admission-manager-shell' : ''}`}>
+    <div className={`app ${chairmanShell ? 'chairman-shell' : ''} ${principalShell ? 'principal-shell' : ''} ${campusHeadShell ? 'campus-head-shell' : ''} ${facultyShell ? 'faculty-shell' : ''} ${deanAcademicsShell ? 'dean-academics-shell' : ''} ${deanAdministrationShell ? 'dean-administration-shell' : ''} ${directorAdmissionsShell ? 'director-admissions-shell' : ''} ${admissionManagerShell ? 'admission-manager-shell' : ''}`}>
       <aside className={`sidebar ${sideOpen ? 'open' : ''}`}>
         <div className="brand">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {campusHeadShell ? <div className="campus-head-brand">CAMPUS HEAD PORTAL</div> : <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <div className="seal">IC</div>
             <div>
               <div className="brand-name">ICMS</div>
-              <div className="brand-sub">{principalShell ? (user.office_n === 3 ? 'Campus Head Portal' : 'Principal Portal') : directorAdmissionsShell ? 'Admissions Directorate' : admissionManagerShell ? 'Admissions Operations' : facultyShell ? 'University Group' : 'University Group'}</div>
+              <div className="brand-sub">{principalShell ? 'Principal Portal' : directorAdmissionsShell ? 'Admissions Directorate' : admissionManagerShell ? 'Admissions Operations' : facultyShell ? 'University Group' : 'University Group'}</div>
             </div>
-          </div>
+          </div>}
         </div>
 
         <div className="office-tag" style={{ ['--oc' as any]: color }}>
@@ -700,6 +743,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'program_proposals':
       return <DeanPrograms />
     case 'overview':
+      if (user.office_n === 3) return <CampusHeadDashboard user={user} go={go} />
       if (user.office_n === 4) return <PrincipalDashboard user={user} go={go} />
       if (user.office_n === 6) return <DeanAcademicsDashboard go={go} />
       if (user.office_n === 7) return <DeanAdministration mode="dashboard" />
@@ -713,6 +757,20 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'calendar':
       if (user.persona === 'student') return <StudentCalendarView user={user} go={go} />
       return <Calendar user={user} caps={caps} />
+    case 'campus_profile':
+      return user.office_n === 3 ? <CampusProfile /> : <div className="empty">Campus Profile is not available for this role.</div>
+    case 'branch_operational_plan':
+      return user.office_n === 3 ? <CampusHeadOperationalPlan user={user} onChange={onChange} /> : <div className="empty">Branch Operational Plan is not available for this role.</div>
+    case 'departments_programs':
+      return user.office_n === 3 ? <DepartmentsPrograms /> : <div className="empty">Departments &amp; Programs is not available for this role.</div>
+    case 'leadership_team':
+      return user.office_n === 3 ? <LeadershipTeam /> : <div className="empty">Leadership Team is not available for this role.</div>
+    case 'campus_overview':
+      return user.office_n === 3 ? <CampusOverview /> : <div className="empty">Campus Overview is not available for this role.</div>
+    case 'infrastructure':
+      return user.office_n === 3 ? <InfrastructureOverview /> : <div className="empty">Infrastructure is not available for this role.</div>
+    case 'risk_issues':
+      return user.office_n === 3 ? <CampusRiskWorkspace /> : <div className="empty">Risk &amp; Issues is not available for this role.</div>
     case 'my_schedule':
       if (user.persona === 'faculty') return <FacultySchedule user={user} go={go} />
       return <MySchedule user={user} go={go} />
@@ -727,6 +785,8 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'integrations':
       return <Integrations caps={caps} />
     case 'analytics':
+      if (user.office_n === 3) return <CampusHeadReports />
+      if (user.office_n === 2) return <ViceChairmanCampusReports />
       return <Analytics user={user} go={go} />
     case 'students':
       if (user.persona === 'student') return <StudentHome user={user} go={go} />
@@ -843,7 +903,8 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'finance':
       if (user.persona === 'student') return <StudentFeesView />
       if (user.persona === 'parent') return <ParentHome user={user} />
-      if (user.office_n === 4) return <PrincipalFinance caps={caps} />
+      if (user.office_n === 3) return <Finance caps={caps} user={user} onOpenApprovals={() => go('approvals')} readOnly />
+      if (user.office_n === 4) return <PrincipalFinance onOpenApprovals={() => go('approvals')} />
       return <Finance caps={caps} user={user} onOpenApprovals={() => go('approvals')} />
     case 'accountant_report':
       return user.office_n === 23 ? <AccountantReport /> : <Analytics user={user} go={go} />
@@ -872,7 +933,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       if (user.persona === 'student') return <StudentRegistration />
       return <FacultyConditionalView kind="registrations" />
     case 'recruitment':
-      return <HR caps={caps} initialTab="jobs" />
+      return user.office_n === 4 ? <PrincipalRecruitment /> : <HR caps={caps} user={user} initialTab="jobs" />
     case 'procurement':
       if (user.office_n === 32) return <SpecialistQueue title="Procurement Requisitions" />
       return <Procurement caps={caps} />
@@ -921,13 +982,19 @@ function ModuleView({ view, module, user, onChange, go }: any) {
         : user.office_n === 4
           ? <PrincipalApprovals user={user} onChange={onChange} />
         : <Workflows user={user} onChange={onChange} />
+    case 'campus_head_approvals':
+      return user.office_n === 3
+        ? <CampusHeadApprovals user={user} onChange={onChange} />
+        : <div className="empty">Campus Head approvals are not available for this role.</div>
     case 'workflows':
       return user.office_n === 4 ? <PrincipalWorkflows user={user} onChange={onChange} /> : user.office_n === 6 ? <MyRequests go={go} /> : <Workflows user={user} onChange={onChange} />
+    case 'my_requests':
+      return user.office_n === 3 ? <Workflows user={user} onChange={onChange} initialTab="mine" /> : <div className="empty">My Requests is not available for this role.</div>
     case 'principal_approval_history':
     case 'approval_history':
       return user.office_n === 4 ? <ApprovalHistory /> : <div className="empty">This Principal workspace is not available for this role.</div>
     case 'escalations':
-      return user.office_n === 4 ? <Escalations /> : <div className="empty">This Principal workspace is not available for this role.</div>
+      return user.office_n === 4 ? <Escalations /> : user.office_n === 3 ? <CampusHeadEscalations /> : <div className="empty">Escalations are not available for this role.</div>
     case 'compliance':
       return user.office_n === 4 ? <PrincipalCompliance go={go} /> : <div className="empty">This Principal workspace is not available for this role.</div>
     case 'principal_escalations':
@@ -938,6 +1005,8 @@ function ModuleView({ view, module, user, onChange, go }: any) {
       return <AuditView principal={user.office_n === 4} />
     case 'directory':
       return <Directory user={user} />
+    case 'policy_repository':
+      return user.office_n === 3 ? <Matrices /> : <div className="empty">Policy Repository is not available for this role.</div>
     case 'my_profile':
       return user.persona === 'faculty' ? <FacultyProfile /> : <div className="empty">My Profile is not available for this role.</div>
     case 'matrices':
@@ -1016,6 +1085,20 @@ function NavGlyph({ moduleKey, label }: { moduleKey: string, label?: string }) {
     'Overview': HiOutlineSquares2X2,
     'Principal': HiOutlineHome,
     'Dashboard': HiOutlineSquares2X2,
+    // Campus / Branch Head portal. Keep these explicit instead of relying on
+    // backing module keys: several of these screens deliberately reuse a
+    // generic module but must remain visually distinguishable in the sidebar.
+    'Campus Profile': HiOutlineBuildingOffice2,
+    'Branch Operational Plan': HiOutlineClipboardDocumentList,
+    'Departments & Programs': HiOutlineAcademicCap,
+    'Leadership Team': HiOutlineUserGroup,
+    'Campus Calendar': HiOutlineCalendarDays,
+    'Campus Overview': HiOutlinePresentationChartLine,
+    'Infrastructure': HiOutlineWrenchScrewdriver,
+    'Placements': HiOutlineBriefcase,
+    'Risk & Issues': HiOutlineExclamationTriangle,
+    'Audit Trail': HiOutlineShieldCheck,
+    'Policy Repository': HiOutlineFolder,
     'My Schedule': HiOutlineCalendarDays,
     'Messages': HiOutlineEnvelope,
     'Announcements': HiOutlineMegaphone,
@@ -1125,6 +1208,11 @@ function NavGlyph({ moduleKey, label }: { moduleKey: string, label?: string }) {
     frontdesk_helpdesk: HiOutlineLifebuoy, frontdesk_calls: HiOutlineChatBubbleLeftRight,
     frontdesk_directory: HiOutlineUserGroup, frontdesk_delegations: HiOutlineUsers,
     overview: HiOutlineHome, calendar: HiOutlineCalendarDays, academic_calendar: HiOutlineCalendarDays,
+    campus_profile: HiOutlineBuildingOffice2, branch_operational_plan: HiOutlineClipboardDocumentList,
+    departments_programs: HiOutlineAcademicCap, leadership_team: HiOutlineUserGroup,
+    campus_overview: HiOutlinePresentationChartLine, infrastructure: HiOutlineWrenchScrewdriver,
+    risk_issues: HiOutlineExclamationTriangle, campus_head_approvals: HiOutlineCheckBadge,
+    my_requests: HiOutlineInbox, policy_repository: HiOutlineFolder,
     governance: HiOutlineBuildingLibrary, approvals: HiOutlineCheckBadge, delegation: HiOutlineUsers,
     audit: HiOutlineShieldCheck, directory: HiOutlineUserGroup, finance: HiOutlineBanknotes,
     analytics: HiOutlinePresentationChartLine, hr: HiOutlineUsers, integrations: HiOutlineCog6Tooth,

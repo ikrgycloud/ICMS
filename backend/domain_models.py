@@ -256,6 +256,9 @@ class Student(Base):
     program_id = Column(String, ForeignKey("programs.id"))
     dept_id = Column(String, ForeignKey("departments.id"))
     campus = Column(String, default="Main Campus")
+    # Canonical campus ownership.  The legacy campus label is retained for
+    # compatibility, but campus-leadership reads must use this stable scope id.
+    campus_scope_id = Column(String, ForeignKey("org_scopes.id"), nullable=True, index=True)
     batch = Column(String)             # 2023
     semester = Column(Integer, default=1)
     section = Column(String, default="A")
@@ -1181,6 +1184,26 @@ class FinanceAdjustment(Base):
     reviewed_at = Column(DateTime, nullable=True)
 
 
+class FeeWaiverRequest(Base):
+    """A controlled fee waiver recommendation and its Accounts execution trail."""
+    __tablename__ = "fee_waiver_requests"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True)
+    invoice_id = Column(String, ForeignKey("fee_invoices.id"), index=True, nullable=False)
+    student_id = Column(String, ForeignKey("students.id"), index=True, nullable=False)
+    amount = Column(Float, default=0, nullable=False)
+    reason = Column(Text, default="", nullable=False)
+    status = Column(String, default="pending_principal_approval", index=True)
+    workflow_id = Column(String, ForeignKey("workflow_instances.id"), unique=True, index=True)
+    requested_by = Column(String, default="", nullable=False)
+    decided_by = Column(String, default="")
+    executed_by = Column(String, default="")
+    decision_remarks = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    decided_at = Column(DateTime, nullable=True)
+    executed_at = Column(DateTime, nullable=True)
+
+
 class FinanceReconciliation(Base):
     __tablename__ = "finance_reconciliations"
     id = Column(String, primary_key=True)
@@ -1577,6 +1600,7 @@ class BudgetLine(Base):
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
     campus = Column(String, default="Main Campus")
+    campus_scope_id = Column(String, ForeignKey("org_scopes.id"), nullable=True, index=True)
     category = Column(String)          # Salaries / Infrastructure / Labs ...
     allocated = Column(Float, default=0)
     spent = Column(Float, default=0)
@@ -1908,6 +1932,101 @@ class ComplianceRequirement(Base):
     created_by = Column(String, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class RiskRecord(Base):
+    """Campus Head risk register; every row is bound to one campus scope."""
+    __tablename__ = "risk_records"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True, nullable=False)
+    campus_scope_id = Column(String, ForeignKey("org_scopes.id"), index=True, nullable=False)
+    created_by = Column(String, index=True, nullable=False)
+    owner_id = Column(String, index=True, nullable=True)
+    category = Column(String, index=True, nullable=False)
+    title = Column(String, nullable=False)
+    description = Column(Text, default="")
+    severity = Column(String, index=True, nullable=False)
+    likelihood = Column(String, nullable=False)
+    impact = Column(String, nullable=False)
+    priority = Column(String, index=True, nullable=False)
+    status = Column(String, index=True, default="OPEN")
+    source_type = Column(String, default="manual")
+    source_ref = Column(String, default="")
+    due_at = Column(DateTime, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+    resolution_notes = Column(Text, default="")
+    escalated_at = Column(DateTime, nullable=True)
+    escalated_by = Column(String, nullable=True)
+    escalation_destination = Column(String, default="")
+    escalation_reason = Column(Text, default="")
+    escalation_workflow_id = Column(String, nullable=True)
+    version_no = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class RiskCorrectiveAction(Base):
+    """A corrective action is independently tracked beneath one campus risk."""
+    __tablename__ = "risk_corrective_actions"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True, nullable=False)
+    risk_id = Column(String, ForeignKey("risk_records.id"), index=True, nullable=False)
+    owner_id = Column(String, index=True, nullable=True)
+    description = Column(Text, nullable=False)
+    due_at = Column(DateTime, nullable=True)
+    status = Column(String, index=True, default="OPEN")
+    completion_note = Column(Text, default="")
+    completed_at = Column(DateTime, nullable=True)
+    verified_at = Column(DateTime, nullable=True)
+    verified_by = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CampusReport(Base):
+    __tablename__ = "campus_reports"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True, nullable=False)
+    campus_scope_id = Column(String, ForeignKey("org_scopes.id"), index=True, nullable=False)
+    created_by = Column(String, index=True, nullable=False)
+    report_type = Column(String, index=True, nullable=False)
+    period_start = Column(Date, nullable=False)
+    period_end = Column(Date, nullable=False)
+    title = Column(String, nullable=False)
+    status = Column(String, index=True, default="DRAFT")
+    version = Column(Integer, nullable=False, default=1)
+    submitted_at = Column(DateTime, nullable=True)
+    returned_at = Column(DateTime, nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    vc_feedback = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CampusReportSnapshot(Base):
+    __tablename__ = "campus_report_snapshots"
+    id = Column(String, primary_key=True)
+    report_id = Column(String, ForeignKey("campus_reports.id"), index=True, nullable=False)
+    version = Column(Integer, nullable=False)
+    snapshot_payload = Column(Text, default="{}")
+    source_as_of = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CampusReportDecision(Base):
+    """An immutable executive decision against one submitted report version."""
+    __tablename__ = "campus_report_decisions"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True, nullable=False)
+    report_id = Column(String, ForeignKey("campus_reports.id"), index=True, nullable=False)
+    report_version = Column(Integer, nullable=False)
+    action = Column(String, nullable=False)
+    actor_id = Column(String, index=True, nullable=False)
+    actor_name = Column(String, nullable=False)
+    actor_office_n = Column(Integer, nullable=False)
+    reason = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class EscalationRecord(Base):
@@ -2410,6 +2529,7 @@ class TransportRoute(Base):
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
     name = Column(String)
+    route_code = Column(String, default="", index=True)
     stops = Column(String, default="")
     vehicle_no = Column(String, default="")
     seats = Column(Integer, default=40)
@@ -2532,6 +2652,7 @@ class Asset(Base):
     __tablename__ = "assets"
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
+    campus_scope_id = Column(String, ForeignKey("org_scopes.id"), nullable=True, index=True)
     tag = Column(String)
     name = Column(String)
     category = Column(String, default="")
@@ -2631,6 +2752,7 @@ class PlacementDrive(Base):
     __tablename__ = "placement_drives"
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
+    campus_scope_id = Column(String, ForeignKey("org_scopes.id"), nullable=True, index=True)
     company = Column(String)
     role = Column(String, default="")
     ctc = Column(Float, default=0)           # in LPA

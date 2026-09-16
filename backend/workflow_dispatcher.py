@@ -6,6 +6,7 @@ import domain_models as D
 import specialist_models as S
 from administration_jobs import emit_outbox
 from fastapi import HTTPException
+from core import uid
 
 
 def _event(s, wf, recipient, title, body, key, severity="info"):
@@ -21,6 +22,25 @@ def apply_decision(s, wf, action, actor_id, actor_name):
     """
     if action not in {"approve", "reject", "return"}:
         return
+    if wf.source_type == "campus_escalation":
+        row = (s.query(D.EscalationRecord)
+               .filter(D.EscalationRecord.id == wf.source_id, D.EscalationRecord.tenant_id == wf.tenant_id)
+               .with_for_update().first())
+        if not row:
+            raise HTTPException(409, "Campus escalation source record is missing")
+        previous = row.status
+        row.status = {"approve": "RECEIVED", "return": "FOLLOW_UP", "reject": "CLOSED"}[action]
+        if action == "approve":
+            row.received_by = actor_id
+        elif action == "reject":
+            row.resolved_by = actor_id
+        s.add(D.EscalationEvent(id=uid(), tenant_id=wf.tenant_id, escalation_id=row.id,
+                                 actor_id=actor_id,
+                                 event_type={"approve": "ACKNOWLEDGED", "return": "RETURNED", "reject": "CLOSED"}[action],
+                                 reason="", previous_status=previous, new_status=row.status))
+        _event(s, wf, wf.initiator_id, f"Campus escalation {row.status.lower()}",
+               wf.title, f"workflow:{wf.id}:{action}", "action" if action == "return" else "info")
+        return
     if wf.process_key == "fee_structure":
         structure = s.query(D.FeeStructure).filter(D.FeeStructure.workflow_id == wf.id).with_for_update().first()
         if structure:
@@ -28,6 +48,27 @@ def apply_decision(s, wf, action, actor_id, actor_name):
             structure.updated_by = actor_id
             structure.updated_at = datetime.utcnow()
             _event(s, wf, wf.initiator_id, f"Fee structure {structure.status.lower()}", wf.title, f"workflow:{wf.id}:{action}")
+        return
+    if wf.source_type == "fee_waiver_request":
+        row = (s.query(D.FeeWaiverRequest)
+               .filter(D.FeeWaiverRequest.id == wf.source_id,
+                       D.FeeWaiverRequest.tenant_id == wf.tenant_id)
+               .with_for_update().first())
+        if not row:
+            raise HTTPException(409, "Fee waiver source record is missing")
+        row.status = {
+            "approve": "approved_pending_accounts",
+            "reject": "rejected",
+            "return": "returned_to_finance",
+        }[action]
+        row.decided_by = actor_id
+        row.decided_at = datetime.utcnow()
+        _event(s, wf, row.requested_by, f"Fee waiver {row.status.replace('_', ' ')}",
+               wf.title, f"workflow:{wf.id}:{action}", "action" if action == "approve" else "info")
+        if action == "approve":
+            _event(s, wf, "office:23", "Fee waiver ready for Accounts execution",
+                   f"{wf.title}; waiver request {row.id} is approved.",
+                   f"fee-waiver:{row.id}:accounts", "action")
         return
     if wf.source_type == "application":
         from admissions_service import transition_application
@@ -57,7 +98,7 @@ def apply_decision(s, wf, action, actor_id, actor_name):
         _event(s, wf, student.user_id or wf.initiator_id, f"Course registration {action}d", wf.title, f"workflow:{wf.id}:{action}")
         return
     if not wf.source_type or not wf.source_id:
-        if wf.process_key in {"attendance_condonation", "disciplinary_action", "purchase_request", "recruitment"}:
+        if wf.process_key in {"attendance_condonation", "disciplinary_action", "purchase_request", "recruitment", "infrastructure_capex"}:
             raise HTTPException(409, f"{wf.process_key} workflow has no source-domain reference")
         return
     if wf.source_type == "complaint":

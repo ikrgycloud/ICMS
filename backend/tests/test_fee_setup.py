@@ -28,6 +28,7 @@ class FeeSetupTests(unittest.TestCase):
         cls.code = f"TEST-FEE-SETUP-{cls.version}"
         cls.db = SessionLocal()
         cls.finance_token = cls._login("finance_manager")
+        cls.accounts_token = cls._login("accounts")
         cls.student_token = cls._login("student")
 
     @classmethod
@@ -173,7 +174,8 @@ class FeeSetupTests(unittest.TestCase):
         invoice = next((item for item in invoices.get("invoices", []) if float(item.get("paid", 0)) > 0), None)
         self.assertIsNotNone(invoice, invoices)
 
-        status, refund = self._request("POST", "/api/finance/refunds", self.finance_token, {
+        # Accounts initiates and executes refunds; Finance Manager decides.
+        status, refund = self._request("POST", "/api/finance/refunds", self.accounts_token, {
             "invoice_id": invoice["id"],
             "amount": 1,
             "reason": "Test refund request"
@@ -189,7 +191,7 @@ class FeeSetupTests(unittest.TestCase):
         self.assertEqual(status, 200, reviewed)
         self.assertEqual(reviewed.get("refund", {}).get("status"), "approved")
 
-        status, executed = self._request("POST", f"/api/finance/refunds/{refund_id}/execute", self.finance_token)
+        status, executed = self._request("POST", f"/api/finance/refunds/{refund_id}/execute", self.accounts_token)
         self.assertEqual(status, 200, executed)
         self.assertEqual(executed.get("refund", {}).get("status"), "executed")
 

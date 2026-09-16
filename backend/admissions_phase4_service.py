@@ -27,6 +27,58 @@ def _scope(session, app, ctx):
         raise HTTPException(403, "Application is outside your authorized campus")
 
 
+def _latest_merit(session, application_id):
+    """Return the one current merit result for an applicant.
+
+    Legacy data can contain more than one calculated merit row.  New writes are
+    idempotent, while this selector keeps historical rows from affecting live
+    allocation decisions.
+    """
+    return (session.query(D.ApplicationAssessment)
+            .filter_by(application_id=application_id, assessment_type="ACADEMIC_MERIT",
+                       status="CALCULATED")
+            .order_by(D.ApplicationAssessment.verified_at.desc(), D.ApplicationAssessment.id.desc())
+            .first())
+
+
+def _rerank_merit_scope(session, tenant_id, cycle_id, program_id):
+    """Rank one current merit result per applicant within a programme cycle."""
+    rows = (session.query(D.ApplicationAssessment)
+            .join(D.Application, D.Application.id == D.ApplicationAssessment.application_id)
+            .filter(D.Application.tenant_id == tenant_id,
+                    D.Application.cycle_id == cycle_id,
+                    D.Application.selected_program_id == program_id,
+                    D.ApplicationAssessment.assessment_type == "ACADEMIC_MERIT",
+                    D.ApplicationAssessment.status == "CALCULATED")
+            .order_by(D.ApplicationAssessment.verified_at.desc(), D.ApplicationAssessment.id.desc())
+            .all())
+    current = {}
+    for row in rows:
+        current.setdefault(row.application_id, row)
+    for row in rows:
+        if current[row.application_id].id != row.id:
+            row.rank = None
+            row.status = "SUPERSEDED"
+    ranked = sorted(current.values(), key=lambda row: (-(row.merit_score or 0), row.application_id))
+    for rank, row in enumerate(ranked, 1):
+        row.rank = rank
+
+
+def _rerank_merit(session, app):
+    _rerank_merit_scope(session, app.tenant_id, app.cycle_id, app.selected_program_id)
+
+
+def _require_verified_entrance(session, app):
+    if not _settings(session, app).get("entrance_required"):
+        return None
+    row = (session.query(D.ApplicationAssessment)
+           .filter_by(application_id=app.id, assessment_type="ENTRANCE_EXAM", status="VERIFIED")
+           .order_by(D.ApplicationAssessment.verified_at.desc(), D.ApplicationAssessment.id.desc()).first())
+    if not row:
+        raise HTTPException(409, "A verified entrance assessment is required before merit can be calculated")
+    return row
+
+
 def advance_eligible(session, ctx, application_id, expected_version):
     app = session.get(D.Application, application_id)
     if not app: raise HTTPException(404, "Application not found")
@@ -53,7 +105,11 @@ def record_assessment(session, ctx, application_id, body):
     if app.current_status == "ELIGIBLE":
         app = advance_eligible(session, ctx, app.id, app.status_version)
     if app.current_status != "ASSESSMENT_PENDING": raise HTTPException(409, "Assessment is not pending")
-    if body.assessment_type not in {"ENTRANCE_EXAM", "ACADEMIC_MERIT", "OTHER"}: raise HTTPException(422, "Unsupported assessment type")
+    if body.assessment_type not in {"ENTRANCE_EXAM", "OTHER"}: raise HTTPException(422, "Unsupported assessment type")
+    if body.score is None or body.max_score is None or body.max_score <= 0 or body.score < 0 or body.score > body.max_score:
+        raise HTTPException(422, "Score must be between zero and the maximum score")
+    if not (body.source or "").strip():
+        raise HTTPException(422, "An assessment evidence reference is required")
     row = D.ApplicationAssessment(id=uid(), tenant_id=app.tenant_id, application_id=app.id,
         assessment_type=body.assessment_type, score=body.score, max_score=body.max_score,
         percentile=body.percentile, source=body.source, status="VERIFIED", verified_by_user_id=ctx["sub"], verified_at=datetime.utcnow())
@@ -76,16 +132,22 @@ def calculate_merit(session, ctx, application_id):
     if app.current_status not in {"ELIGIBLE", "ASSESSMENT_PENDING", "ASSESSMENT_QUALIFIED", "COUNSELLING_PENDING", "COUNSELLING_COMPLETED", "ALLOCATION_PENDING"}:
         raise HTTPException(409, "Merit can only be calculated after eligibility")
     settings = _settings(session, app); merit = settings.get("merit", {})
+    entrance = _require_verified_entrance(session, app)
     academic_weight = float(merit.get("academic_weight", 1 if not settings.get("entrance_required") else .4))
     entrance_weight = float(merit.get("entrance_weight", 0 if not settings.get("entrance_required") else .6))
     profile = json.loads(app.profile_json or "{}"); academic = float(profile.get("qualifying_percentage", profile.get("percentage", 0)) or 0)
-    entrance = session.query(D.ApplicationAssessment).filter_by(application_id=app.id, assessment_type="ENTRANCE_EXAM", status="VERIFIED").order_by(D.ApplicationAssessment.verified_at.desc()).first()
     entrance_value = (float(entrance.score or 0) / float(entrance.max_score or 100)) * 100 if entrance else 0
     score = round(academic * academic_weight + entrance_value * entrance_weight, 4)
-    row = D.ApplicationAssessment(id=uid(), tenant_id=app.tenant_id, application_id=app.id, assessment_type="ACADEMIC_MERIT", score=academic, merit_score=score, status="CALCULATED", source="phase4_merit", verified_by_user_id=ctx["sub"], verified_at=datetime.utcnow(), merit_context_json=json.dumps({"academic":academic,"entrance":entrance_value,"academic_weight":academic_weight,"entrance_weight":entrance_weight,"policy":merit}))
-    session.add(row); session.flush()
-    peers = session.query(D.ApplicationAssessment).join(D.Application, D.Application.id == D.ApplicationAssessment.application_id).filter(D.Application.tenant_id == app.tenant_id, D.Application.cycle_id == app.cycle_id, D.Application.selected_program_id == app.selected_program_id, D.ApplicationAssessment.assessment_type == "ACADEMIC_MERIT", D.ApplicationAssessment.status == "CALCULATED").order_by(D.ApplicationAssessment.merit_score.desc(), D.ApplicationAssessment.id.asc()).all()
-    for rank, peer in enumerate(peers, 1): peer.rank = rank
+    row = _latest_merit(session, app.id)
+    if not row:
+        row = D.ApplicationAssessment(id=uid(), tenant_id=app.tenant_id, application_id=app.id,
+                                      assessment_type="ACADEMIC_MERIT")
+        session.add(row)
+    row.score, row.merit_score, row.status = academic, score, "CALCULATED"
+    row.source, row.verified_by_user_id, row.verified_at = "phase4_merit", ctx["sub"], datetime.utcnow()
+    row.merit_context_json = json.dumps({"academic":academic,"entrance":entrance_value,"academic_weight":academic_weight,"entrance_weight":entrance_weight,"policy":merit})
+    session.flush()
+    _rerank_merit(session, app)
     session.commit(); write_audit(session, ctx["sub"], ctx["sub"], ctx["office_n"], "admission.merit.calculate", f"application:{app.id}", "", str(score), "Deterministic merit calculation")
     return row
 
@@ -97,7 +159,16 @@ def allocate(session, ctx, application_id, seat_pool_id, expected_version, round
     if app.status_version != expected_version: raise HTTPException(409, "Application changed; reload")
     if app.current_status != "ALLOCATION_PENDING": raise HTTPException(409, "Application is not ready for allocation")
     pool = session.query(D.AdmissionSeatPool).filter_by(id=seat_pool_id, tenant_id=app.tenant_id).with_for_update().first()
-    if not pool or pool.cycle_id != app.cycle_id or pool.program_id != app.selected_program_id or pool.campus != app.campus: raise HTTPException(422, "Seat pool is outside application scope")
+    merit = _latest_merit(session, app.id)
+    if not merit or merit.rank is None:
+        raise HTTPException(409, "A current calculated merit score and rank are required before seat allocation")
+    counselling = (session.query(D.ApplicationCounselling)
+                   .filter_by(application_id=app.id, outcome="COMPLETED")
+                   .order_by(D.ApplicationCounselling.recorded_at.desc(), D.ApplicationCounselling.id.desc()).first())
+    permitted_programmes = {app.selected_program_id}
+    if counselling and counselling.recommended_program_id:
+        permitted_programmes.add(counselling.recommended_program_id)
+    if not pool or pool.cycle_id != app.cycle_id or pool.program_id not in permitted_programmes or pool.campus != app.campus: raise HTTPException(422, "Seat pool is outside the applicant's approved allocation scope")
     if pool.quota_id:
         qualified = session.query(D.ApplicationEligibilityCheck).filter_by(application_id=app.id, quota_id=pool.quota_id, outcome="PASS").first()
         if not qualified: raise HTTPException(422, "Applicant is not qualified for this quota")
@@ -105,7 +176,18 @@ def allocate(session, ctx, application_id, seat_pool_id, expected_version, round
     active = session.query(D.AdmissionSeatAllocation).filter(D.AdmissionSeatAllocation.application_id == app.id, D.AdmissionSeatAllocation.status.in_(ACTIVE_ALLOCATION_STATUSES)).first()
     if active: raise HTTPException(409, "Application already has an active allocation")
     used = session.query(D.AdmissionSeatAllocation).filter(D.AdmissionSeatAllocation.seat_pool_id == pool.id, D.AdmissionSeatAllocation.status.in_(ACTIVE_ALLOCATION_STATUSES)).count()
-    merit = session.query(D.ApplicationAssessment).filter_by(application_id=app.id, assessment_type="ACADEMIC_MERIT").order_by(D.ApplicationAssessment.verified_at.desc()).first()
+    if pool.program_id != app.selected_program_id:
+        programme = session.get(D.Program, pool.program_id)
+        previous_programme = app.selected_program_id
+        app.selected_program_id = pool.program_id
+        app.allocated_program_id = pool.program_id
+        app.program_id = pool.program_id
+        app.program_name = programme.name if programme else app.program_name
+        _rerank_merit_scope(session, app.tenant_id, app.cycle_id, previous_programme)
+        _rerank_merit(session, app)
+        write_audit(session, ctx["sub"], ctx["sub"], ctx["office_n"], "admission.allocation.programme_change",
+                    f"application:{app.id}", previous_programme or "", pool.program_id,
+                    "Counselling-recommended programme selected for allocation", commit=False)
     # PostgreSQL holds the row lock above.  This conditional counter claim also
     # preserves the capacity invariant on SQLite, where FOR UPDATE is ignored.
     claimed = 0

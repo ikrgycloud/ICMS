@@ -75,6 +75,12 @@ def rbac_for(office_n: int, level: int, verb: str) -> str:
 # Each: key, label, chain[initiator, reviewer, approver, final], escalation,
 #       owning office_n, valid workflow states for progression, has_amount
 APPROVAL_MATRIX = [
+    {"key": "branch_operational_plan", "label": "Branch Operational Plan", "office_n": 3,
+     "chain": ["Campus Head", "Vice Chairman", "Vice Chairman"],
+     "escalation": "Vice Chairman", "amount": False},
+    {"key": "campus_escalation", "label": "Campus escalation", "office_n": 3,
+     "chain": ["Campus Head", "Principal"],
+     "escalation": "Vice Chairman", "amount": False},
     {"key": "fee_structure", "label": "Fee structure approval", "office_n": 22,
      "chain": ["Finance Manager", "Principal / Campus Head"],
      "escalation": "Chairman", "amount": False},
@@ -153,7 +159,7 @@ APPROVAL_MATRIX = [
 ]
 
 # Workflow states every request moves through (Document §7, office workflow images).
-WF_STATES = ["draft", "submitted", "under_review", "reviewed", "approved",
+WF_STATES = ["draft", "submitted", "under_review", "reviewed", "approved", "returned",
              "executed", "rejected", "escalated"]
 
 # Which state must an entity be in for each action to be valid (Document §7 step 11).
@@ -164,7 +170,9 @@ WF_VALID = {
     "reject": ["submitted", "under_review", "reviewed", "escalated"],
     "return": ["submitted", "under_review", "reviewed", "escalated"],
     "execute": ["approved"],
-    "escalate": ["submitted", "under_review", "reviewed"],
+    # An already-escalated campus item can be escalated one level higher by
+    # its current executive owner (Principal -> Campus Head -> Vice Chairman).
+    "escalate": ["submitted", "under_review", "reviewed", "escalated"],
 }
 
 # Approval limits by process & scope level (Document §10 — configurable, never hardcoded).

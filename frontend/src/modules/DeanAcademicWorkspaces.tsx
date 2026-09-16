@@ -488,10 +488,12 @@ export default function DeanAcademicWorkspaces({
           </div>
           {filteredAllocationRows.map((p: any) => (
             <div className="dean-workspace-row" key={p.id} data-proposal-id={p.id}>
-              <span>
-                <b>{p.title}</b>
-                <br />
-                <small>{p.scope_ref || "Institution scope"} · Updated {formatWorkspaceDate(p.updated_at)}</small>
+              <span className="allocation-proposal-identity">
+                <b>{p.allocation?.course_code || p.title}</b>
+                {p.allocation?.course_title && <small className="allocation-course-title">{p.allocation.course_title}</small>}
+                <small>{p.allocation?.section ? `Section ${p.allocation.section}` : "Section pending"}{p.allocation?.program_code ? ` · ${p.allocation.program_code}` : ""}{p.allocation?.term ? ` · ${p.allocation.term}` : ""}</small>
+                <span className="allocation-faculty-chip"><span>Proposed faculty</span><b>{p.allocation?.faculty_name || "Faculty record unavailable"}</b></span>
+                <small>{p.allocation?.department || p.scope_ref || "Institution scope"} · Updated {formatWorkspaceDate(p.updated_at)}</small>
               </span>
               <Pill s={p.state} />
               {["SUBMITTED", "RESUBMITTED"].includes(p.state) &&

@@ -90,6 +90,20 @@ class UserRole(Base):
     valid_to = Column(DateTime, nullable=True)
 
 
+class AuthorityMembership(Base):
+    """Active office appointment within a canonical organisation scope."""
+    __tablename__ = "authority_memberships"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True, nullable=False)
+    user_id = Column(String, ForeignKey("users.id"), index=True, nullable=False)
+    org_scope_id = Column(String, ForeignKey("org_scopes.id"), index=True, nullable=False)
+    office_n = Column(Integer, index=True, nullable=False)
+    status = Column(String, index=True, default="active")
+    active_from = Column(DateTime, default=datetime.utcnow, nullable=False)
+    active_to = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class RolePermission(Base):
     __tablename__ = "role_permissions"
     id = Column(String, primary_key=True)
@@ -217,6 +231,10 @@ class WorkflowInstance(Base):
     source_type = Column(String, default="", index=True)
     source_id = Column(String, default="", index=True)
     escalated = Column(Boolean, default=False)
+    # Escalation is a persisted stage, not a UI inference from the process
+    # matrix. This preserves Principal -> Campus Head -> VC hand-offs.
+    escalation_to_office_n = Column(Integer, nullable=True, index=True)
+    escalation_from_office_n = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 

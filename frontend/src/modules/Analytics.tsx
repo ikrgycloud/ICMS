@@ -9,14 +9,16 @@ export default function Analytics({ user, go }: { user: any; go?: (view: string)
 
 function PrincipalAnalytics() {
   const [data, setData] = useState<any>(null)
+  const [error, setError] = useState('')
   const [year, setYear] = useState('')
   const [semester, setSemester] = useState('')
 
   useEffect(() => {
-    api.principalOverview(year, semester).then(setData).catch(() => {})
+    setError('')
+    api.principalOverview(year, semester).then(setData).catch((e: any) => setError(e.message || 'Dashboard data could not be loaded.'))
   }, [year, semester])
 
-  if (!data) return <Spinner />
+  if (!data) return error ? <div className="card card-pad calendar-banner warn">{error}</div> : <Spinner />
   const performance = data.performance || {}
   const kpis = data.kpis || {}
   const filters = data.filters || {}

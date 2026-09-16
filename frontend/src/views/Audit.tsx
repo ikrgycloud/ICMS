@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api'
 import { Spinner, Empty } from './ui'
 
@@ -10,8 +10,21 @@ export default function AuditView({ principal = false }: { principal?: boolean }
   const [query, setQuery] = useState('')
   const [outcome, setOutcome] = useState('ALL')
 
-  function load() { setLoading(true); api.audit().then(r => { setRows(r.entries || []); setLoading(false) }).catch(() => setLoading(false)) }
-  useEffect(load, [])
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const response: any = await api.audit()
+      // Audit is a security boundary: tolerate an unexpected response shape
+      // without ever passing a non-array into filtering/render callbacks.
+      setRows(Array.isArray(response?.entries) ? response.entries : [])
+    } catch {
+      setRows([])
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { void load() }, [load])
 
   async function runVerify() {
     setVerifying(true)
@@ -25,12 +38,12 @@ export default function AuditView({ principal = false }: { principal?: boolean }
 
   const outColor = (o: string) => o === 'ALLOW' ? 'var(--teal)' : o === 'DENY' ? 'var(--rose)' : o === 'ESCALATE' ? 'var(--amber)' : '#6f7fd4'
   const normalizedQuery = query.trim().toLowerCase()
-  const filteredRows = rows.filter(e => {
+  const filteredRows = rows.filter((e: any) => {
     const matchesOutcome = outcome === 'ALL' || e.outcome === outcome
     const matchesQuery = !normalizedQuery || [e.actor, e.action, e.reason, e.outcome, e.hash, e.campus].join(' ').toLowerCase().includes(normalizedQuery)
     return matchesOutcome && matchesQuery
   })
-  const count = (value: string) => rows.filter(e => e.outcome === value).length
+  const count = (value: string) => rows.filter((e: any) => e.outcome === value).length
 
   return (
     <div className="fade-in audit-page">

@@ -46,6 +46,8 @@ from migrations import v0043_principal_oversight
 from migrations import v0044_workflow_scope_version
 from migrations import v0045_workflow_source_refs
 from migrations import v0046_principal_handoff_sources
+from migrations import v0054_finance_waiver_workflow
+from migrations import v0055_transport_operational_identity
 from migrations import v0008_transport_route_status
 from migrations import v0009_course_offerings
 from migrations import v0010_offering_workflow
@@ -110,6 +112,8 @@ MIGRATIONS.append(v0043_principal_oversight)
 MIGRATIONS.append(v0044_workflow_scope_version)
 MIGRATIONS.append(v0045_workflow_source_refs)
 MIGRATIONS.append(v0046_principal_handoff_sources)
+MIGRATIONS.append(v0054_finance_waiver_workflow)
+MIGRATIONS.append(v0055_transport_operational_identity)
 MIGRATIONS.append(v0008_transport_route_status)
 MIGRATIONS.append(v0009_course_offerings)
 MIGRATIONS.append(v0010_offering_workflow)
@@ -137,7 +141,21 @@ MIGRATIONS.append(v0051_academic_rollover_governance)
 from migrations import v0052_curriculum_execution_upstream_gaps
 MIGRATIONS.append(v0052_curriculum_execution_upstream_gaps)
 from migrations import v0053_timetable_change_workflow_version
+from migrations import v0056_campus_head_domains
+from migrations import v0057_student_campus_scope
+from migrations import v0058_authority_memberships
+from migrations import v0059_budget_campus_scope
+from migrations import v0060_campus_performance_scope
+from migrations import v0061_workflow_executive_escalation_route
+from migrations import v0062_campus_report_vc_review
 MIGRATIONS.append(v0053_timetable_change_workflow_version)
+MIGRATIONS.append(v0056_campus_head_domains)
+MIGRATIONS.append(v0057_student_campus_scope)
+MIGRATIONS.append(v0058_authority_memberships)
+MIGRATIONS.append(v0059_budget_campus_scope)
+MIGRATIONS.append(v0060_campus_performance_scope)
+MIGRATIONS.append(v0061_workflow_executive_escalation_route)
+MIGRATIONS.append(v0062_campus_report_vc_review)
 
 
 def upgrade(engine):

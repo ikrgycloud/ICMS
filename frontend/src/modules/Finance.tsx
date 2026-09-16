@@ -3,6 +3,58 @@ import { api } from '../api'
 import { PageHead, Spinner, DecisionToast, Modal, money, Empty } from './kit'
 import PayrollPanel from './PayrollPanel'
 
+/**
+ * Campus / Branch Head finance oversight.  The API is responsible for applying
+ * canonical campus scope; this component intentionally has no mutating controls
+ * or action modals.
+ */
+function CampusFinanceReadOnly() {
+  const [tab, setTab] = useState<'fees' | 'budget'>('fees')
+  const [data, setData] = useState<any>(null)
+  const [budget, setBudget] = useState<any>(null)
+
+  useEffect(() => {
+    let active = true
+    Promise.allSettled([api.invoices(), api.budget()]).then(([invoices, budgetResult]) => {
+      if (!active) return
+      setData(invoices.status === 'fulfilled' ? invoices.value : null)
+      setBudget(budgetResult.status === 'fulfilled' ? budgetResult.value : null)
+    })
+    return () => { active = false }
+  }, [])
+
+  if (!data) return <Spinner />
+  const summary = data.summary || {}
+  const collectionRate = Math.round(100 * Number(summary.total_collected || 0) / (Number(summary.total_billed || 0) || 1))
+  const invoices = Array.isArray(data.invoices) ? data.invoices : []
+  const budgetRows = Array.isArray(budget?.budget) ? budget.budget : []
+
+  return <div className="fade-in finance-workspace campus-finance-readonly">
+    <PageHead title="Finance" sub="Fee collection, waivers (with limit-based escalation), and budget oversight" />
+    <section className="kpi-row">
+      <div className="kpi"><span className="kpi-l">Total billed</span><b className="kpi-v">{money(summary.total_billed || 0)}</b></div>
+      <div className="kpi"><span className="kpi-l">Collected</span><b className="kpi-v campus-finance-teal">{money(summary.total_collected || 0)}</b></div>
+      <div className="kpi"><span className="kpi-l">Outstanding</span><b className="kpi-v campus-finance-rose">{money(summary.outstanding || 0)}</b></div>
+      <div className="kpi"><span className="kpi-l">Collection rate</span><b className="kpi-v">{collectionRate}%</b></div>
+    </section>
+    <div className="tabs" role="tablist" aria-label="Finance oversight sections">
+      <button type="button" role="tab" aria-selected={tab === 'fees'} className={`tab ${tab === 'fees' ? 'on' : ''}`} onClick={() => setTab('fees')}>Fee invoices</button>
+      <button type="button" role="tab" aria-selected={tab === 'budget'} className={`tab ${tab === 'budget' ? 'on' : ''}`} onClick={() => setTab('budget')}>Budget</button>
+    </div>
+    {tab === 'fees' ? <section className="card">
+      <div className="tbl-scroll"><table className="tbl"><thead><tr><th>Roll No</th><th>Name</th><th>Billed</th><th>Paid</th><th>Balance</th><th>Status</th></tr></thead><tbody>
+        {invoices.slice(0, 80).map((invoice: any) => <tr key={invoice.id}><td className="mono">{invoice.roll_no || '—'}</td><td>{invoice.name || 'Not available yet'}</td><td>{money(invoice.amount || 0)}</td><td>{money(invoice.paid || 0)}</td><td><b className={Number(invoice.balance || 0) > 0 ? 'campus-finance-rose' : 'campus-finance-teal'}>{money(invoice.balance || 0)}</b></td><td><span className={`pill s-${invoice.status || 'unpaid'}`}>{invoice.status || 'unpaid'}</span></td></tr>)}
+        {!invoices.length && <tr><td colSpan={6}><Empty text="No campus invoice data available yet" /></td></tr>}
+      </tbody></table></div>
+    </section> : <section className="card"><div className="card-pad">
+      {budgetRows.length ? budgetRows.map((line: any) => {
+        const pct = Math.round(100 * Number(line.spent || 0) / (Number(line.allocated || 0) || 1))
+        return <div className="budget-row" key={`${line.category}-${line.fiscal_year || ''}`}><div className="budget-head"><b>{line.category || 'Budget category'}</b><span>{money(line.spent || 0)} / {money(line.allocated || 0)}</span></div><div className="bar-track"><div className="bar-fill" style={{ width: `${Math.min(100, Math.max(0, pct))}%`, background: pct > 85 ? 'var(--rose)' : 'var(--brass)' }} /></div></div>
+      }) : <Empty text="No campus budget data available yet" />}
+    </div></section>}
+  </div>
+}
+
 function hasFeeCategory(invoice: any, category: string) {
   if (category === 'all') return true
   const categories = invoice.categories?.map((item: any) => (item.fee_category || 'Uncategorised').toUpperCase())
@@ -10,9 +62,28 @@ function hasFeeCategory(invoice: any, category: string) {
   return actualCats.includes(category.toUpperCase())
 }
 
-export default function Finance({ caps, user, onOpenApprovals, overviewOnly = false, onNavigate, initialTab }: { caps: any; user: any; onOpenApprovals: () => void; overviewOnly?: boolean; onNavigate?: (view: string) => void; initialTab?: 'fees' | 'payments' | 'students' | 'payroll' }) {
+type FinanceProps = {
+  caps: any
+  user: any
+  onOpenApprovals: () => void
+  overviewOnly?: boolean
+  onNavigate?: (view: string) => void
+  initialTab?: 'fees' | 'payments' | 'setup' | 'students' | 'payroll'
+  /** Campus Heads can inspect their scoped financial position, never transact. */
+  readOnly?: boolean
+}
+
+export default function Finance(props: FinanceProps) {
+  // Keep the leadership view inside the Finance module, rather than duplicating
+  // its data contract in a role portal.  This also prevents action-oriented
+  // finance workspaces and their modal state from mounting for Campus Heads.
+  if (props.readOnly) return <CampusFinanceReadOnly />
+  return <FinanceWorkspace {...props} />
+}
+
+function FinanceWorkspace({ caps, user, onOpenApprovals, overviewOnly = false, onNavigate, initialTab }: FinanceProps) {
   // Start with live financial records; fee setup is an occasional configuration task.
-  const [tab, setTab] = useState<'overview' | 'fees' | 'payments' | 'setup' | 'students' | 'payroll'>(() => overviewOnly ? 'overview' : initialTab || (user?.office_n === 23 ? 'payroll' : 'fees'))
+  const [tab, setTab] = useState<'overview' | 'fees' | 'payments' | 'setup' | 'students' | 'payroll'>(() => overviewOnly ? 'overview' : initialTab || (user?.office_n === 22 ? 'setup' : user?.office_n === 23 ? 'payroll' : 'fees'))
   const [data, setData] = useState<any>(null)
   const [decision, setDecision] = useState<any>(null)
   const [modal, setModal] = useState<{ kind: string; inv: any; method?: string; reference?: string } | null>(null)
@@ -28,21 +99,25 @@ export default function Finance({ caps, user, onOpenApprovals, overviewOnly = fa
   const [adjustments, setAdjustments] = useState<any[]>([])
   const [reconciliations, setReconciliations] = useState<any[]>([])
   const [refunds, setRefunds] = useState<any[]>([])
+  const [waiverRequests, setWaiverRequests] = useState<any[]>([])
   const [vendorPayments, setVendorPayments] = useState<any[]>([])
   const [dayCloses, setDayCloses] = useState<any[]>([])
   const [reviewDraft, setReviewDraft] = useState<any>(null)
   const [adjustmentDraft, setAdjustmentDraft] = useState<any>(null)
   const [refundDraft, setRefundDraft] = useState<any>(null)
+  const [waiverDraft, setWaiverDraft] = useState<any>(null)
   const [submittingReview, setSubmittingReview] = useState(false)
   const [submittingAdjustment, setSubmittingAdjustment] = useState(false)
   const [submittingRefund, setSubmittingRefund] = useState(false)
+  const [submittingWaiver, setSubmittingWaiver] = useState(false)
 
   async function load() {
-    const [invoicesResult, adjustmentsResult, reconciliationsResult, refundsResult, vendorPaymentsResult, dayClosesResult] = await Promise.allSettled([
+    const [invoicesResult, adjustmentsResult, reconciliationsResult, refundsResult, waiversResult, vendorPaymentsResult, dayClosesResult] = await Promise.allSettled([
       api.invoices(),
       api.financeAdjustments(),
       api.financeReconciliations(),
       api.financeRefunds(),
+      api.feeWaiverRequests(),
       api.vendorPayments(),
       api.dayCloses(),
     ])
@@ -50,6 +125,7 @@ export default function Finance({ caps, user, onOpenApprovals, overviewOnly = fa
     if (adjustmentsResult.status === 'fulfilled') setAdjustments(adjustmentsResult.value.adjustments || [])
     if (reconciliationsResult.status === 'fulfilled') setReconciliations(reconciliationsResult.value.reconciliations || [])
     if (refundsResult.status === 'fulfilled') setRefunds(refundsResult.value.refunds || [])
+    if (waiversResult.status === 'fulfilled') setWaiverRequests(waiversResult.value.waiver_requests || [])
     if (vendorPaymentsResult.status === 'fulfilled') setVendorPayments(vendorPaymentsResult.value.vendor_payments || [])
     if (dayClosesResult.status === 'fulfilled') setDayCloses(dayClosesResult.value.day_closes || [])
   }
@@ -200,6 +276,63 @@ export default function Finance({ caps, user, onOpenApprovals, overviewOnly = fa
     }
   }
 
+  function requestWaiver(invoice:any) {
+    const balance = Number(invoice.balance ?? (Number(invoice.amount || 0) - Number(invoice.paid || 0)))
+    if (!(balance > 0)) {
+      setDecision({ outcome: 'DENY', reason: 'A waiver can only be recommended against an unpaid invoice balance.' })
+      return
+    }
+    setWaiverDraft({ invoice, amount: String(balance), reason: '' })
+  }
+
+  async function submitWaiverRequest() {
+    if (!waiverDraft?.invoice) return
+    const amount = Number(waiverDraft.amount)
+    const balance = Number(waiverDraft.invoice.balance ?? (Number(waiverDraft.invoice.amount || 0) - Number(waiverDraft.invoice.paid || 0)))
+    const reason = (waiverDraft.reason || '').trim()
+    if (!Number.isFinite(amount) || amount <= 0 || amount > balance) {
+      setDecision({ outcome: 'DENY', reason: 'Enter an amount within the current unpaid invoice balance.' })
+      return
+    }
+    if (!reason) {
+      setDecision({ outcome: 'DENY', reason: 'A documented reason is required for a waiver recommendation.' })
+      return
+    }
+    try {
+      setSubmittingWaiver(true)
+      const result = await api.createFeeWaiverRequest({ invoice_id: waiverDraft.invoice.id, amount, reason })
+      setDecision({ outcome: 'APPROVE', reason: `Waiver recommended to Principal: ${result.workflow_id}` })
+      setWaiverDraft(null)
+      load()
+    } catch (error:any) {
+      setDecision({ outcome: 'DENY', reason: error.message || 'Could not submit waiver recommendation' })
+    } finally {
+      setSubmittingWaiver(false)
+    }
+  }
+
+  async function executeWaiver(row:any) {
+    try {
+      const result = await api.executeFeeWaiverRequest(row.id)
+      setDecision({ outcome: 'APPROVE', reason: `Fee waiver executed: ${result.waiver_request?.status || 'executed'}` })
+      load()
+    } catch (error:any) {
+      setDecision({ outcome: 'DENY', reason: error.message || 'Could not execute fee waiver' })
+    }
+  }
+
+  async function resubmitWaiver(row:any) {
+    const reason = window.prompt('Update the documented reason before resubmitting to Principal:', row.reason || '')?.trim() || ''
+    if (!reason) return
+    try {
+      const result = await api.resubmitFeeWaiverRequest(row.id, { reason })
+      setDecision({ outcome: 'APPROVE', reason: `Waiver resubmitted to Principal: ${result.workflow_id}` })
+      load()
+    } catch (error:any) {
+      setDecision({ outcome: 'DENY', reason: error.message || 'Could not resubmit fee waiver' })
+    }
+  }
+
   async function createVendorPayment() {
     const vendorName = window.prompt('Vendor name:', '')?.trim() || ''
     if (!vendorName) {
@@ -306,6 +439,7 @@ export default function Finance({ caps, user, onOpenApprovals, overviewOnly = fa
       </section>}
 
       {!overviewOnly && <div className="tabs finance-tabs">
+        {user?.office_n === 22 && <button className={`tab ${tab === 'setup' ? 'on' : ''}`} onClick={() => setTab('setup')}>Fee setup & structures</button>}
         <button className={`tab ${tab === 'fees' ? 'on' : ''}`} onClick={() => setTab('fees')}>Student invoices</button>
         <button className={`tab ${tab === 'students' ? 'on' : ''}`} onClick={() => setTab('students')}>Students</button>
         <button className={`tab ${tab === 'payments' ? 'on' : ''}`} onClick={() => setTab('payments')}>Payment records</button>
@@ -400,8 +534,8 @@ export default function Finance({ caps, user, onOpenApprovals, overviewOnly = fa
 
       {tab === 'fees' && (
         <div className="card finance-card">
-          <div className="card-h finance-card-head"><div><h3>Student invoices</h3><span className="hint">Live balances from the ICMS database</span></div><div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}><label className="finance-search"><span>Search</span><input className="inp" placeholder="Roll number or student name" value={search} onChange={e=>setSearch(e.target.value)} /></label><label className="finance-search"><span>Category</span><select className="select" value={invoiceCategory} onChange={e => setInvoiceCategory(e.target.value)}><option value="all">All categories</option>{invoiceCategories.map((category: string) => <option key={category} value={category}>{category}</option>)}</select></label><button className="btn btn-out" onClick={createReconciliation}>Close reconciliation</button><button className="btn btn-out" onClick={closeDay}>Day close</button></div></div>
-          {(adjustments.length > 0 || reconciliations.length > 0 || refunds.length > 0 || vendorPayments.length > 0 || dayCloses.length > 0) && (
+          <div className="card-h finance-card-head"><div><h3>Student invoices</h3><span className="hint">Live balances from the ICMS database</span></div><div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}><label className="finance-search"><span>Search</span><input className="inp" placeholder="Roll number or student name" value={search} onChange={e=>setSearch(e.target.value)} /></label><label className="finance-search"><span>Category</span><select className="select" value={invoiceCategory} onChange={e => setInvoiceCategory(e.target.value)}><option value="all">All categories</option>{invoiceCategories.map((category: string) => <option key={category} value={category}>{category}</option>)}</select></label>{user?.office_n === 22 && <button className="btn btn-brass" onClick={() => setTab('setup')}>Manage fee structures</button>}<button className="btn btn-out" onClick={createReconciliation}>Close reconciliation</button><button className="btn btn-out" onClick={closeDay}>Day close</button></div></div>
+          {(adjustments.length > 0 || reconciliations.length > 0 || refunds.length > 0 || waiverRequests.length > 0 || vendorPayments.length > 0 || dayCloses.length > 0) && (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12, padding: '0 18px 18px' }}>
               {adjustments.length > 0 && (
                 <div className="card" style={{ padding: 12 }}>
@@ -442,13 +576,13 @@ export default function Finance({ caps, user, onOpenApprovals, overviewOnly = fa
                           <td>
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start' }}>
                               <span className={`pill s-${row.status}`}>{row.status}</span>
-                              {row.status === 'pending_approval' && (
+                              {row.status === 'pending_approval' && user?.office_n === 22 && (
                                 <div className="row-actions">
                                   <button className="btn btn-sm btn-teal" onClick={() => handleRefundDecision(row, 'approved')}>Approve</button>
                                   <button className="btn btn-sm btn-out" onClick={() => handleRefundDecision(row, 'rejected')}>Reject</button>
                                 </div>
                               )}
-                              {row.status === 'approved' && (
+                              {row.status === 'approved' && user?.office_n === 23 && (
                                 <button className="btn btn-sm btn-brass" onClick={() => handleRefundDecision(row, 'executed')}>Execute</button>
                               )}
                             </div>
@@ -457,6 +591,23 @@ export default function Finance({ caps, user, onOpenApprovals, overviewOnly = fa
                       ))}</tbody>
                     </table>
                   </div>
+                </div>
+              )}
+              {waiverRequests.length > 0 && (
+                <div className="card" style={{ padding: 12 }}>
+                  <h4 style={{ margin: '0 0 8px' }}>Fee waiver workflow</h4>
+                  <div className="tbl-scroll"><table className="tbl">
+                    <thead><tr><th>Invoice</th><th>Amount</th><th>Approval</th><th>Action</th></tr></thead>
+                    <tbody>{waiverRequests.slice(0, 5).map((row:any) => (
+                      <tr key={row.id}><td className="mono">{row.invoice_id.slice(0,8)}</td><td>{money(row.amount)}</td>
+                        <td><span className={`pill s-${row.status}`}>{row.status.replaceAll('_', ' ')}</span></td>
+                        <td>{row.status === 'approved_pending_accounts' && user?.office_n === 23
+                          ? <button className="btn btn-sm btn-brass" onClick={() => executeWaiver(row)}>Execute</button>
+                          : row.status === 'returned_to_finance' && user?.office_n === 22
+                            ? <button className="btn btn-sm btn-out" onClick={() => resubmitWaiver(row)}>Revise & resubmit</button>
+                            : <span className="hint">{row.status === 'pending_principal_approval' ? 'In Principal approvals' : '—'}</span>}</td></tr>
+                    ))}</tbody>
+                  </table></div>
                 </div>
               )}
               {vendorPayments.length > 0 && (
@@ -505,7 +656,8 @@ export default function Finance({ caps, user, onOpenApprovals, overviewOnly = fa
                         <button className="btn btn-sm btn-teal" disabled={!caps.record_payment || r.balance <= 0 || (r.accounts_settlement_required && user?.office_n !== 23)} onClick={() => { setModal({ kind: 'pay', inv: r, method: 'cash', reference: '' }); setAmount(String(r.balance)) }}>{r.balance <= 0 ? 'Settled' : r.accounts_settlement_required ? (user?.office_n === 23 ? 'Settle condonation' : 'Accounts settlement') : 'Record payment'}</button>
                         <button className="btn btn-sm btn-out" onClick={() => reviewInvoice(r)}>Review</button>
                         <button className="btn btn-sm btn-out" onClick={() => requestAdjustment(r)}>Adjust</button>
-                        <button className="btn btn-sm btn-out" disabled={Number(r.paid || 0) <= 0} onClick={() => requestRefund(r)}>{Number(r.paid || 0) > 0 ? 'Refund' : 'No paid balance'}</button>
+                        {user?.office_n === 22 && <button className="btn btn-sm btn-out" disabled={r.balance <= 0} onClick={() => requestWaiver(r)}>Recommend waiver</button>}
+                        {user?.office_n === 23 && <button className="btn btn-sm btn-out" disabled={Number(r.paid || 0) <= 0} onClick={() => requestRefund(r)}>{Number(r.paid || 0) > 0 ? 'Refund' : 'No paid balance'}</button>}
                       </div>
                     </td>
                   </tr>
@@ -601,18 +753,27 @@ export default function Finance({ caps, user, onOpenApprovals, overviewOnly = fa
           <p className="hint">Refund requests are created in pending approval state and can be approved or executed from the refund queue.</p>
         </Modal>
       )}
+      {waiverDraft && (
+        <Modal title="Recommend fee waiver" onClose={() => setWaiverDraft(null)}
+          footer={<><button className="btn btn-out" onClick={() => setWaiverDraft(null)}>Cancel</button>
+            <button className="btn btn-brass" disabled={submittingWaiver} onClick={submitWaiverRequest}>{submittingWaiver ? 'Submitting...' : 'Send to Principal'}</button></>}>
+          <div className="form-row"><label>Student</label><div className="mono">{waiverDraft.invoice.roll_no} · {waiverDraft.invoice.name}</div></div>
+          <div className="form-row"><label>Invoice</label><div>{waiverDraft.invoice.term || waiverDraft.invoice.id.slice(0, 8)}</div></div>
+          <div className="form-row"><label>Unpaid balance</label><div>{money(Number(waiverDraft.invoice.balance ?? 0))}</div></div>
+          <div className="form-row"><label>Waiver amount (₹)</label><input className="inp" type="number" value={waiverDraft.amount} onChange={e => setWaiverDraft({ ...waiverDraft, amount: e.target.value })} /></div>
+          <div className="form-row"><label>Documented reason</label><textarea className="inp" value={waiverDraft.reason} onChange={e => setWaiverDraft({ ...waiverDraft, reason: e.target.value })} placeholder="Scholarship basis, approval reference, and supporting context" rows={4} /></div>
+          <p className="hint">This records your recommendation, sends the decision to the Principal’s approval inbox, and lets Accounts apply the approved amount exactly once.</p>
+        </Modal>
+      )}
       {decision && <DecisionToast decision={decision} onClose={() => setDecision(null)} />}
     </div>
   )
 }
 
-export function PrincipalFinance({ caps, readOnly = false }: { caps: any; readOnly?: boolean }) {
+export function PrincipalFinance({ onOpenApprovals }: { onOpenApprovals: () => void }) {
   const [tab, setTab] = useState<'fees' | 'budget'>('fees')
   const [data, setData] = useState<any>(null)
   const [budget, setBudget] = useState<any>(null)
-  const [decision, setDecision] = useState<any>(null)
-  const [modal, setModal] = useState<{ kind: 'pay' | 'waive'; inv: any } | null>(null)
-  const [amount, setAmount] = useState('')
 
   function load() {
     api.invoices().then(setData).catch(() => {})
@@ -620,44 +781,28 @@ export function PrincipalFinance({ caps, readOnly = false }: { caps: any; readOn
   }
   useEffect(() => { load() }, [])
 
-  async function act() {
-    if (!modal) return
-    try {
-      const value = Number(amount)
-      const result = modal.kind === 'pay'
-        ? await api.recordPayment(modal.inv.id, value, 'cash', '', modal.inv.workflow_version_no)
-        : await api.waiveFee({ invoice_id: modal.inv.id, amount: value, reason: 'Approved waiver' })
-      setDecision(result.decision || { outcome: 'APPROVE', reason: modal.kind === 'pay' ? 'Payment recorded.' : 'Fee waiver submitted.' })
-      setModal(null)
-      setAmount('')
-      load()
-    } catch (error: any) {
-      setDecision({ outcome: 'DENY', reason: error.message || 'Finance action could not be completed.' })
-      setModal(null)
-    }
-  }
-
   if (!data) return <Spinner />
   const summary = data.summary || { total_billed: 0, total_collected: 0, outstanding: 0 }
   const feesUnavailable = data.data_status === 'unavailable'
   const collectionRate = Math.round(100 * Number(summary.total_collected || 0) / (Number(summary.total_billed || 0) || 1))
 
   return <div className="fade-in principal-finance">
-    <PageHead title="Finance" sub="Fee collection, waivers (with limit-based escalation), and budget oversight" />
+    <PageHead title="Finance" sub="Campus financial oversight. Financial approvals are decided from the governed approval inbox; Accounts executes transactions." />
     {feesUnavailable ? <div className="empty">{data.reason || 'Campus-scoped invoice data is unavailable.'}</div> : <div className="kpi-row principal-finance-kpis">
       <div className="kpi"><div className="kpi-v">{money(summary.total_billed)}</div><div className="kpi-l">Total billed</div></div>
       <div className="kpi"><div className="kpi-v" style={{ color: 'var(--teal)' }}>{money(summary.total_collected)}</div><div className="kpi-l">Collected</div></div>
       <div className="kpi"><div className="kpi-v" style={{ color: 'var(--rose)' }}>{money(summary.outstanding)}</div><div className="kpi-l">Outstanding</div></div>
       <div className="kpi"><div className="kpi-v">{collectionRate}%</div><div className="kpi-l">Collection rate</div></div>
     </div>}
+    <div className="row-actions" style={{ marginBottom: 12 }}>
+      <button className="btn btn-brass" onClick={onOpenApprovals}>Open finance approvals</button>
+    </div>
     <div className="tabs principal-finance-tabs">
       <button className={`tab ${tab === 'fees' ? 'on' : ''}`} onClick={() => setTab('fees')}>Fee invoices</button>
       <button className={`tab ${tab === 'budget' ? 'on' : ''}`} onClick={() => setTab('budget')}>Budget</button>
     </div>
-    {tab === 'fees' && !feesUnavailable && <div className="card principal-finance-card"><div className="tbl-scroll"><table className="tbl"><thead><tr><th>Roll No</th><th>Name</th><th>Billed</th><th>Paid</th><th>Balance</th><th>Status</th>{!readOnly && <th style={{ textAlign: 'right' }}>Actions</th>}</tr></thead><tbody>{(data.invoices || []).slice(0, 80).map((invoice: any) => <tr key={invoice.id}><td className="mono">{invoice.roll_no}</td><td>{invoice.name}</td><td>{money(invoice.amount)}</td><td>{money(invoice.paid)}</td><td><b style={{ color: invoice.balance > 0 ? 'var(--rose)' : 'var(--teal)' }}>{money(invoice.balance)}</b></td><td><span className={`pill s-${invoice.status}`}>{invoice.status}</span></td>{!readOnly && <td style={{ textAlign: 'right' }}><div className="row-actions"><button className="btn btn-sm btn-out" disabled={!caps.record_payment || invoice.balance <= 0} onClick={() => { setModal({ kind: 'pay', inv: invoice }); setAmount(String(invoice.balance)) }}>Payment</button><button className="btn btn-sm btn-brass" disabled={!caps.waive || invoice.balance <= 0} onClick={() => { setModal({ kind: 'waive', inv: invoice }); setAmount(String(invoice.balance)) }}>Waive</button></div></td>}</tr>)}</tbody></table></div></div>}
+    {tab === 'fees' && !feesUnavailable && <div className="card principal-finance-card"><div className="tbl-scroll"><table className="tbl"><thead><tr><th>Roll No</th><th>Name</th><th>Billed</th><th>Paid</th><th>Balance</th><th>Status</th></tr></thead><tbody>{(data.invoices || []).slice(0, 80).map((invoice: any) => <tr key={invoice.id}><td className="mono">{invoice.roll_no}</td><td>{invoice.name}</td><td>{money(invoice.amount)}</td><td>{money(invoice.paid)}</td><td><b style={{ color: invoice.balance > 0 ? 'var(--rose)' : 'var(--teal)' }}>{money(invoice.balance)}</b></td><td><span className={`pill s-${invoice.status}`}>{invoice.status}</span></td></tr>)}</tbody></table></div></div>}
     {tab === 'budget' && budget && <div className="card principal-finance-card"><div className="card-pad">{(budget.budget || []).map((item: any) => { const percent = Math.round(100 * Number(item.spent || 0) / (Number(item.allocated || 0) || 1)); return <div className="budget-row" key={item.category}><div className="budget-head"><b>{item.category}</b><span>{money(item.spent)} / {money(item.allocated)}</span></div><div className="bar-track"><div className="bar-fill" style={{ width: `${percent}%`, background: percent > 85 ? 'var(--rose)' : 'var(--brass)' }} /></div></div> })}</div></div>}
-    {modal && <Modal title={modal.kind === 'pay' ? 'Record fee payment' : 'Approve fee waiver'} onClose={() => setModal(null)} footer={<><button className="btn btn-out" onClick={() => setModal(null)}>Cancel</button><button className="btn btn-brass" onClick={act}>{modal.kind === 'pay' ? 'Record' : 'Approve waiver'}</button></>}><div className="form-row"><label>Student</label><div className="mono">{modal.inv.roll_no} · {modal.inv.name}</div></div><div className="form-row"><label>Amount (₹)</label><input className="inp" type="number" value={amount} onChange={event => setAmount(event.target.value)} /></div>{modal.kind === 'waive' && <p className="hint">Waivers above your scope’s approval limit auto-escalate to the Vice-Chancellor per the approval matrix.</p>}</Modal>}
-    {decision && <DecisionToast decision={decision} onClose={() => setDecision(null)} />}
   </div>
 }
 
@@ -709,6 +854,12 @@ function FeeSetup({ canManage, onOpenApprovals }: { canManage: boolean; onOpenAp
   const [heads, setHeads] = useState<any[]>([]), [structures, setStructures] = useState<any[]>([]), [refs, setRefs] = useState<any>(null)
   const [head, setHead] = useState<any>(null), [draft, setDraft] = useState<any>(null), [error, setError] = useState(''), [saving, setSaving] = useState(false)
   const [affected, setAffected] = useState<any>(null)
+  const [impact, setImpact] = useState<any>(null)
+  const [structureDetail, setStructureDetail] = useState<any>(null)
+  const [submissionReview, setSubmissionReview] = useState<any>(null)
+  const [publishReview, setPublishReview] = useState<any>(null)
+  const [loadingStructureId, setLoadingStructureId] = useState('')
+  const [statusFilter, setStatusFilter] = useState('all')
   const [affectedSearch, setAffectedSearch] = useState('')
   const load = () => { api.feeHeads(true).then(r => setHeads(r.heads)).catch(e => setError(e.message)); api.feeStructures().then(r => setStructures(r.structures)).catch(e => setError(e.message)); api.feeReferenceData().then(setRefs).catch(e => setError(e.message)) }
   useEffect(() => {
@@ -775,10 +926,10 @@ function FeeSetup({ canManage, onOpenApprovals }: { canManage: boolean; onOpenAp
     }
   }
   async function publish(id:string) {
-    if (!confirm('Publish and apply this fee structure to all matching students?')) return
     try {
       setSaving(true)
       const result = await api.publishFeeStructure(id)
+      setPublishReview(null)
       const accounts = result.student_accounts_created ? ` ${result.student_accounts_created} student login account(s) created.` : ''
       setError(`Published: ${result.invoices_created} invoice(s) created for ${result.matched_students} student(s).${accounts}`)
       setAffectedSearch('')
@@ -792,20 +943,57 @@ function FeeSetup({ canManage, onOpenApprovals }: { canManage: boolean; onOpenAp
       setSaving(false)
     }
   }
-  async function submit(id:string) { if (!confirm('Submit this draft for approval? It will be locked for editing.')) return; try { setSaving(true); await api.submitFeeStructure(id); setError('Fee structure submitted for approval.'); load() } catch (e:any) { setError(e.message) } finally { setSaving(false) } }
+  async function submit(id:string) { try { setSaving(true); await api.submitFeeStructure(id); setSubmissionReview(null); setError('Fee structure submitted to the campus Principal for approval.'); load() } catch (e:any) { setError(e.message) } finally { setSaving(false) } }
   async function showAffected(id:string) { try { setAffectedSearch(''); setAffected(await api.feeStructureAffectedStudents(id)) } catch (e:any) { setError(e.message) } }
+  async function showImpact(id:string) { try { setImpact(await api.feeStructureImpactPreview(id)) } catch (e:any) { setError(e.message) } }
+  async function openPublishReview(id:string) {
+    try {
+      setLoadingStructureId(id)
+      setError('')
+      setPublishReview(await api.feeStructureImpactPreview(id))
+    } catch (e:any) {
+      setError(e.message || 'Could not prepare the publishing review')
+    } finally {
+      setLoadingStructureId('')
+    }
+  }
+  async function openStructure(id:string) {
+    try {
+      setLoadingStructureId(id)
+      setError('')
+      const result = await api.feeStructure(id)
+      const structure = result.structure
+      if (['DRAFT', 'RETURNED'].includes(structure.status)) {
+        setDraft({...structure, lines: (structure.lines || []).map((line:any) => ({...line, amount: String(line.amount), due_date: line.due_date || ''}))})
+      } else {
+        setStructureDetail(structure)
+      }
+    } catch (e:any) {
+      setError(e.message || 'Could not open the fee structure')
+    } finally {
+      setLoadingStructureId('')
+    }
+  }
   const gross = (draft?.lines || []).reduce((sum:number, x:any) => sum + (Number(x.amount) || 0), 0)
   const feeHeadCategories = [...new Set(heads.filter(h => h.is_active).map(h => h.category || 'Uncategorised'))].sort()
+  const structureCounts = structures.reduce((counts:any, row:any) => ({...counts, [row.status]: (counts[row.status] || 0) + 1}), {})
+  const filteredStructures = statusFilter === 'all' ? structures : structures.filter(row => row.status === statusFilter)
   const affectedStudents = (affected?.students || []).filter((student:any) => {
     const query = affectedSearch.trim().toLowerCase()
     return !query || student.roll_no.toLowerCase().includes(query) || student.name.toLowerCase().includes(query)
   })
   if (!refs) return <Spinner />
-  return <div className="card fee-management-card"><div className="card-h fee-management-head"><div><span className="fee-management-eyebrow">Finance configuration</span><h3>Fee Management</h3><span className="hint">{canManage ? 'Create, approve, and publish fee structures for students.' : 'Read-only fee setup. Structures submitted for your decision appear in Approvals.'}</span></div><div className="row-actions"><button className="btn btn-out" onClick={() => setView(view === 'heads' ? 'structures' : 'heads')}>{view === 'heads' ? 'View structures' : 'View fee heads'}</button>{canManage && (view === 'heads' ? <button className="btn btn-crimson" onClick={() => setHead({...blankHead})}>+ Add fee head</button> : <button className="btn btn-crimson" onClick={() => {setError('');setDraft(newDraft(heads.find(h=>h.is_active)?.id || ''))}}>+ Create structure</button>)}{!canManage && <button className="btn btn-brass" onClick={onOpenApprovals}>Open Approvals</button>}</div></div>
-    <div className="fee-management-toolbar"><div><b>{view === 'heads' ? `${heads.length} fee heads` : `${structures.length} fee structures`}</b><span>{view === 'heads' ? 'Reusable fee components' : 'Structure status and student applicability'}</span></div><div className="fee-view-switch"><button className={view === 'structures' ? 'on' : ''} onClick={() => setView('structures')}>Structures</button><button className={view === 'heads' ? 'on' : ''} onClick={() => setView('heads')}>Fee heads</button></div></div>
+  return <div className="card fee-management-card"><div className="card-h fee-management-head"><div><span className="fee-management-eyebrow">Finance configuration</span><h3>Fee setup & structures</h3><span className="hint">{canManage ? 'Configure fee heads, prepare a structure, obtain Principal approval, then publish student invoices.' : 'Read-only fee setup. Structures submitted for your decision appear in Approvals.'}</span></div><div className="row-actions">{canManage && (view === 'heads' ? <button className="btn btn-crimson" onClick={() => setHead({...blankHead})}>+ Add fee head</button> : <button className="btn btn-crimson" onClick={() => {setError('');setDraft(newDraft(heads.find(h=>h.is_active)?.id || ''))}}>+ Create structure</button>)}{!canManage && <button className="btn btn-brass" onClick={onOpenApprovals}>Open Approvals</button>}</div></div>
+    {view === 'structures' && <div className="card-pad" style={{paddingTop:0}}><div className="kpi-row"><div className="kpi"><div className="kpi-v">{structureCounts.DRAFT || 0}</div><div className="kpi-l">Drafts</div></div><div className="kpi"><div className="kpi-v">{structureCounts.SUBMITTED || 0}</div><div className="kpi-l">With Principal</div></div><div className="kpi"><div className="kpi-v">{structureCounts.APPROVED || 0}</div><div className="kpi-l">Ready to publish</div></div><div className="kpi"><div className="kpi-v">{structureCounts.PUBLISHED || 0}</div><div className="kpi-l">Live structures</div></div></div><p className="hint" style={{margin:'8px 0 0'}}>Workflow: Fee heads → draft structure → Principal approval → Finance publish → invoices and challans.</p></div>}
+    <div className="fee-management-toolbar"><div><b>{view === 'heads' ? `${heads.length} fee heads` : `${filteredStructures.length} of ${structures.length} fee structures`}</b><span>{view === 'heads' ? 'Reusable fee components' : 'Status, approval stage, and controlled publishing'}</span></div><div className="fee-view-switch"><button className={view === 'structures' ? 'on' : ''} onClick={() => setView('structures')}>Structures</button><button className={view === 'heads' ? 'on' : ''} onClick={() => setView('heads')}>Fee heads</button></div></div>
     {error && <p className="hint" style={{color:'var(--rose)', padding:'0 18px'}}>{error}</p>}
-    {view === 'heads' ? <div className="tbl-scroll"><table className="tbl"><thead><tr><th>Code</th><th>Name</th><th>Category</th><th>Mandatory</th><th>Status</th>{canManage && <th/>}</tr></thead><tbody>{heads.map(h => <tr key={h.id}><td className="mono">{h.code}</td><td>{h.name}</td><td>{h.category}</td><td>{h.is_mandatory ? 'Yes' : 'No'}</td><td><span className={`pill s-${h.is_active ? 'active' : 'inactive'}`}>{h.is_active ? 'Active' : 'Inactive'}</span></td>{canManage && <td><div className="row-actions"><button className="btn btn-sm btn-out" onClick={() => setHead({...h})}>Edit</button><button className="btn btn-sm btn-out" onClick={() => toggle(h)}>{h.is_active ? 'Deactivate' : 'Activate'}</button></div></td>}</tr>)}</tbody></table></div> : <div className="tbl-scroll"><table className="tbl"><thead><tr><th>Structure</th><th>Academic context</th><th>Version</th><th>Gross Fee</th><th>Status</th><th>Updated</th>{canManage && <th/>}</tr></thead><tbody>{structures.length ? structures.map(x => <tr key={x.id}><td><b>{x.name}</b><small className="mono">{x.code}</small></td><td>{x.academic_year} · {x.semester}<small>{x.campus} · {x.program} · Batch {x.batch} · {x.student_type}</small></td><td>V{x.version}</td><td>{money(Number(x.gross_total))}</td><td><span className={`pill s-${String(x.status).toLowerCase()}`}>{x.status}</span></td><td>{x.updated_at ? new Date(x.updated_at).toLocaleDateString('en-IN') : '—'}</td>{canManage && <td><div className="row-actions"><button className="btn btn-sm btn-out" disabled={x.status !== 'DRAFT'} onClick={() => setDraft({...x, lines:x.lines.map((l:any) => ({...l, amount:String(l.amount), due_date:l.due_date || ''}))})}>View / Edit</button>{x.status === 'DRAFT' && <button className="btn btn-sm btn-brass" disabled={saving} onClick={() => submit(x.id)}>Submit for Approval</button>}{x.status === 'APPROVED' && <button className="btn btn-sm btn-brass" disabled={saving} onClick={() => publish(x.id)}>Publish / Apply</button>}{x.status === 'PUBLISHED' && <button className="btn btn-sm btn-out" onClick={() => showAffected(x.id)}>Affected Students</button>}</div></td>}</tr>) : <tr><td colSpan={canManage ? 7 : 6}><Empty text="No fee structures yet." /></td></tr>}</tbody></table></div>}
+    {view === 'structures' && <div className="card-pad" style={{paddingTop:0}}><label className="finance-search"><span>Workflow status</span><select className="select" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}><option value="all">All statuses</option>{['DRAFT', 'SUBMITTED', 'RETURNED', 'APPROVED', 'PUBLISHED', 'REJECTED'].map(status => <option key={status} value={status}>{status}</option>)}</select></label></div>}
+    {view === 'heads' ? <div className="tbl-scroll"><table className="tbl"><thead><tr><th>Code</th><th>Name</th><th>Category</th><th>Mandatory</th><th>Status</th>{canManage && <th/>}</tr></thead><tbody>{heads.map(h => <tr key={h.id}><td className="mono">{h.code}</td><td>{h.name}</td><td>{h.category}</td><td>{h.is_mandatory ? 'Yes' : 'No'}</td><td><span className={`pill s-${h.is_active ? 'active' : 'inactive'}`}>{h.is_active ? 'Active' : 'Inactive'}</span></td>{canManage && <td><div className="row-actions"><button className="btn btn-sm btn-out" onClick={() => setHead({...h})}>Edit</button><button className="btn btn-sm btn-out" onClick={() => toggle(h)}>{h.is_active ? 'Deactivate' : 'Activate'}</button></div></td>}</tr>)}</tbody></table></div> : <div className="tbl-scroll"><table className="tbl"><thead><tr><th>Structure</th><th>Academic context</th><th>Version</th><th>Gross Fee</th><th>Workflow status</th><th>Updated</th>{canManage && <th/>}</tr></thead><tbody>{filteredStructures.length ? filteredStructures.map(x => <tr key={x.id}><td><b>{x.name}</b><small className="mono">{x.code}</small></td><td>{x.academic_year} · {x.semester}<small>{x.campus} · {x.program} · Batch {x.batch} · {x.student_type}</small></td><td>V{x.version}</td><td>{money(Number(x.gross_total))}</td><td><span className={`pill s-${String(x.status).toLowerCase()}`}>{x.status === 'SUBMITTED' ? 'Awaiting Principal' : x.status === 'RETURNED' ? 'Returned for revision' : x.status}</span></td><td>{x.updated_at ? new Date(x.updated_at).toLocaleDateString('en-IN') : '—'}</td>{canManage && <td><div className="row-actions"><button className="btn btn-sm btn-out" onClick={() => showImpact(x.id)}>Impact</button><button className="btn btn-sm btn-out" disabled={loadingStructureId === x.id} onClick={() => openStructure(x.id)}>{loadingStructureId === x.id ? 'Opening…' : ['DRAFT', 'RETURNED'].includes(x.status) ? (x.status === 'RETURNED' ? 'Revise' : 'View / Edit') : 'View details'}</button>{x.status === 'DRAFT' && <button className="btn btn-sm btn-brass" disabled={saving} onClick={() => setSubmissionReview(x)}>Send to Principal</button>}{x.status === 'APPROVED' && <button className="btn btn-sm btn-brass" disabled={loadingStructureId === x.id || saving} onClick={() => openPublishReview(x.id)}>{loadingStructureId === x.id ? 'Preparing…' : 'Publish / Apply'}</button>}{x.status === 'PUBLISHED' && <button className="btn btn-sm btn-out" onClick={() => showAffected(x.id)}>Affected Students</button>}</div></td>}</tr>) : <tr><td colSpan={canManage ? 7 : 6}><Empty text={structures.length ? 'No structures match this status.' : 'No fee structures yet.'} /></td></tr>}</tbody></table></div>}
     {head && <Modal title={head.id ? 'Edit Fee Head' : 'Add Fee Head'} onClose={() => setHead(null)} footer={<><button className="btn btn-out" onClick={() => setHead(null)}>Cancel</button><button className="btn btn-crimson" disabled={saving} onClick={saveHead}>{saving ? 'Saving...' : 'Save'}</button></>}><div className="grid-2"><Field label="Code"><input className="inp" value={head.code} onChange={e=>setHead({...head,code:e.target.value})}/></Field><Field label="Name"><input className="inp" value={head.name} onChange={e=>setHead({...head,name:e.target.value})}/></Field><Field label="Category"><input className="inp" value={head.category} onChange={e=>setHead({...head,category:e.target.value})}/></Field><Field label="Display order"><input className="inp" type="number" value={head.display_order} onChange={e=>setHead({...head,display_order:Number(e.target.value)})}/></Field></div><label><input type="checkbox" checked={head.is_mandatory} onChange={e=>setHead({...head,is_mandatory:e.target.checked})}/> Mandatory</label><Field label="Description"><textarea className="inp" value={head.description} onChange={e=>setHead({...head,description:e.target.value})}/></Field></Modal>}
+    {submissionReview && <Modal title="Send fee structure to Principal" onClose={() => !saving && setSubmissionReview(null)} footer={<><button className="btn btn-out" disabled={saving} onClick={() => setSubmissionReview(null)}>Keep as draft</button><button className="btn btn-brass" disabled={saving} onClick={() => submit(submissionReview.id)}>{saving ? 'Sending…' : 'Confirm and send'}</button></>}><p className="hint">Review this controlled handoff before the structure is locked for Finance editing.</p><div className="grid-2"><Field label="Structure"><div><b>{submissionReview.name}</b><small className="mono">{submissionReview.code}</small></div></Field><Field label="Total fee"><div><b>{money(Number(submissionReview.gross_total))}</b></div></Field><Field label="Academic context"><div>{submissionReview.academic_year} · {submissionReview.semester}</div></Field><Field label="Applicable students"><div>{submissionReview.campus} · {submissionReview.program}<small>Batch {submissionReview.batch} · {submissionReview.student_type}</small></div></Field></div><div className="fee-auto-note"><b>Next workflow step</b><span>The selected campus Principal receives this structure in My Approvals. Finance can publish and create invoices only after approval.</span></div><p className="hint" style={{marginTop:16}}>Submitting locks the current fee lines and amounts. If the Principal returns it, you can revise and resubmit it.</p></Modal>}
+    {publishReview && <Modal title="Publish and apply fee structure" onClose={() => !saving && setPublishReview(null)} footer={<><button className="btn btn-out" disabled={saving} onClick={() => setPublishReview(null)}>Cancel</button><button className="btn btn-brass" disabled={saving} onClick={() => publish(publishReview.structure.id)}>{saving ? 'Publishing…' : 'Confirm publish and apply'}</button></>}><p className="hint">This structure has Principal approval and is ready to create live student invoices.</p><div className="grid-2"><Field label="Structure"><div><b>{publishReview.structure.name}</b><small className="mono">{publishReview.structure.code}</small></div></Field><Field label="Fee per student"><div><b>{money(Number(publishReview.gross_total))}</b></div></Field><Field label="Eligible students"><div><b>{publishReview.eligible_students}</b></div></Field><Field label="Invoice impact"><div><b>{publishReview.new_invoices_if_published}</b><small>{publishReview.projected_invoices} total projected invoice(s)</small></div></Field></div><div className="fee-auto-note"><b>Release control</b><span>Publishing applies the approved fee lines only to the selected campus, programme, batch, and student type. Existing linked invoices are retained, so a retry cannot duplicate billing.</span></div><p className="hint" style={{marginTop:16}}>After publishing, Finance can review the affected students and Accounts can collect against the generated invoices.</p></Modal>}
+    {structureDetail && <Modal title="Fee structure details" onClose={() => setStructureDetail(null)} footer={<button className="btn btn-out" onClick={() => setStructureDetail(null)}>Close</button>}><p className="hint">{structureDetail.name} · {structureDetail.code || 'Legacy structure'} · <b>{structureDetail.status}</b></p><div className="grid-2"><Field label="Academic context"><div>{structureDetail.academic_year || '—'} · {structureDetail.semester || '—'}</div></Field><Field label="Applicability"><div>{structureDetail.campus || '—'} · {structureDetail.program || '—'} · Batch {structureDetail.batch || '—'} · {structureDetail.student_type || '—'}</div></Field></div><div className="tbl-scroll"><table className="tbl"><thead><tr><th>Fee head</th><th>Installment</th><th>Due date</th><th>Amount</th></tr></thead><tbody>{(structureDetail.lines || []).length ? structureDetail.lines.map((line:any) => <tr key={line.id}><td>{line.fee_head_name || line.fee_head_code || '—'}</td><td>{line.installment_no}</td><td>{line.due_date || '—'}</td><td>{money(Number(line.amount))}</td></tr>) : <tr><td colSpan={4}><Empty text="This legacy structure has no editable fee-line records." /></td></tr>}</tbody></table></div></Modal>}
+    {impact && <Modal title="Fee structure impact preview" onClose={() => setImpact(null)} footer={<button className="btn btn-out" onClick={() => setImpact(null)}>Close</button>}><p className="hint">{impact.structure.name} · {impact.structure.campus} · {impact.structure.program}</p><div className="kpi-row"><div className="kpi"><div className="kpi-v">{impact.eligible_students}</div><div className="kpi-l">Eligible students</div></div><div className="kpi"><div className="kpi-v">{impact.fee_lines}</div><div className="kpi-l">Fee lines</div></div><div className="kpi"><div className="kpi-v">{impact.projected_invoices}</div><div className="kpi-l">Projected invoices</div></div><div className="kpi"><div className="kpi-v">{money(impact.gross_total)}</div><div className="kpi-l">Fee per student</div></div></div><p className="hint" style={{marginTop:16}}>Publishing will create {impact.new_invoices_if_published} new invoice(s). Existing linked invoices are retained, so retries do not duplicate billing.</p></Modal>}
     {affected && <Modal title={`Affected Students (${affected.student_count})`} onClose={() => setAffected(null)} footer={<button className="btn btn-out" onClick={() => setAffected(null)}>Close</button>}><p className="hint">{affected.structure.name} · {affected.invoice_count} invoice(s) created</p><div className="affected-students-tools"><input className="inp" value={affectedSearch} onChange={e => setAffectedSearch(e.target.value)} placeholder="Search by roll number or student name" /><span>{affectedStudents.length} of {affected.student_count} students</span></div><div className="tbl-scroll"><table className="tbl"><thead><tr><th>Roll No.</th><th>Student</th><th>Section</th><th>Invoices</th><th>Billed</th><th>Paid</th><th>Balance</th><th>Status</th></tr></thead><tbody>{affectedStudents.length ? affectedStudents.map((student:any) => <tr key={student.student_id}><td className="mono">{student.roll_no}</td><td><b>{student.name}</b><small>{student.email || '—'}</small></td><td>{student.section}</td><td>{student.invoice_count}</td><td>{money(student.invoiced)}</td><td>{money(student.paid)}</td><td>{money(student.balance)}</td><td><span className={`pill s-${student.status}`}>{student.status}</span></td></tr>) : <tr><td colSpan={8}><Empty text="No student matches this search." /></td></tr>}</tbody></table></div></Modal>}
     {draft && <Modal className="fee-structure-modal" title={draft.id ? 'Edit Draft Fee Structure' : 'Create Fee Structure'} onClose={() => setDraft(null)} footer={<><button className="btn btn-out" onClick={() => setDraft(null)}>Cancel</button><button className="btn btn-crimson" disabled={saving} onClick={saveDraft}>{saving ? 'Saving...' : 'Save Draft'}</button></>}>{error && <p className="hint" style={{color:'var(--rose)', marginBottom:12}}>{error}</p>}<div className="grid-2"><Select label="Academic Year" value={draft.academic_year_id} rows={refs.academic_years} onChange={(v:string)=>setDraft({...draft,academic_year_id:v,semester_id:''})}/><Select label="Semester" value={draft.semester_id} rows={refs.semesters.filter((x:any)=>x.academic_year_id===draft.academic_year_id)} onChange={(v:string)=>setDraft({...draft,semester_id:v})}/><Select label="Campus" value={draft.campus_id} rows={refs.campuses} onChange={(v:string)=>setDraft({...draft,campus_id:v})}/><Select label="Program" value={draft.program_id} rows={refs.programs} onChange={(v:string)=>setDraft({...draft,program_id:v})}/><Select label="Batch" value={draft.batch_id} rows={refs.batches} onChange={(v:string)=>setDraft({...draft,batch_id:v})}/><Select label="Student Type" value={draft.student_type_id} rows={refs.student_types} onChange={(v:string)=>setDraft({...draft,student_type_id:v})}/><div className="fee-auto-note"><b>Structure identity</b><span>Name and code are generated automatically from the selected academic context and student type.</span></div></div><h4>Fee Lines</h4>{draft.lines.map((line:any, i:number) => <div className="grid-2" key={line.id || i}><Field label="Fee Head Category"><select className="select" value={line.fee_head_category || 'all'} onChange={e=>{setError('');changeFeeHeadCategory(setDraft,draft,heads,i,e.target.value)}}><option value="all">All categories</option>{feeHeadCategories.map(category => <option key={category} value={category}>{category}</option>)}</select></Field><Select label="Fee Head *" value={line.fee_head_id} rows={heads.filter(h=>h.is_active && ((line.fee_head_category || 'all') === 'all' || h.category === line.fee_head_category))} onChange={(v:string)=>{setError('');changeLine(setDraft,draft,i,'fee_head_id',v)}}/><Field label="Amount *"><input className="inp" type="number" min="1" value={line.amount} onChange={e=>{setError('');changeLine(setDraft,draft,i,'amount',e.target.value)}}/></Field><Field label="Installment #"><input className="inp" type="number" min="1" value={line.installment_no} onChange={e=>{setError('');changeLine(setDraft,draft,i,'installment_no',Number(e.target.value))}}/></Field><Field label="Due Date"><input className="inp" type="date" value={line.due_date} onChange={e=>changeLine(setDraft,draft,i,'due_date',e.target.value)}/></Field><button className="btn btn-sm btn-out" onClick={()=>{if(confirm('Remove this fee line?')) setDraft({...draft,lines:draft.lines.filter((_:any,n:number)=>n!==i)})}}>Remove line</button></div>)}<button className="btn btn-out" onClick={()=>{setError('');setDraft({...draft,lines:[...draft.lines,{...blankLine}]})}}>+ Add Fee Line</button><div className="kpi-row" style={{marginTop:16}}><div className="kpi"><div className="kpi-v">{new Set(draft.lines.map((x:any)=>x.fee_head_id).filter(Boolean)).size}</div><div className="kpi-l">Fee Heads</div></div><div className="kpi"><div className="kpi-v">{draft.lines.length}</div><div className="kpi-l">Installments</div></div><div className="kpi"><div className="kpi-v">{money(gross)}</div><div className="kpi-l">Gross Fee</div></div></div></Modal>}
   </div>

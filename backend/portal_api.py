@@ -33,7 +33,7 @@ from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Space
 from core import auth, db, uid, write_audit
 from database import TENANT, office
 import domain_models as D
-from models import User, Notification
+from models import User, Notification, Person
 
 router = APIRouter(prefix="/api/portal")
 
@@ -3737,6 +3737,23 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
     sections = s.query(D.Section).filter(D.Section.faculty_person_id == stf.id).all()
     published_ids = _published_section_ids(s, sections)
     section_ids = [row.id for row in sections]
+    # TimetableEntry is the authoritative published schedule.  A newly
+    # allocated section may deliberately have no legacy Section.schedule
+    # string yet, so dashboards must not parse that nullable presentation
+    # field as if it were the operational timetable.
+    published_entries = (
+        s.query(D.TimetableEntry)
+        .join(D.TimetablePlanWorkflow, D.TimetablePlanWorkflow.timetable_entry_id == D.TimetableEntry.id)
+        .filter(D.TimetableEntry.section_id.in_(section_ids),
+                D.TimetableEntry.status == "active",
+                D.TimetablePlanWorkflow.status == "Published")
+        .order_by(D.TimetableEntry.day_of_week, D.TimetableEntry.start_time)
+        .all()
+        if section_ids else []
+    )
+    timetable_by_section = {}
+    for entry in published_entries:
+        timetable_by_section.setdefault(entry.section_id, []).append(entry)
     enrolled_count = 0
     if section_ids:
         enrolled_count = (
@@ -3802,7 +3819,14 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
     # same assigned sections and attendance rows used by the rest of the page.
     today_short = date.today().strftime("%a")
     for section in sections:
-        scheduled_days = (section.schedule or "").split(maxsplit=1)[0].split("/")
+        published_entries_for_section = timetable_by_section.get(section.id, [])
+        if published_entries_for_section:
+            scheduled_days = [_day_name(entry.day_of_week) for entry in published_entries_for_section]
+        else:
+            # Compatibility for legacy published sections that have no entry
+            # rows. Empty schedules correctly mean no attendance reminder.
+            schedule_parts = (section.schedule or "").strip().split(maxsplit=1)
+            scheduled_days = schedule_parts[0].split("/") if schedule_parts else []
         has_class_today = any(day[:3].title() == today_short for day in scheduled_days)
         already_marked = any(record.on_date == date.today() for record in attendance_by_section.get(section.id, []))
         if has_class_today and not already_marked:
@@ -3824,24 +3848,21 @@ def faculty_home(ctx=Depends(auth), s=Depends(db)):
     week_start = today - timedelta(days=today.weekday())
     teaching_schedule = []
     for section in sections:
-        # An allocation is already actionable for the professor.  A timetable
-        # plan only controls whether a concrete class time is shown.
-        if section.id not in published_ids:
+        # A published timetable entry, rather than a copied schedule label on
+        # Section, determines the concrete class time shown to faculty.
+        entries = timetable_by_section.get(section.id, [])
+        if not entries:
             continue
-        parts = (section.schedule or "").split(maxsplit=1)
-        days, class_time = (parts[0], parts[1] if len(parts) > 1 else "Time pending") if parts else ("", "Time pending")
         course = course_map.get(section.course_id)
-        for day_name in days.split("/"):
-            day_index = day_indexes.get(day_name[:3].title())
-            if day_index is None:
-                continue
+        for entry in entries:
+            day_index = entry.day_of_week
             class_date = week_start + timedelta(days=day_index)
-            teaching_schedule.append({"id": f"{section.id}-{day_index}", "day": class_date.strftime("%a"),
-                                      "date": class_date.isoformat(), "time": class_time,
+            teaching_schedule.append({"id": entry.id, "day": class_date.strftime("%a"),
+                                      "date": class_date.isoformat(), "time": f"{entry.start_time}–{entry.end_time}",
                                       "section": section.section_code,
                                       "course_code": course.code if course else "",
                                       "subject": course.title if course else "Course unavailable",
-                                      "room": section.room or "Room pending"})
+                                      "room": entry.room or section.room or "Room pending"})
     teaching_schedule.sort(key=lambda item: (item["date"], item["time"], item["course_code"]))
     classes_this_week = len(teaching_schedule)
 

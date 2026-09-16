@@ -188,6 +188,10 @@ function DetailModal({ wf, user, onClose, onDone }: any) {
   useEffect(refresh, [])
 
   async function decide(action: string) {
+    if (['return', 'reject', 'escalate'].includes(action) && !reason.trim()) {
+      setLastDecision({ outcome: 'DENY', reason: `A reason is required to ${action} this workflow.` })
+      return
+    }
     setBusy(true); setLastDecision(null)
     try {
       // The decision is bound to the exact version the approver reviewed.
@@ -262,7 +266,7 @@ function DetailModal({ wf, user, onClose, onDone }: any) {
           {canAct && (
             <div style={{ background: 'var(--mist)', borderRadius: 12, padding: 16 }}>
               <div className="form-row" style={{ marginBottom: 12 }}>
-                <label>Reason (recorded in audit)</label>
+                <label>Reason (recorded in audit; required for return, reject, and escalate)</label>
                 <input className="inp" value={reason} onChange={e => setReason(e.target.value)} placeholder="Optional note for the decision" />
               </div>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>

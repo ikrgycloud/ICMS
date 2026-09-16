@@ -2,11 +2,57 @@ const BASE = import.meta.env.VITE_API_URL || '/api'
 
 function tok() { return localStorage.getItem('icms_token') || '' }
 
+const delay = (milliseconds: number) => new Promise(resolve => setTimeout(resolve, milliseconds))
+
+function serviceUnavailableError(status: number) {
+  const error = new Error(
+    status === 502 || status === 503 || status === 504
+      ? 'ICMS is reconnecting to its services. Your data has not been changed; please try again in a moment.'
+      : `Request failed (${status})`,
+  ) as Error & { status?: number; transient?: boolean }
+  error.status = status
+  error.transient = true
+  return error
+}
+
+function tokenClaims() {
+  try {
+    const encoded = tok().split('.')[1]
+    if (!encoded) return null
+    const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/')
+    return JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')))
+  } catch {
+    return null
+  }
+}
+
+function principalCampusTokenError() {
+  const claims = tokenClaims()
+  if (claims?.office_n !== 4 || claims?.scope_level !== 'campus' || !claims?.scope_ref) {
+    return new Error('Principal campus scope is required for this dashboard.')
+  }
+  return null
+}
+
 async function req(path: string, opts: RequestInit = {}) {
-  const headers: any = { 'Content-Type': 'application/json', ...(opts.headers || {}) }
-  const t = tok()
-  if (t) headers['Authorization'] = `Bearer ${t}`
-  const res = await fetch(`${BASE}${path}`, { ...opts, headers })
+  const method = String(opts.method || 'GET').toUpperCase()
+  // Read operations are safe to retry when Docker/network routing briefly
+  // reconnects. Mutating actions are intentionally never replayed.
+  const retryable = method === 'GET' || method === 'HEAD'
+  let res: Response | undefined
+  for (let attempt = 0; attempt < (retryable ? 3 : 1); attempt += 1) {
+    const headers: any = { 'Content-Type': 'application/json', ...(opts.headers || {}) }
+    const t = tok()
+    if (t) headers['Authorization'] = `Bearer ${t}`
+    try {
+      res = await fetch(`${BASE}${path}`, { ...opts, headers })
+      if (![502, 503, 504].includes(res.status) || attempt === 2) break
+    } catch {
+      if (attempt === 2) break
+    }
+    await delay(250 * (attempt + 1))
+  }
+  if (!res) throw serviceUnavailableError(503)
   if (res.status === 401) {
     localStorage.removeItem('icms_token')
     localStorage.removeItem('icms_user')
@@ -24,6 +70,7 @@ async function req(path: string, opts: RequestInit = {}) {
     }
   }
   if (!res.ok) {
+    if ([502, 503, 504].includes(res.status)) throw serviceUnavailableError(res.status)
     const detail = Array.isArray(data.detail)
       ? data.detail.map((item: any) => {
           const field = Array.isArray(item.loc) ? item.loc.filter((part: any) => part !== 'body').join(' → ') : ''
@@ -201,6 +248,14 @@ export const api = {
   workspace: () => req('/workspace'),
   overview: () => req('/overview'),
   principalOverview: (academic_year = '', student_semester = '') => {
+    // Defend against a stale cached UI role after login/role switching.  The
+    // server remains authoritative, but do not issue a Principal-only request
+    // unless the active bearer token itself represents that Principal scope.
+    const scopeError = principalCampusTokenError()
+    // Return a rejected promise rather than throwing synchronously. React
+    // effects can handle this like every other API failure, with no uncaught
+    // browser error and no forbidden network request.
+    if (scopeError) return Promise.reject(scopeError)
     const params = new URLSearchParams({ academic_year })
     if (student_semester) params.set('student_semester', student_semester)
     return req(`/overview/principal?${params.toString()}`)
@@ -210,6 +265,32 @@ export const api = {
   principalEscalations: () => req('/principal/escalations'),
   approvalHistory: (filters: Record<string, string> = {}) => req(`/approval-history?${new URLSearchParams(filters).toString()}`),
   escalations: (filters: Record<string, string> = {}) => req(`/escalations?${new URLSearchParams(filters).toString()}`),
+  createCampusEscalation: (body: any) => req('/escalations', { method: 'POST', body: JSON.stringify(body) }),
+  resubmitCampusEscalation: (id: string, reason: string) => req(`/escalations/${encodeURIComponent(id)}/resubmit`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  riskSummary: () => req('/risks/summary'),
+  risks: (filters: Record<string, string> = {}) => req(`/risks?${new URLSearchParams(Object.entries(filters).filter(([, value]) => Boolean(value)) as [string, string][]).toString()}`),
+  riskOwners: () => req('/risks/owners'),
+  risk: (id: string) => req(`/risks/${encodeURIComponent(id)}`),
+  createRisk: (body: any) => req('/risks', { method: 'POST', body: JSON.stringify(body) }),
+  updateRisk: (id: string, body: any) => req(`/risks/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  assignRisk: (id: string, owner_id: string) => req(`/risks/${encodeURIComponent(id)}/assign`, { method: 'POST', body: JSON.stringify({ owner_id }) }),
+  createRiskAction: (id: string, body: any) => req(`/risks/${encodeURIComponent(id)}/actions`, { method: 'POST', body: JSON.stringify(body) }),
+  completeRiskAction: (riskId: string, actionId: string, note: string) => req(`/risks/${encodeURIComponent(riskId)}/actions/${encodeURIComponent(actionId)}/complete`, { method: 'POST', body: JSON.stringify({ reason: note || 'Completed' }) }),
+  verifyRiskAction: (riskId: string, actionId: string) => req(`/risks/${encodeURIComponent(riskId)}/actions/${encodeURIComponent(actionId)}/verify`, { method: 'POST' }),
+  resolveRisk: (id: string, reason: string, resolution_notes = '') => req(`/risks/${encodeURIComponent(id)}/resolve`, { method: 'POST', body: JSON.stringify({ reason, resolution_notes }) }),
+  closeRisk: (id: string, reason: string) => req(`/risks/${encodeURIComponent(id)}/close`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  escalateRisk: (id: string, reason: string) => req(`/risks/${encodeURIComponent(id)}/escalate`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  bop: () => req('/bop'),
+  createBop: (body: any) => req('/bop', { method: 'POST', body: JSON.stringify(body) }),
+  updateBop: (id: string, body: any) => req(`/bop/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+  submitBop: (id: string) => req(`/bop/${encodeURIComponent(id)}/submit`, { method: 'POST' }),
+  resubmitBop: (id: string) => req(`/bop/${encodeURIComponent(id)}/resubmit`, { method: 'POST' }),
+  campusReports: () => req('/campus-reports'),
+  createCampusReport: (body: any) => req('/campus-reports', { method: 'POST', body: JSON.stringify(body) }),
+  updateCampusReport: (id: string, body: any) => req(`/campus-reports/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  submitCampusReport: (id: string) => req(`/campus-reports/${encodeURIComponent(id)}/submit`, { method: 'POST' }),
+  viceChairmanCampusReports: (status = '') => req(`/vice-chairman/campus-reports${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+  decideCampusReport: (id: string, body: any) => req(`/vice-chairman/campus-reports/${encodeURIComponent(id)}/decision`, { method: 'POST', body: JSON.stringify(body) }),
   complianceRequirements: (filters: Record<string, string> = {}) => req(`/compliance-requirements?${new URLSearchParams(filters).toString()}`),
   complianceRequirement: (id: string) => req(`/compliance-requirements/${encodeURIComponent(id)}`),
   examSectionOversight: (sectionId: string) => req(`/exams/sections/${encodeURIComponent(sectionId)}/oversight`),
@@ -280,6 +361,8 @@ export const api = {
   decideAllocationProposal: (id: string, decision: string, expected_status_version: number, reason = '') => req(`/academics/allocation/proposals/${id}/decision/${decision}`, { method: 'POST', body: JSON.stringify({ expected_status_version, reason }) }),
   timetableReadiness: () => req('/academics/timetable/readiness'),
   academicQualityRisks: () => req('/academics/quality/risks'),
+  campusHeadRisks: () => req('/campus/risks'),
+  campusLeadership: () => req('/campus-leadership'),
   qualityReviews: () => req('/academics/quality/reviews'),
   qualityEffectiveness: (id: string) => req(`/academics/quality/reviews/${id}/effectiveness`),
   createQualityReview: (body: any) => req('/academics/quality/reviews', { method: 'POST', body: JSON.stringify(body) }),
@@ -554,6 +637,7 @@ export const api = {
   recordAdmissionAssessment: (id: string, body: any) => req(`/admissions/${id}/assessments`, { method: 'POST', body: JSON.stringify(body) }),
   calculateAdmissionMerit: (id: string) => req(`/admissions/${id}/merit`, { method: 'POST' }),
   admissionSeatPools: (cycle_id = '') => req(`/admissions/seat-pools?cycle_id=${cycle_id}`),
+  admissionSeatPoolReadiness: (applicationId: string) => req(`/admissions/${encodeURIComponent(applicationId)}/seat-pool-readiness`),
   createAdmissionSeatPool: (body: any) => req('/admissions/seat-pools', { method: 'POST', body: JSON.stringify(body) }),
   allocateAdmissionSeat: (id: string, body: any) => req(`/admissions/${id}/allocate`, { method: 'POST', body: JSON.stringify(body) }),
   recommendAdmissionOffer: (id: string, expected_status_version: number) => req(`/admissions/${id}/offer/recommend`, { method: 'POST', body: JSON.stringify({ expected_status_version }) }),
@@ -584,6 +668,10 @@ export const api = {
   financeReconciliations: () => req('/finance/reconciliations'),
   createReconciliation: (body: any) => req('/finance/reconciliations', { method: 'POST', body: JSON.stringify(body) }),
   financeRefunds: () => req('/finance/refunds'),
+  feeWaiverRequests: () => req('/finance/waiver-requests'),
+  createFeeWaiverRequest: (body: any) => req('/finance/waiver-requests', { method: 'POST', body: JSON.stringify(body) }),
+  executeFeeWaiverRequest: (waiver_id: string) => req(`/finance/waiver-requests/${waiver_id}/execute`, { method: 'POST' }),
+  resubmitFeeWaiverRequest: (waiver_id: string, body: any) => req(`/finance/waiver-requests/${waiver_id}/resubmit`, { method: 'POST', body: JSON.stringify(body) }),
   createRefund: (body: any) => req('/finance/refunds', { method: 'POST', body: JSON.stringify(body) }),
   decideRefund: (refund_id: string, body: any) => req(`/finance/refunds/${refund_id}/decision`, { method: 'POST', body: JSON.stringify(body) }),
   executeRefund: (refund_id: string) => req(`/finance/refunds/${refund_id}/execute`, { method: 'POST' }),
@@ -619,6 +707,7 @@ export const api = {
   },
   feeStructure: (id: string) => req(`/fee-structures/${id}`),
   feeStructureAffectedStudents: (id: string) => req(`/fee-structures/${id}/affected-students`),
+  feeStructureImpactPreview: (id: string) => req(`/fee-structures/${id}/impact-preview`),
   createFeeStructure: (b: any) => req('/fee-structures', { method: 'POST', body: JSON.stringify(b) }),
   updateFeeStructure: (id: string, b: any) => req(`/fee-structures/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
   publishFeeStructure: (id: string) => req(`/fee-structures/${id}/publish`, { method: 'POST' }),

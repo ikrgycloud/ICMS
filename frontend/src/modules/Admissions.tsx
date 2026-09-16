@@ -146,6 +146,26 @@ export default function Admissions({
       .then((x: any) => setSeatPools(x.seat_pools || []))
       .catch((e) => setNotice({ outcome: "DENY", reason: e.message }));
   };
+  const openMatchingGeneralPool = async (application: any) => {
+    try {
+      const readiness: any = await api.admissionSeatPoolReadiness(application.id);
+      if (readiness.general_pool_id) {
+        setNotice({ outcome: "DENY", reason: `A General pool already exists for this scope (${readiness.general_pool_status}). Review it in Seat Pools.` });
+        setTab("seatpools");
+        return;
+      }
+      setSeatPool({ cycle_id: readiness.cycle_id, campus: readiness.campus, program_id: readiness.program_id,
+        quota_id: "", capacity: readiness.suggested_capacity, status: "open", readiness });
+    } catch (e: any) { setNotice({ outcome: "DENY", reason: e.message || "Seat-pool readiness could not be loaded." }); }
+  };
+  const filteredPhase4 = phase4.filter((application: any) => {
+    const searchTerm = String(filters.search || "").trim().toLowerCase();
+    return (!filters.cycle_id || application.cycle_id === filters.cycle_id)
+      && (!filters.program_id || application.program_id === filters.program_id)
+      && (!filters.campus || application.campus === filters.campus)
+      && (!filters.status || application.current_status === filters.status)
+      && (!searchTerm || `${application.name || ""} ${application.program || ""}`.toLowerCase().includes(searchTerm));
+  });
   const loadCounselling = () =>
     api
       .counsellingQueue({
@@ -257,9 +277,9 @@ export default function Admissions({
         loadQuotas();
       }
       if (tab === "quotas") loadQuotas();
-      if (tab === "decisions") loadPhase4();
+    if (tab === "decisions") { loadCycles(); loadPhase4(); }
       if (tab === "counselling") loadCounselling();
-      if (tab === "seatpools") loadPhase4();
+    if (tab === "seatpools") { loadCycles(); loadPhase4(); }
       if (tab === "waitlist") loadWaitlist();
       if (tab === "offers") loadOffers();
     }
@@ -323,6 +343,15 @@ export default function Admissions({
   };
   const saveCycle = () =>
     act(async () => {
+      if (!cycle.name?.trim() || !cycle.academic_year?.trim() || !cycle.campus?.trim()) {
+        throw new Error("Enter the cycle name, academic year, and campus before saving.");
+      }
+      if (!cycle.application_open_date || !cycle.application_close_date) {
+        throw new Error("Enter both application opening and closing dates before saving.");
+      }
+      if (new Date(cycle.application_close_date) <= new Date(cycle.application_open_date)) {
+        throw new Error("The application closing date must be later than the opening date.");
+      }
       const body = {
         ...cycle,
         application_open_date: cycle.application_open_date
@@ -335,6 +364,16 @@ export default function Admissions({
       const r = cycle.id
         ? await api.updateAdmissionCycle(cycle.id, body)
         : await api.createAdmissionCycle(body);
+      if (!cycle.id) {
+        setCycle({ ...cycle, id: r.id, status: r.status });
+        setBinding({ campus: cycle.campus || "", intake: 0, application_fee: 0, admission_fee: 0, entrance_required: false, counselling_required: false, active: true });
+        return {
+          decision: {
+            outcome: "ALLOW",
+            reason: "Cycle saved. Add at least one active programme intake before publishing.",
+          },
+        };
+      }
       setCycle(null);
       return r;
     }, loadCycles);
@@ -684,11 +723,17 @@ export default function Admissions({
       {tab === "decisions" && (
         <div className="card">
           <div className="card-pad">
-            <h3>Assessment, Merit & Allocation</h3>
+            <div className="admission-decision-head"><div><span className="eyebrow">ADMISSION DECISION DESK</span><h3>Assessment, Merit & Allocation</h3>
             <p className="hint">
-              All scores, merit and seat availability are calculated by the
-              backend.
-            </p>
+              Merit is calculated from verified evidence. Only ranked applicants can be allocated or explicitly waitlisted.
+            </p></div><button className="btn btn-out" onClick={loadPhase4}>Refresh queue</button></div>
+            <div className="form-grid" style={{ marginBottom: 14 }}>
+              <select className="inp" value={filters.cycle_id} onChange={(e) => setFilters({ ...filters, cycle_id: e.target.value })}><option value="">All cycles</option>{cycles.map((cycle: any) => <option key={cycle.id} value={cycle.id}>{cycle.name}</option>)}</select>
+              <select className="inp" value={filters.program_id} onChange={(e) => setFilters({ ...filters, program_id: e.target.value })}><option value="">All programmes</option>{programmes.map((programme: any) => <option key={programme.id} value={programme.id}>{programme.name}</option>)}</select>
+              <input className="inp" placeholder="Campus" value={filters.campus} onChange={(e) => setFilters({ ...filters, campus: e.target.value })}/>
+              <select className="inp" value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}><option value="">All stages</option>{["ELIGIBLE", "ASSESSMENT_PENDING", "ASSESSMENT_QUALIFIED", "COUNSELLING_PENDING", "ALLOCATION_PENDING"].map((status) => <option key={status} value={status}>{status.replaceAll("_", " ")}</option>)}</select>
+              <input className="inp" placeholder="Search applicant or programme" value={filters.search} onChange={(e) => setFilters({ ...filters, search: e.target.value })}/>
+            </div>
             <div className="tbl-scroll">
               <table className="tbl">
                 <thead>
@@ -701,7 +746,7 @@ export default function Admissions({
                   </tr>
                 </thead>
                 <tbody>
-                  {phase4.map((a) => (
+                  {filteredPhase4.map((a) => (
                     <tr key={a.id}>
                       <td>
                         {a.name}
@@ -736,6 +781,7 @@ export default function Admissions({
                                 assessment_type: "ENTRANCE_EXAM",
                                 score: "",
                                 max_score: "",
+                                source: "",
                               })
                             }
                           >
@@ -764,13 +810,13 @@ export default function Admissions({
                             Merit
                           </button>
                         )}
-                        {a.current_status === "ALLOCATION_PENDING" &&
+                        {a.current_status === "ALLOCATION_PENDING" && a.merit_rank != null &&
                           seatPools
                             .filter(
                               (p) =>
                                 p.cycle_id === a.cycle_id &&
                                 p.campus === a.campus &&
-                                p.program_id === a.program_id &&
+                                (p.program_id === a.program_id || p.program_id === a.recommended_program_id) &&
                                 String(p.status).toLowerCase() === "open" &&
                                 p.available > 0 &&
                                 (!p.quota_id ||
@@ -797,17 +843,26 @@ export default function Admissions({
                                 Allocate {p.quota_name || "General"}
                               </button>
                             ))}
-                        {a.current_status === "ALLOCATION_PENDING" && !seatPools.some((p) => p.cycle_id === a.cycle_id && p.campus === a.campus && p.program_id === a.program_id && String(p.status).toLowerCase() === "open" && p.available > 0 && (!p.quota_id || (a.qualified_quota_ids || []).includes(p.quota_id))) && (
-                          <span className="hint">
+                        {a.current_status === "ALLOCATION_PENDING" && a.merit_rank != null &&
+                          seatPools
+                            .filter((p) => p.cycle_id === a.cycle_id && p.campus === a.campus && (p.program_id === a.program_id || p.program_id === a.recommended_program_id) && String(p.status).toLowerCase() === "open" && p.available <= 0 && (!p.quota_id || (a.qualified_quota_ids || []).includes(p.quota_id)))
+                            .map((p) => (
+                              <button key={`waitlist-${p.id}`} className="btn btn-sm btn-out" onClick={() => act(() => api.allocateAdmissionSeat(a.id, { seat_pool_id: p.id, expected_status_version: a.status_version }), loadPhase4)}>
+                                Add to waitlist · {p.quota_name || "General"}
+                              </button>
+                            ))}
+                        {a.current_status === "ALLOCATION_PENDING" && a.merit_rank == null && <span className="hint">Calculate the current merit rank before allocating or waitlisting this applicant.</span>}
+                        {a.current_status === "ALLOCATION_PENDING" && a.merit_rank != null && !seatPools.some((p) => p.cycle_id === a.cycle_id && p.campus === a.campus && (p.program_id === a.program_id || p.program_id === a.recommended_program_id) && String(p.status).toLowerCase() === "open" && p.available > 0 && (!p.quota_id || (a.qualified_quota_ids || []).includes(p.quota_id))) && (
+                          <div className="allocation-readiness">
                             {(() => {
-                              const matching = seatPools.filter((p) => p.cycle_id === a.cycle_id && p.campus === a.campus && p.program_id === a.program_id);
-                              if (!matching.length) return "No seat pool is configured for this applicant's cycle, programme, and campus. Create a General pool with the same values.";
-                              if (!matching.some((p) => String(p.status).toLowerCase() === "open")) return "A matching seat pool exists, but it is inactive. Edit it and set its status to Active.";
-                              if (!matching.some((p) => p.available > 0)) return "All matching seat pools are full. Increase capacity only if more approved intake is available, or use the waitlist.";
-                              return "Matching seats are quota-restricted. Create a General pool or ensure the applicant passes eligibility for the selected quota.";
+                              const matching = seatPools.filter((p) => p.cycle_id === a.cycle_id && p.campus === a.campus && (p.program_id === a.program_id || p.program_id === a.recommended_program_id));
+                              if (!matching.length) return <><b>Allocation setup required</b><span>No General seat pool exists for this applicant’s approved cycle, programme, and campus.</span></>;
+                              if (!matching.some((p) => String(p.status).toLowerCase() === "open")) return <><b>Matching pool is inactive</b><span>Activate the configured pool before allocation can continue.</span></>;
+                              if (!matching.some((p) => p.available > 0)) return <><b>Approved capacity is fully used</b><span>Use the waitlist or increase approved intake through cycle governance.</span></>;
+                              return <><b>Quota eligibility required</b><span>Available seats are quota-restricted. Confirm eligibility or configure a General pool.</span></>;
                             })()}
-                            {" "}<button className="btn btn-sm btn-out" onClick={() => setTab("seatpools")}>Configure seat pool</button>
-                          </span>
+                            <div><button className="btn btn-sm btn-brass" onClick={() => openMatchingGeneralPool(a)}>Create matching General pool</button><button className="btn btn-sm btn-out" onClick={() => setTab("seatpools")}>View seat pools</button></div>
+                          </div>
                         )}
                       </td>
                     </tr>
@@ -854,6 +909,7 @@ export default function Admissions({
                             setCounsellingItem({
                               ...a,
                               attendance_status: "attended",
+                              recommended_program_id: a.program_id,
                               remarks: "",
                               preference_rank: 1,
                             })
@@ -1193,6 +1249,7 @@ export default function Admissions({
                         assessment_type: assessment.assessment_type,
                         score: Number(assessment.score),
                         max_score: Number(assessment.max_score),
+                        source: assessment.source,
                         expected_status_version: assessment.status_version,
                       }),
                     () => {
@@ -1214,7 +1271,7 @@ export default function Admissions({
               setAssessment({ ...assessment, assessment_type: e.target.value })
             }
           >
-            {["ENTRANCE_EXAM", "ACADEMIC_MERIT", "OTHER"].map((x) => (
+            {["ENTRANCE_EXAM", "OTHER"].map((x) => (
               <option key={x}>{x}</option>
             ))}
           </select>
@@ -1235,6 +1292,12 @@ export default function Admissions({
             onChange={(e) =>
               setAssessment({ ...assessment, max_score: e.target.value })
             }
+          />
+          <input
+            className="inp"
+            placeholder="Evidence reference (result sheet, import batch, or document ID)"
+            value={assessment.source || ""}
+            onChange={(e) => setAssessment({ ...assessment, source: e.target.value })}
           />
         </Modal>
       )}
@@ -1271,6 +1334,7 @@ export default function Admissions({
             </>
           }
         >
+          {seatPool.readiness && <div className="allocation-readiness allocation-readiness-modal"><b>Verified allocation scope</b><span>{seatPool.readiness.cycle_name} · {seatPool.readiness.program_name} · {seatPool.readiness.campus}</span><span>Approved intake: {seatPool.readiness.approved_intake}; capacity still available for configuration: {seatPool.readiness.unconfigured_capacity}.</span></div>}
           <select
             className="inp"
             value={seatPool.cycle_id}
@@ -1361,7 +1425,7 @@ export default function Admissions({
                     () =>
                       api.recordCounselling(counsellingItem.id, {
                         attendance_status: counsellingItem.attendance_status,
-                        recommended_program_id: counsellingItem.program_id,
+                        recommended_program_id: counsellingItem.recommended_program_id,
                         preference_rank: Number(
                           counsellingItem.preference_rank,
                         ),
@@ -1396,6 +1460,9 @@ export default function Admissions({
           >
             <option value="attended">Attended</option>
             <option value="absent">Absent</option>
+          </select>
+          <select className="inp" value={counsellingItem.recommended_program_id || counsellingItem.program_id} onChange={(e) => setCounsellingItem({ ...counsellingItem, recommended_program_id: e.target.value })}>
+            {programmes.map((programme: any) => <option key={programme.id} value={programme.id}>{programme.name}</option>)}
           </select>
           <input
             className="inp"
@@ -3066,7 +3133,7 @@ function Cycles({
                       <button
                         className="btn btn-sm btn-out"
                         onClick={() =>
-                          { setBinding({ campus: c.campus || "", intake: 0, active: true }); setCycle({
+                          { setBinding({ campus: c.campus || "", intake: 0, application_fee: 0, admission_fee: 0, entrance_required: false, counselling_required: false, active: true }); setCycle({
                             ...c,
                             application_open_date:
                               c.application_open_date?.slice(0, 16) || "",
@@ -3122,9 +3189,11 @@ function CycleModal({
   act,
   loadCycles,
 }: any) {
+  const isNew = !cycle.id;
   return (
     <Modal
-      title={cycle.id ? "Edit admission cycle" : "Create admission cycle"}
+      className="admission-cycle-modal"
+      title={isNew ? "Create admission cycle" : "Configure admission cycle"}
       onClose={() => setCycle(null)}
       footer={
         <>
@@ -3132,104 +3201,50 @@ function CycleModal({
             Cancel
           </button>
           <button className="btn btn-brass" onClick={save}>
-            Save
+            {isNew ? "Save & continue" : "Save changes"}
           </button>
         </>
       }
     >
-      <input
-        className="inp"
-        placeholder="Name"
-        value={cycle.name}
-        onChange={(e) => setCycle({ ...cycle, name: e.target.value })}
-      />
-      <input
-        className="inp"
-        placeholder="Academic year"
-        value={cycle.academic_year}
-        onChange={(e) => setCycle({ ...cycle, academic_year: e.target.value })}
-      />
-      <input
-        className="inp"
-        placeholder="Campus"
-        value={cycle.campus}
-        onChange={(e) => setCycle({ ...cycle, campus: e.target.value })}
-      />
-      <input
-        className="inp"
-        type="datetime-local"
-        value={cycle.application_open_date}
-        onChange={(e) =>
-          setCycle({ ...cycle, application_open_date: e.target.value })
-        }
-      />
-      <input
-        className="inp"
-        type="datetime-local"
-        value={cycle.application_close_date}
-        onChange={(e) =>
-          setCycle({ ...cycle, application_close_date: e.target.value })
-        }
-      />
+      <div className="admission-cycle-steps" aria-label="Admission cycle setup progress">
+        <span className="is-current"><b>1</b> Cycle details</span>
+        <i />
+        <span className={cycle.id ? "is-current" : ""}><b>2</b> Programme intake</span>
+        <i />
+        <span><b>3</b> Publish</span>
+      </div>
+      <section className="admission-cycle-section">
+        <div className="admission-cycle-section-head">
+          <div><span>Step 1</span><h4>Cycle identity and application window</h4></div>
+          <p>Set the scope applicants will see. You can save this as a draft and configure intake next.</p>
+        </div>
+        <div className="admission-cycle-grid">
+          <label className="admission-cycle-field admission-cycle-field-wide"><span>Cycle name <em>*</em></span><input className="inp" placeholder="e.g. Undergraduate Admissions 2026–27" value={cycle.name} onChange={(e) => setCycle({ ...cycle, name: e.target.value })} /></label>
+          <label className="admission-cycle-field"><span>Academic year <em>*</em></span><input className="inp" placeholder="e.g. 2026–27" value={cycle.academic_year} onChange={(e) => setCycle({ ...cycle, academic_year: e.target.value })} /></label>
+          <label className="admission-cycle-field"><span>Campus <em>*</em></span><input className="inp" placeholder="e.g. Main Campus" value={cycle.campus} onChange={(e) => setCycle({ ...cycle, campus: e.target.value })} /></label>
+          <label className="admission-cycle-field"><span>Applications open <em>*</em></span><input className="inp" type="datetime-local" value={cycle.application_open_date} onChange={(e) => setCycle({ ...cycle, application_open_date: e.target.value })} /></label>
+          <label className="admission-cycle-field"><span>Applications close <em>*</em></span><input className="inp" type="datetime-local" value={cycle.application_close_date} onChange={(e) => setCycle({ ...cycle, application_close_date: e.target.value })} /></label>
+        </div>
+        <p className="admission-cycle-help">Required fields are marked <em>*</em>. Publishing remains unavailable until the application window is valid.</p>
+      </section>
       {cycle.id && (
-        <>
-          <h4>Bind existing programme</h4>
-          <select
-            className="inp"
-            value={binding.program_id || ""}
-            onChange={(e) =>
-              setBinding({
-                ...binding,
-                program_id: e.target.value,
-                campus: cycle.campus,
-                active: true,
-              })
-            }
-          >
-            <option value="">Select programme</option>
-            {programmes.map((p: any) => (
-              <option value={p.id} key={p.id}>
-                {p.code} - {p.name}
-              </option>
-            ))}
-          </select>
-          <input
-            className="inp"
-            type="number"
-            min="1"
-            placeholder="Intake"
-            value={binding.intake || ""}
-            onChange={(e) =>
-              setBinding({
-                ...binding,
-                intake: Number(e.target.value),
-                campus: cycle.campus,
-                active: true,
-              })
-            }
-          />
-          <button
-            className="btn btn-out"
-            type="button"
-            disabled={!binding.program_id || !Number(binding.intake)}
-            onClick={() =>
-              act(
-                () => api.bindAdmissionProgram(cycle.id, {
-                  ...binding,
-                  campus: binding.campus || cycle.campus,
-                  intake: Number(binding.intake),
-                  active: true,
-                }),
-                () => {
-                  setBinding({ campus: cycle.campus || "", intake: 0, active: true });
-                  loadCycles();
-                },
-              )
-            }
-          >
-            Bind programme
-          </button>
-        </>
+        <section className="admission-cycle-section admission-cycle-intake-section">
+          <div className="admission-cycle-section-head"><div><span>Step 2</span><h4>Add programme intake</h4></div><p>Every programme must be active in this cycle before its quota, fees, and seat pools can be configured.</p></div>
+          <div className="admission-cycle-intake-grid">
+            <label className="admission-cycle-field admission-cycle-field-wide"><span>Programme <em>*</em></span><select className="inp" value={binding.program_id || ""} onChange={(e) => setBinding({ ...binding, program_id: e.target.value, campus: cycle.campus, active: true })}><option value="">Select programme</option>{programmes.map((p: any) => <option value={p.id} key={p.id}>{p.code} - {p.name}</option>)}</select></label>
+            <label className="admission-cycle-field"><span>Approved intake <em>*</em></span><input className="inp" type="number" min="1" placeholder="e.g. 60" value={binding.intake || ""} onChange={(e) => setBinding({ ...binding, intake: Number(e.target.value), campus: cycle.campus, active: true })} /></label>
+            <label className="admission-cycle-field"><span>Application fee (₹)</span><input className="inp" type="number" min="0" step="1" placeholder="e.g. 1000" value={binding.application_fee ?? 0} onChange={(e) => setBinding({ ...binding, application_fee: Number(e.target.value) })} /></label>
+            <label className="admission-cycle-field"><span>Admission fee (₹)</span><input className="inp" type="number" min="0" step="1" placeholder="e.g. 25000" value={binding.admission_fee ?? 0} onChange={(e) => setBinding({ ...binding, admission_fee: Number(e.target.value) })} /></label>
+            <div className="admission-cycle-options admission-cycle-field-wide">
+              <span>Applicant progression</span>
+              <label><input type="checkbox" checked={!!binding.entrance_required} onChange={(e) => setBinding({ ...binding, entrance_required: e.target.checked })} /> Entrance assessment required</label>
+              <label><input type="checkbox" checked={!!binding.counselling_required} onChange={(e) => setBinding({ ...binding, counselling_required: e.target.checked })} /> Counselling required</label>
+              <label><input type="checkbox" checked={binding.active !== false} onChange={(e) => setBinding({ ...binding, active: e.target.checked })} /> Active for applications</label>
+            </div>
+            <button className="btn btn-out admission-cycle-bind admission-cycle-field-wide" type="button" disabled={!binding.program_id || !Number(binding.intake)} onClick={() => act(async () => { if (Number(binding.application_fee) < 0 || Number(binding.admission_fee) < 0) throw new Error("Fee amounts cannot be negative."); return api.bindAdmissionProgram(cycle.id, { ...binding, campus: binding.campus || cycle.campus, intake: Number(binding.intake), application_fee: Number(binding.application_fee || 0), admission_fee: Number(binding.admission_fee || 0), active: binding.active !== false }); }, () => { setBinding({ campus: cycle.campus || "", intake: 0, application_fee: 0, admission_fee: 0, entrance_required: false, counselling_required: false, active: true }); loadCycles(); })}>Save programme intake</button>
+          </div>
+          <div className="admission-cycle-next"><b>Next:</b> Configure eligibility rules, quota, fee mapping, and seat pools. Publish only when the setup is complete.</div>
+        </section>
       )}
     </Modal>
   );

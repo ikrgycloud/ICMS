@@ -6,9 +6,10 @@ export default function Placements({ caps }: { caps: any }) {
   const [data, setData] = useState<any>(null)
   useEffect(() => { api.placements().then(setData).catch(() => {}) }, [])
   if (!data) return <Spinner />
+  if (data.data_status === 'unavailable') return <div className="fade-in campus-placement-page"><PageHead title="Placements" sub="Recruiter drives and offers" /><section className="campus-placement-empty"><div className="campus-placement-empty-mark">P</div><div><b>Placement data is awaiting campus ownership verification</b><p>{data.reason || 'Campus-scoped placement data is unavailable.'} Drives are shown only after they are assigned to the authenticated campus.</p></div></section></div>
   const s = data.summary
   return (
-    <div className="fade-in">
+    <div className="fade-in campus-placement-page">
       <PageHead title="Placements" sub="Recruiter drives and offers" />
       <Kpis items={[
         { label: 'Total offers', value: s.offers, tone: 'var(--teal)' },
@@ -26,7 +27,7 @@ export default function Placements({ caps }: { caps: any }) {
                   <td>{d.eligible_cgpa}</td><td>{d.date}</td>
                   <td><span className={`pill s-${d.status}`}>{d.status}</span></td><td>{d.offers}</td>
                 </tr>
-              ))}
+              ))}{!data.drives.length && <tr><td colSpan={7}><div className="empty">No placement drives are available.</div></td></tr>}
             </tbody>
           </table>
         </div>

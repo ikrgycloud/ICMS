@@ -153,19 +153,13 @@ export function TransportOverview({
     const load = async () => {
       try {
         setLoading(true);
-        const [r, v, dr, q, a] = await Promise.all([
-          api.transportRoutes(),
-          api.transportVehicles(),
-          api.transportDrivers(),
-          api.transportRequests(),
-          api.transportAllocations(),
-        ]);
+        const bundle = await api.transport();
         setData({
-          routes: r.routes || [],
-          vehicles: v.vehicles || [],
-          drivers: dr.drivers || [],
-          requests: q.requests || [],
-          allocations: a.allocations || [],
+          routes: bundle.routes || [],
+          vehicles: bundle.vehicles || [],
+          drivers: bundle.drivers || [],
+          requests: bundle.requests || [],
+          allocations: bundle.allocations || [],
         });
       } catch (error) {
         setData({
@@ -190,7 +184,7 @@ export function TransportOverview({
       .toLowerCase()
       .includes(text);
   });
-  const pending = data.requests.filter((x: any) => x.status === "PENDING");
+  const pending = data.requests.filter((x: any) => ["PENDING", "REQUESTED"].includes(x.status));
   const seats = data.vehicles.reduce(
     (n: number, v: any) => n + Math.max(0, v.capacity - v.occupied),
     0,
@@ -663,20 +657,16 @@ function TransportManager() {
   const load = async () => {
     try {
       setLoading(true);
-      const [r, v, dr, q, a, st] = await Promise.all([
-        api.transportRoutes(),
-        api.transportVehicles(),
-        api.transportDrivers(),
-        api.transportRequests(),
-        api.transportAllocations(),
+      const [bundle, st] = await Promise.all([
+        api.transport(),
         api.students?.() || Promise.resolve({ students: [] }),
       ]);
       setData({
-        routes: r.routes || [],
-        vehicles: v.vehicles || [],
-        drivers: dr.drivers || [],
-        requests: q.requests || [],
-        allocations: a.allocations || [],
+        routes: bundle.routes || [],
+        vehicles: bundle.vehicles || [],
+        drivers: bundle.drivers || [],
+        requests: bundle.requests || [],
+        allocations: bundle.allocations || [],
         stops: [],
         students: st.students || [],
       });
@@ -1050,11 +1040,11 @@ function TransportManager() {
           )}
 
           <Section title="Pending Transport Requests">
-            {filteredRequests.filter((x: any) => x.status === "PENDING")
+            {filteredRequests.filter((x: any) => ["PENDING", "REQUESTED"].includes(x.status))
               .length > 0 ? (
               <RequestsTable
                 rows={filteredRequests.filter(
-                  (x: any) => x.status === "PENDING",
+                  (x: any) => ["PENDING", "REQUESTED"].includes(x.status),
                 )}
                 routes={data.routes}
                 onApprove={(r) => {
@@ -1483,6 +1473,7 @@ function TransportManager() {
                                 license_number:
                                   d.license_number || d.license_no || "",
                                 license_expiry: d.license_expiry || "",
+                                vehicle_id: d.vehicle_id || "",
                               });
                               setModal("driver");
                             }}
@@ -1988,7 +1979,7 @@ function TransportManager() {
         <div className="modal-bg" onClick={closeModal}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-h">
-              <h3>Approve Request</h3>
+              <h3>{selectedRequest.source === "admission" ? "Admission transport request" : "Approve Request"}</h3>
               <button
                 className="modal-x"
                 onClick={closeModal}
@@ -2484,11 +2475,18 @@ function DriverDashboard() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
-  useEffect(() => {
+  const loadDashboard = () => {
     api
       .transportDriverDashboard()
-      .then(setData)
+      .then((payload: any) => {
+        setData(payload);
+        setTrip(payload.trip || null);
+        setError("");
+      })
       .catch((e) => setError(e.message));
+  };
+  useEffect(() => {
+    loadDashboard();
   }, []);
 
   useEffect(() => {
@@ -2514,7 +2512,10 @@ function DriverDashboard() {
     };
   }, [trip, data]);
 
-  if (!data) return <Spinner />;
+  if (!data) return error ? <div className="card"><div className="card-pad"><Empty text={error} /></div></div> : <Spinner />;
+
+  const hasVehicle = Boolean(data.vehicle?.id);
+  const hasRoute = Boolean(data.route?.id);
 
   return (
     <div className="fade-in">
@@ -2539,12 +2540,23 @@ function DriverDashboard() {
 
       <Kpis
         items={[
-          { label: "Vehicle", value: data.vehicle?.vehicle_number || "ï¿½" },
-          { label: "Capacity", value: data.vehicle?.capacity || "ï¿½" },
-          { label: "Route", value: data.route?.name || "ï¿½" },
+          { label: "Vehicle", value: data.vehicle?.vehicle_number || "Not assigned" },
+          { label: "Capacity", value: hasVehicle ? data.vehicle.capacity : "—" },
+          { label: "Route", value: data.route?.name || "Not assigned" },
           { label: "Students", value: data.students?.length || 0 },
         ]}
       />
+
+      {!hasVehicle && (
+        <div className="notice rose">
+          No vehicle is assigned to your driver account. Contact the Transport Manager to assign a vehicle before starting a trip.
+        </div>
+      )}
+      {hasVehicle && !hasRoute && (
+        <div className="notice">
+          Your vehicle is assigned, but no active route is linked yet. The Transport Manager must assign a route before passenger service begins.
+        </div>
+      )}
 
       <Section title="Route Stops">
         {data.route?.stops && data.route.stops.length > 0 ? (
@@ -2555,7 +2567,7 @@ function DriverDashboard() {
                   <b>
                     {s.sequence}. {s.name}
                   </b>
-                  <span>{s.pickup_time || "ï¿½"}</span>
+                  <span>{s.pickup_time || "—"}</span>
                 </div>
               ))}
             </div>
@@ -2608,10 +2620,10 @@ function DriverDashboard() {
                   }}
                 >
                   <p style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
-                    ?? TRIP RUNNING
+                    TRIP RUNNING
                   </p>
                   <p style={{ fontSize: 13, marginBottom: 4 }}>
-                    {data.route?.name} ï¿½ {trip.trip_type}
+                    {data.route?.name || "Route not assigned"} · {trip.trip_type}
                   </p>
                   <p className="hint">GPS tracking is active</p>
                 </div>
@@ -2621,7 +2633,8 @@ function DriverDashboard() {
                     api.endTransportTrip(trip.id).then(() => {
                       setTrip(null);
                       setSuccess("Trip ended");
-                    });
+                      loadDashboard();
+                    }).catch((e) => setError(e.message || "Unable to end trip."));
                   }}
                   style={{ width: "100%" }}
                 >
@@ -2659,7 +2672,13 @@ function DriverDashboard() {
                 </div>
                 <button
                   className="btn btn-crimson"
+                  disabled={!hasVehicle}
+                  title={hasVehicle ? "Start trip" : "A vehicle assignment is required before starting a trip"}
                   onClick={() => {
+                    if (!data.vehicle?.id) {
+                      setError("A vehicle assignment is required before starting a trip.");
+                      return;
+                    }
                     api
                       .startTransportTrip({
                         vehicle_id: data.vehicle.id,
@@ -2669,6 +2688,7 @@ function DriverDashboard() {
                       .then((x: any) => {
                         setTrip(x);
                         setSuccess(`${direction} trip started`);
+                        loadDashboard();
                       })
                       .catch((e) => setError(e.message));
                   }}
@@ -2730,7 +2750,8 @@ function RequestsTable({ rows, routes, onApprove }: any) {
             <tr>
               <th>Student</th>
               <th>ID</th>
-              <th>Route</th>
+              <th>Preferred pickup</th>
+              <th>Source</th>
               <th>Status</th>
               <th></th>
             </tr>
@@ -2743,14 +2764,14 @@ function RequestsTable({ rows, routes, onApprove }: any) {
                 </td>
                 <td className="mono">{r.student_id}</td>
                 <td>
-                  {routes.find((x: any) => x.id === r.route_id)?.name ||
-                    r.route_id}
+                  {r.pickup_point || routes.find((x: any) => x.id === r.route_id)?.name || r.route_id || "Not provided"}
                 </td>
+                <td>{r.source === "admission" ? "Admission" : "Student portal"}</td>
                 <td>
                   <Pill s={r.status} />
                 </td>
                 <td>
-                  {r.status === "PENDING" && (
+                  {["PENDING", "REQUESTED"].includes(r.status) && (
                     <button
                       className="btn btn-sm btn-crimson"
                       onClick={() => onApprove(r)}
@@ -2836,6 +2857,7 @@ function RequestApprovalForm({
   const [error, setError] = useState("");
 
   const route = routes.find((x: any) => x.id === form.route_id);
+  const awaitingStudent = request.source === "admission" && !request.student_id;
 
   return (
     <div>
@@ -2845,8 +2867,9 @@ function RequestApprovalForm({
         </div>
       )}
       <p style={{ marginBottom: 16, fontSize: 13 }}>
-        <b>{request.student_name}</b> is requesting transport
+        <b>{request.student_name}</b> is requesting transport{request.pickup_point ? ` near ${request.pickup_point}` : ""}.
       </p>
+      {request.source === "admission" && <div className="allocation-readiness"><b>Admission-originated request</b><span>{awaitingStudent ? "Awaiting the Admission Office’s provisional student and class allocation before a route can be assigned." : "The applicant is now provisionally enrolled and ready for route assignment."}</span></div>}
 
       <div className="grid-2">
         <div className="form-row">
@@ -2938,6 +2961,7 @@ function RequestApprovalForm({
         </button>
         <button
           className="btn btn-crimson"
+          disabled={awaitingStudent}
           onClick={() => {
             const stopId = form.pickup_stop_id || form.drop_stop_id;
             if (!stopId) {

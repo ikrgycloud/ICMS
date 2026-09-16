@@ -11,12 +11,13 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import func
 
 from database import (SessionLocal, TENANT, engine, DEMO_USERNAMES, CAMPUS_SCOPES,
-                      slug, ensure_versioned_migrations)
+                      slug, ensure_versioned_migrations, demo_data_enabled)
 from authority import pwhash
 from matrices import APPROVAL_MATRIX
 from models import (Base, Person, Role, User, UserRole, Delegation, DelegationPolicy, DelegationProfile,
                     WorkflowInstance, WorkflowProfile, Approval, Notification,
-                    DelegationOption, DelegationContext)
+                    DelegationOption, DelegationContext, OrgScope, AuthorityMembership)
+from core import write_audit
 import domain_models as D
 from teaching import (active_allocation_for_section, class_session_for_timetable,
                       sync_section_faculty)
@@ -4775,6 +4776,135 @@ def _seed_research_demo(s):
     s.commit()
 
 
+def _seed_campus_head_demo_data(s):
+    """Provision development-only, campus-owned performance records.
+
+    Every key is deterministic from the canonical scope.  Existing records are
+    never changed, so normal startup may run this repeatedly without duplicate
+    operational rows or audit events.
+    """
+    now = datetime.utcnow()
+    created_ids = set()
+    campus_heads = (s.query(User).filter(User.tenant_id == TENANT, User.office_n == 3,
+                                         User.status == "active").all())
+    for head in campus_heads:
+        # Resolve only a scope already assigned to this account.  Membership is
+        # preferred; scope_ref is retained as a verified legacy fallback.
+        memberships = (s.query(AuthorityMembership).filter(
+            AuthorityMembership.tenant_id == head.tenant_id,
+            AuthorityMembership.user_id == head.id,
+            AuthorityMembership.office_n == 3,
+            AuthorityMembership.status == "active",
+            AuthorityMembership.active_from <= now,
+            (AuthorityMembership.active_to.is_(None) | (AuthorityMembership.active_to >= now)),
+        ).all())
+        scope_ids = [row.org_scope_id for row in memberships]
+        scope_query = s.query(OrgScope).filter(OrgScope.tenant_id == head.tenant_id, OrgScope.level == "campus")
+        campus = scope_query.filter(OrgScope.id.in_(scope_ids)).first() if scope_ids else None
+        if not campus and head.scope_ref:
+            campus = scope_query.filter((OrgScope.id == head.scope_ref) | (OrgScope.name == head.scope_ref)).first()
+        if not campus:
+            continue
+
+        key = slug(campus.id)
+        owner_memberships = (s.query(AuthorityMembership).filter(
+            AuthorityMembership.tenant_id == head.tenant_id,
+            AuthorityMembership.org_scope_id == campus.id,
+            AuthorityMembership.status == "active",
+            AuthorityMembership.active_from <= now,
+            (AuthorityMembership.active_to.is_(None) | (AuthorityMembership.active_to >= now)),
+        ).all())
+        owner_ids = [row.user_id for row in owner_memberships]
+        owners = (s.query(User).filter(User.tenant_id == head.tenant_id, User.status == "active",
+                                       User.id.in_(owner_ids)).order_by(User.id).all() if owner_ids else [])
+        owner_id = owners[0].id if owners else head.id
+        alternate_owner_id = owners[1].id if len(owners) > 1 else owner_id
+
+        def provision(model, record_id, factory, audit_action, state, note):
+            row = s.get(model, record_id)
+            if row:
+                return row
+            row = factory()
+            s.add(row)
+            s.flush()
+            created_ids.add(record_id)
+            write_audit(s, "system_seed", "System seed", 28, audit_action,
+                        f"{model.__tablename__}:{row.id}", "", state,
+                        f"{note}; campus scope {campus.id}")
+            return row
+
+        asset_specs = [
+            ("lab_server", "Laboratory Application Server", "IT Hardware", "Digital Learning Lab", "in-service", 680000),
+            ("ventilation", "Laboratory Ventilation Unit", "Facilities", "Applied Sciences Block", "maintenance", 285000),
+            ("instrument", "Engineering Measurement Suite", "Lab Equipment", "Engineering Laboratory", "in-service", 420000),
+            ("av_console", "Lecture Theatre AV Console", "AV Equipment", "Central Lecture Theatre", "in-service", 175000),
+        ]
+        for suffix, name, category, location, status, value in asset_specs:
+            record_id = f"demo_asset_{key}_{suffix}"
+            provision(D.Asset, record_id, lambda record_id=record_id, name=name, category=category, location=location, status=status, value=value: D.Asset(
+                id=record_id, tenant_id=head.tenant_id, campus_scope_id=campus.id,
+                tag=f"{key[:8].upper()}-{suffix[:5].upper()}", name=name, category=category,
+                location=location, status=status, value=value), "asset.create", status, "Campus demo asset provisioned")
+
+        drive_specs = [
+            ("techworks", "TechWorks Systems", "Graduate Engineer Trainee", 8.4, "scheduled", 14),
+            ("northstar", "Northstar Analytics", "Data Analyst", 10.8, "completed", 9),
+            ("vertex", "Vertex Manufacturing", "Operations Associate", 7.2, "completed", 11),
+        ]
+        for index, (suffix, company, role, ctc, status, offers) in enumerate(drive_specs, 1):
+            record_id = f"demo_placement_{key}_{suffix}"
+            provision(D.PlacementDrive, record_id, lambda record_id=record_id, company=company, role=role, ctc=ctc, status=status, offers=offers, index=index: D.PlacementDrive(
+                id=record_id, tenant_id=head.tenant_id, campus_scope_id=campus.id, company=company,
+                role=role, ctc=ctc, date=(date.today() + timedelta(days=(index - 2) * 12)),
+                eligible_cgpa=6.5 + (index * .2), status=status, offers=offers),
+                "placement.create", status, "Campus demo placement drive provisioned")
+
+        risk_specs = [
+            ("ventilation", "Laboratory ventilation maintenance backlog", "Infrastructure", "HIGH", "HIGH", "MEDIUM", "HIGH", "OPEN", now + timedelta(days=9)),
+            ("moderation", "Internal assessment moderation delay", "Academic", "MEDIUM", "MEDIUM", "MEDIUM", "MEDIUM", "IN_PROGRESS", now + timedelta(days=4)),
+            ("emergency", "Emergency response equipment inspection", "Safety", "CRITICAL", "MEDIUM", "CRITICAL", "CRITICAL", "OPEN", now - timedelta(days=1)),
+            ("support", "Student support desk response monitoring", "Student", "LOW", "LOW", "LOW", "LOW", "RESOLVED", now - timedelta(days=5)),
+        ]
+        seeded_risks = {}
+        for suffix, title, category, severity, likelihood, impact, priority, status, due_at in risk_specs:
+            record_id = f"demo_risk_{key}_{suffix}"
+            row = provision(D.RiskRecord, record_id, lambda record_id=record_id, title=title, category=category, severity=severity, likelihood=likelihood, impact=impact, priority=priority, status=status, due_at=due_at: D.RiskRecord(
+                id=record_id, tenant_id=head.tenant_id, campus_scope_id=campus.id, created_by=head.id,
+                owner_id=owner_id, title=title, description=f"Development demonstration record for {campus.name}.",
+                category=category, severity=severity, likelihood=likelihood, impact=impact, priority=priority,
+                status=status, due_at=due_at, resolved_at=now - timedelta(days=2) if status == "RESOLVED" else None),
+                "risk.create", status, "Campus demo risk provisioned")
+            seeded_risks[suffix] = row
+            if record_id in created_ids and row.owner_id:
+                write_audit(s, "system_seed", "System seed", 28, "risk.assign", f"risk:{row.id}",
+                            "", row.status, f"Seeded owner assignment; campus scope {campus.id}")
+
+        action_specs = [
+            ("moderation", "review_tracker", "Publish moderation tracker and ownership", "OPEN", now - timedelta(days=2), None),
+            ("moderation", "faculty_review", "Complete faculty moderation review", "COMPLETED", now + timedelta(days=1), now - timedelta(hours=8)),
+            ("support", "service_standard", "Verify support desk response standard", "VERIFIED", now - timedelta(days=7), now - timedelta(days=6)),
+        ]
+        for risk_key, suffix, description, status, due_at, completed_at in action_specs:
+            risk = seeded_risks[risk_key]
+            record_id = f"demo_risk_action_{key}_{suffix}"
+            def action_factory(record_id=record_id, risk=risk, description=description, status=status, due_at=due_at, completed_at=completed_at):
+                return D.RiskCorrectiveAction(id=record_id, tenant_id=head.tenant_id, risk_id=risk.id,
+                    owner_id=alternate_owner_id, description=description, due_at=due_at, status=status,
+                    completion_note="Demo corrective action completed" if completed_at else "",
+                    completed_at=completed_at, verified_at=completed_at if status == "VERIFIED" else None,
+                    verified_by=head.id if status == "VERIFIED" else None)
+            action = provision(D.RiskCorrectiveAction, record_id, action_factory,
+                               "risk.action.create", status, "Campus demo corrective action provisioned")
+            if record_id in created_ids and status in {"COMPLETED", "VERIFIED"}:
+                # These only occur on first provisioning, keeping audit history idempotent.
+                write_audit(s, "system_seed", "System seed", 28, "risk.action.complete", f"risk:{risk.id}", "OPEN", "COMPLETED", f"Seeded completion; campus scope {campus.id}")
+            if record_id in created_ids and status == "VERIFIED":
+                write_audit(s, "system_seed", "System seed", 28, "risk.action.verify", f"risk:{risk.id}", "COMPLETED", "VERIFIED", f"Seeded verification; campus scope {campus.id}")
+        resolved = seeded_risks["support"]
+        if resolved.id in created_ids:
+            write_audit(s, "system_seed", "System seed", 28, "risk.resolve", f"risk:{resolved.id}", "IN_PROGRESS", "RESOLVED", f"Seeded resolution; campus scope {campus.id}")
+
+
 def seed_domain():
     ensure_versioned_migrations()
     s = SessionLocal()
@@ -4792,6 +4922,8 @@ def seed_domain():
         _seed_dean_dashboard_data(s)
         _seed_chairman_workflows(s)
         _bind_portal_accounts(s)
+        if demo_data_enabled():
+            _seed_campus_head_demo_data(s)
         _ensure_aarav_kulkarni_professor_login(s)
         _ensure_karthik_menon_student_login(s)
         _seed_student_portal_demo_profile(s)

@@ -12,7 +12,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from models import (Base, Tenant, OrgScope, Person, User, Role, Permission,
-                    RolePermission, ApprovalLimit, UserRole, Designation)
+                    RolePermission, ApprovalLimit, UserRole, Designation, AuthorityMembership)
 # Register domain tables before additive schema creation.  This keeps command-line
 # bootstrap and test setup consistent with FastAPI startup.
 import domain_models  # noqa: F401
@@ -269,6 +269,17 @@ def seed():
             leadership = s.get(User, leadership_id)
             if leadership and leadership.scope_level == "campus":
                 leadership.scope_ref = CAMPUS_SCOPES[0]
+
+        # The demonstration tenant has explicit, time-bound campus leadership
+        # appointments. The directory reads these governance records, never a
+        # person's free-text job title.
+        main_scope = f"scope_{slug(CAMPUS_SCOPES[0])}"
+        for office_number in (3, 4, 5, 6, 7, 8, 9, 10):
+            membership_id = f"authority_main_{office_number}"
+            if not s.get(AuthorityMembership, membership_id):
+                s.add(AuthorityMembership(id=membership_id, tenant_id=TENANT,
+                      user_id=f"user_{office_number}", org_scope_id=main_scope,
+                      office_n=office_number, status="active"))
 
         s.commit()
         return {"status": "seeded", "offices": len(OFFICES),

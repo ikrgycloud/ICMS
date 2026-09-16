@@ -377,12 +377,28 @@ def configure_cycle_program(cycle_id: str, body: CycleProgramIn, ctx=Depends(aut
     program = s.get(D.Program, body.program_id)
     if not cycle or cycle.tenant_id != ctx["tenant_id"] or not program or program.tenant_id != ctx["tenant_id"]:
         raise HTTPException(404, "Cycle or programme not found")
-    row = D.AdmissionCycleProgram(id=uid(), tenant_id=ctx["tenant_id"], cycle_id=cycle.id, program_id=program.id,
-        campus=body.campus or cycle.campus, application_fee=body.application_fee, admission_fee=body.admission_fee,
-        intake=body.intake, assessment_mode="entrance" if body.entrance_required else "merit", active=body.active,
-        settings_json=json.dumps({"entrance_required": body.entrance_required, "counselling_required": body.counselling_required}))
-    s.add(row); s.commit()
-    write_audit(s, ctx["sub"], ctx["sub"], ctx["office_n"], "admission.cycle_program.create", f"admission_cycle_program:{row.id}", "", "active" if row.active else "inactive", program.name)
+    if cycle.status.upper() in {"PUBLISHED", "CLOSED"}:
+        raise HTTPException(409, "Programme intake cannot be changed after a cycle is published or closed")
+    if body.intake < 1:
+        raise HTTPException(422, "Approved intake must be at least one seat")
+    if body.application_fee < 0 or body.admission_fee < 0:
+        raise HTTPException(422, "Fee amounts cannot be negative")
+    campus = (body.campus or cycle.campus).strip()
+    if not campus:
+        raise HTTPException(422, "Campus is required for programme intake")
+    row = s.query(D.AdmissionCycleProgram).filter_by(tenant_id=ctx["tenant_id"], cycle_id=cycle.id,
+        program_id=program.id, campus=campus).first()
+    previous = ""
+    if not row:
+        row = D.AdmissionCycleProgram(id=uid(), tenant_id=ctx["tenant_id"], cycle_id=cycle.id, program_id=program.id, campus=campus)
+        s.add(row)
+    else:
+        previous = "active" if row.active else "inactive"
+    row.application_fee, row.admission_fee, row.intake = body.application_fee, body.admission_fee, body.intake
+    row.assessment_mode, row.active = ("entrance" if body.entrance_required else "merit"), body.active
+    row.settings_json = json.dumps({"entrance_required": body.entrance_required, "counselling_required": body.counselling_required})
+    s.commit()
+    write_audit(s, ctx["sub"], ctx["sub"], ctx["office_n"], "admission.cycle_program.configure", f"admission_cycle_program:{row.id}", previous, "active" if row.active else "inactive", program.name)
     return {"id": row.id}
 
 
@@ -915,11 +931,15 @@ def assessment_queue(ctx=Depends(auth), s=Depends(db)):
         if ctx.get("scope_level") == "campus" and ctx.get("scope_ref") and not ctx["scope_ref"].startswith("scope_") and application.campus != ctx["scope_ref"]:
             continue
         merit = (s.query(D.ApplicationAssessment)
-                 .filter_by(application_id=application.id, assessment_type="ACADEMIC_MERIT")
+                 .filter_by(application_id=application.id, assessment_type="ACADEMIC_MERIT", status="CALCULATED")
                  .order_by(D.ApplicationAssessment.verified_at.desc()).first())
         item = _application_payload(application)
         item["merit_score"] = merit.merit_score if merit else None
         item["merit_rank"] = merit.rank if merit else None
+        counselling = (s.query(D.ApplicationCounselling)
+                       .filter_by(application_id=application.id, outcome="COMPLETED")
+                       .order_by(D.ApplicationCounselling.recorded_at.desc(), D.ApplicationCounselling.id.desc()).first())
+        item["recommended_program_id"] = counselling.recommended_program_id if counselling else None
         item["qualified_quota_ids"] = [
             row.quota_id for row in s.query(D.ApplicationEligibilityCheck).filter_by(
                 application_id=application.id, outcome="PASS"
@@ -955,7 +975,7 @@ def counselling_queue(cycle_id: str = "", program_id: str = "", ctx=Depends(auth
     rows=[]
     for app in q.all():
         if ctx.get("scope_level")=="campus" and ctx.get("scope_ref") and not ctx["scope_ref"].startswith("scope_") and app.campus != ctx["scope_ref"]:continue
-        merit=s.query(D.ApplicationAssessment).filter_by(application_id=app.id,assessment_type="ACADEMIC_MERIT").order_by(D.ApplicationAssessment.verified_at.desc()).first()
+        merit=s.query(D.ApplicationAssessment).filter_by(application_id=app.id,assessment_type="ACADEMIC_MERIT",status="CALCULATED").order_by(D.ApplicationAssessment.verified_at.desc()).first()
         prefs=s.query(D.ApplicationPreference).filter_by(application_id=app.id).order_by(D.ApplicationPreference.preference_rank).all()
         rows.append({**_application_payload(app),"merit_score":merit.merit_score if merit else None,"merit_rank":merit.rank if merit else None,"preferences":[{"program_id":p.program_id,"rank":p.preference_rank} for p in prefs]})
     return {"applications":rows}
@@ -976,7 +996,16 @@ def record_counselling(application_id: str, body: CounsellingIn, ctx=Depends(aut
     _assert_application_scope(app,ctx)
     if app.status_version != body.expected_status_version:raise HTTPException(409,"Application changed; reload")
     if app.current_status != "COUNSELLING_PENDING":raise HTTPException(409,"Counselling is not pending")
-    row=D.ApplicationCounselling(id=uid(),tenant_id=app.tenant_id,application_id=app.id,session_id=body.session_id,attendance_status=body.attendance_status,outcome="COMPLETED",counsellor_user_id=ctx["sub"],recorded_at=now_utc(),recommended_program_id=body.recommended_program_id or app.selected_program_id,recommended_quota_id=body.recommended_quota_id,preference_rank=body.preference_rank,remarks=body.remarks)
+    recommended_program_id = body.recommended_program_id or app.selected_program_id
+    binding = s.query(D.AdmissionCycleProgram).filter_by(tenant_id=app.tenant_id, cycle_id=app.cycle_id,
+        program_id=recommended_program_id, active=True).first()
+    if not binding or binding.campus != app.campus:
+        raise HTTPException(422, "The counselling recommendation must be an active programme for this admission cycle and campus")
+    if body.recommended_quota_id:
+        quota = s.get(D.AdmissionQuota, body.recommended_quota_id)
+        if not quota or quota.tenant_id != app.tenant_id or quota.cycle_id != app.cycle_id:
+            raise HTTPException(422, "The recommended quota is outside this admission cycle")
+    row=D.ApplicationCounselling(id=uid(),tenant_id=app.tenant_id,application_id=app.id,session_id=body.session_id,attendance_status=body.attendance_status,outcome="COMPLETED",counsellor_user_id=ctx["sub"],recorded_at=now_utc(),recommended_program_id=recommended_program_id,recommended_quota_id=body.recommended_quota_id,preference_rank=body.preference_rank,remarks=body.remarks)
     s.add(row);s.commit();app=transition_application(s,ctx,app.id,"complete_counselling",app.status_version,"Counselling outcome recorded");app=transition_application(s,ctx,app.id,"start_allocation",app.status_version,"Ready for allocation");return {"application":_application_payload(app),"counselling_id":row.id}
 
 
@@ -992,17 +1021,49 @@ def seat_pools(cycle_id: str = "", ctx=Depends(auth), s=Depends(db)):
     return {"seat_pools":out}
 
 
+@router.get("/admissions/{application_id}/seat-pool-readiness")
+def admission_seat_pool_readiness(application_id: str, ctx=Depends(auth), s=Depends(db)):
+    """Return the policy-bound General-pool setup needed for an applicant."""
+    _staff(s, ctx, "manage_seat_pool")
+    app = s.get(D.Application, application_id)
+    if not app or app.tenant_id != ctx["tenant_id"]: raise HTTPException(404, "Application not found")
+    _assert_application_scope(app, ctx)
+    programme_id = app.selected_program_id
+    counselling = (s.query(D.ApplicationCounselling).filter_by(application_id=app.id, outcome="COMPLETED")
+                   .order_by(D.ApplicationCounselling.recorded_at.desc(), D.ApplicationCounselling.id.desc()).first())
+    if counselling and counselling.recommended_program_id: programme_id = counselling.recommended_program_id
+    binding = s.query(D.AdmissionCycleProgram).filter_by(tenant_id=ctx["tenant_id"], cycle_id=app.cycle_id,
+        program_id=programme_id, campus=app.campus, active=True).first()
+    if not binding: raise HTTPException(422, "This applicant does not have an active programme intake for the selected cycle and campus")
+    pools = s.query(D.AdmissionSeatPool).filter_by(tenant_id=ctx["tenant_id"], cycle_id=app.cycle_id,
+        campus=app.campus, program_id=programme_id).all()
+    configured_capacity = sum(max(0, pool.capacity or 0) for pool in pools)
+    general = next((pool for pool in pools if not pool.quota_id and not pool.category_code and not pool.intake_key), None)
+    cycle, programme = s.get(D.AdmissionCycle, app.cycle_id), s.get(D.Program, programme_id)
+    return {"application_id":app.id,"application_no":app.application_no,"applicant_name":app.applicant_name,
+            "cycle_id":app.cycle_id,"cycle_name":cycle.name if cycle else app.cycle_id,"program_id":programme_id,
+            "program_name":programme.name if programme else app.program_name,"campus":app.campus,"approved_intake":binding.intake,
+            "configured_capacity":configured_capacity,"unconfigured_capacity":max(0,binding.intake-configured_capacity),
+            "general_pool_id":general.id if general else None,"general_pool_status":general.status if general else None,
+            "suggested_capacity":max(0,binding.intake-configured_capacity)}
+
+
 @router.post("/admissions/seat-pools")
 def configure_seat_pool(body: SeatPoolIn, ctx=Depends(auth), s=Depends(db)):
     _staff(s,ctx,"manage_seat_pool"); cycle=s.get(D.AdmissionCycle,body.cycle_id);program=s.get(D.Program,body.program_id)
     if not cycle or not program or cycle.tenant_id != ctx["tenant_id"] or program.tenant_id != ctx["tenant_id"]:raise HTTPException(404,"Cycle or programme not found")
-    if not s.query(D.AdmissionCycleProgram).filter_by(tenant_id=ctx["tenant_id"], cycle_id=cycle.id, program_id=program.id, active=True).first():
+    binding = s.query(D.AdmissionCycleProgram).filter_by(tenant_id=ctx["tenant_id"], cycle_id=cycle.id,
+        program_id=program.id, campus=body.campus.strip(), active=True).first()
+    if not binding:
         raise HTTPException(422, "Programme must be bound and active in this admission cycle before creating a seat pool")
     if body.quota_id:
         quota=s.get(D.AdmissionQuota, body.quota_id)
         if not quota or quota.tenant_id != ctx["tenant_id"] or quota.cycle_id != cycle.id:
             raise HTTPException(422, "Selected quota does not belong to this admission cycle")
     row=s.query(D.AdmissionSeatPool).filter_by(tenant_id=ctx["tenant_id"],cycle_id=body.cycle_id,campus=body.campus,program_id=body.program_id,quota_id=body.quota_id,category_code=body.category_code,intake_key=body.intake_key).first()
+    other_capacity = sum(pool.capacity or 0 for pool in s.query(D.AdmissionSeatPool).filter_by(tenant_id=ctx["tenant_id"], cycle_id=body.cycle_id, campus=body.campus, program_id=body.program_id).all() if not row or pool.id != row.id)
+    if other_capacity + body.capacity > binding.intake:
+        raise HTTPException(422, f"Seat-pool capacity cannot exceed the approved intake of {binding.intake} for this programme and campus")
     if not row: row=D.AdmissionSeatPool(id=uid(),tenant_id=ctx["tenant_id"],cycle_id=body.cycle_id,campus=body.campus,program_id=body.program_id,quota_id=body.quota_id,category_code=body.category_code,intake_key=body.intake_key);s.add(row)
     used=s.query(D.AdmissionSeatAllocation).filter(D.AdmissionSeatAllocation.seat_pool_id==row.id,D.AdmissionSeatAllocation.status.in_(["RESERVED","ALLOCATED"])).count()
     if body.capacity < used:raise HTTPException(409,"Capacity cannot be below active allocations")

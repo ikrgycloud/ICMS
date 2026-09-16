@@ -74,7 +74,10 @@ export default function Directory({ user }: { user?: any }) {
     [filtered],
   );
   if (loading) return <Spinner />;
-  if (user?.office_n === 4) return <PrincipalDirectory offices={offices} />;
+  // Principal and Campus Head use the immutable institutional catalogue. It
+  // deliberately contains office definitions only, never people or campus HR
+  // data, and the detail modal is read-only.
+  if (user?.office_n === 3 || user?.office_n === 4) return <PrincipalDirectory offices={offices} />;
   return (
     <div className="fade-in directory-page">
       <div className="page-head directory-head">

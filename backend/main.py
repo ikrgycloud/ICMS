@@ -13,6 +13,7 @@ import sys
 import uuid
 import time
 import re
+import json
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 
@@ -1018,6 +1019,14 @@ def scope_matrix(ctx=Depends(non_front_office)):
 # source record which can be reconciled and executed after approval.  A generic
 # Principal-started request would be an orphan and must fail closed.
 PRINCIPAL_INITIATABLE_WORKFLOWS: set[str] = set()
+# These workflows always change a record owned by another domain.  A legacy
+# row without that source is view-only diagnostic data, never an approvable
+# task: otherwise the UI can show a decision that cannot be completed safely.
+SOURCE_REQUIRED_WORKFLOWS = {
+    "attendance_condonation", "disciplinary_action", "purchase_request",
+    "recruitment", "infrastructure_capex", "fee_waiver",
+    "campus_escalation",
+}
 
 
 def _initiable_workflow_processes(ctx):
@@ -1119,7 +1128,7 @@ def _workflow_stage_offices(proc, stage):
     if not proc or stage < 0 or stage >= len(proc.get("chain", [])):
         return set()
     label = proc["chain"][stage].lower()
-    mapping = (("campus head", {3}), ("vice principal", {5}), ("principal", {4}),
+    mapping = (("campus head", {3}), ("vice chairman", {2}), ("vice principal", {5}), ("principal", {4}),
                ("dean", {6, 7, 8, 9}), ("finance", {22}), ("accounts", {23}),
                ("hr", {24, 25}), ("purchase", {32}), ("procurement", {32}),
                ("maintenance", {29}), ("system admin", {28}), ("security admin", {28}),
@@ -1135,10 +1144,69 @@ def _workflow_stage_offices(proc, stage):
     return stage_offices
 
 
-def _workflow_visible_to(wf, proc, ctx):
+def _workflow_escalation_offices(proc, wf=None):
+    """Resolve an active persisted escalation target, then the policy fallback."""
+    routed_to = getattr(wf, "escalation_to_office_n", None) if wf is not None else None
+    if routed_to:
+        return {int(routed_to)}
+    target = ((proc or {}).get("escalation") or "").strip().lower()
+    mapping = (
+        (("vice chairman", "vice-chairman", "vc"), {2}),
+        (("campus head",), {3}),
+        (("vice principal",), {5}),
+        (("principal",), {4}),
+        (("chairman",), {1}),
+        (("cfo", "finance manager"), {22}),
+        (("audit admin", "system admin"), {28}),
+    )
+    for names, offices in mapping:
+        if any(name in target for name in names):
+            return offices
+    return set()
+
+
+def _next_executive_escalation_office(ctx, proc):
+    """PDF executive ladder: Principal -> Campus Head -> Vice Chairman."""
+    # A Campus Head-originated item is already at the campus executive level.
+    # Returning it to its initiator would be a circular escalation; policy
+    # routes a Principal exception directly to the Vice Chairman instead.
+    if (proc or {}).get("key") == "campus_escalation":
+        return 2
+    office_n = int(ctx.get("office_n") or 0)
+    if office_n == 4:
+        return 3
+    if office_n == 3:
+        return 2
+    targets = _workflow_escalation_offices(proc)
+    return next(iter(targets), None)
+
+
+def _office_name(office_n):
+    return office(int(office_n)).get("name", f"Office {office_n}") if office_n else ""
+
+
+def _workflow_current_offices(wf, proc):
+    """Return the only offices permitted to act at this point in the flow."""
+    if wf.state == "escalated":
+        return _workflow_escalation_offices(proc, wf)
+    return _workflow_stage_offices(proc, wf.current_stage)
+
+
+def _workflow_current_owner(wf, proc):
+    if wf.state in {"approved", "executed", "rejected", "returned"}:
+        return "Decision complete"
+    if wf.state == "escalated":
+        target = _office_name(getattr(wf, "escalation_to_office_n", None)) or ((proc or {}).get("escalation") or "")
+        return f"Escalated to {target}" if target else "Escalation configuration required"
+    if proc and 0 <= wf.current_stage < len(proc["chain"]):
+        return proc["chain"][wf.current_stage]
+    return ""
+
+
+def _workflow_visible_to(s, wf, proc, ctx):
     if wf.tenant_id != ctx.get("tenant_id", TENANT):
         return False
-    if ctx.get("office_n") == 4 and ctx.get("scope_level") == "campus":
+    if ctx.get("office_n") in {3, 4} and ctx.get("scope_level") == "campus":
         # New workflows carry the source campus explicitly. Legacy rows can
         # only be treated as campus records when their scope level is campus.
         if wf.scope_level != "campus":
@@ -1147,10 +1215,24 @@ def _workflow_visible_to(wf, proc, ctx):
             return False
     if wf.initiator_id == ctx["sub"] or wf.office_n == ctx["office_n"]:
         return True
-    return ctx["office_n"] in _workflow_stage_offices(proc, wf.current_stage)
+    # An executive escalation remains visible to the office that received it
+    # after its final decision. Visibility is historical only; actionability
+    # still fails closed for terminal states in _workflow_actionable_by.
+    if getattr(wf, "escalation_to_office_n", None) == ctx.get("office_n"):
+        return True
+    # Recorded approvers retain read-only access to the record they helped
+    # decide. Terminal actionability still fails closed below.
+    if s.query(Approval.id).filter(Approval.workflow_id == wf.id, Approval.actor_id == ctx.get("sub")).first():
+        return True
+    # A Campus Head retains read-only access to the audit/history of a
+    # campus-scoped workflow after acting.  It does not grant a later action:
+    # _workflow_actionable_by still requires current-stage ownership.
+    if ctx.get("office_n") == 3 and any(3 in _workflow_stage_offices(proc, index) for index in range(len((proc or {}).get("chain", [])))):
+        return True
+    return ctx["office_n"] in _workflow_current_offices(wf, proc)
 
 
-def _workflow_actionable_by(wf, proc, ctx):
+def _workflow_actionable_by(s, wf, proc, ctx):
     """True only when this actor owns the current, non-terminal review stage.
 
     Visibility is intentionally broader so users can read their own requests
@@ -1158,19 +1240,31 @@ def _workflow_actionable_by(wf, proc, ctx):
     surfaces old records from the office that started a workflow and invites a
     decision that the server must reject.
     """
-    if not _workflow_visible_to(wf, proc, ctx):
+    if not _workflow_visible_to(s, wf, proc, ctx):
         return False
     if wf.initiator_id == ctx["sub"]:
         return False
+    if wf.process_key in SOURCE_REQUIRED_WORKFLOWS and (not wf.source_type or not wf.source_id):
+        return False
     if wf.state not in {"submitted", "under_review", "reviewed", "escalated"}:
         return False
-    return ctx["office_n"] in _workflow_stage_offices(proc, wf.current_stage)
+    return ctx["office_n"] in _workflow_current_offices(wf, proc)
 
 
-def _workflow_available_actions(wf, proc, ctx):
+def _workflow_available_actions(s, wf, proc, ctx):
     """Server-calculated decision controls for an approval card or modal."""
-    if not ctx or not _workflow_actionable_by(wf, proc, ctx):
+    if not ctx or not _workflow_actionable_by(s, wf, proc, ctx):
         return []
+    if wf.process_key == BOP_PROCESS_KEY:
+        if ctx.get("office_n") != 2:
+            return []
+        return ["review", "return"] if wf.current_stage == 1 and wf.state == "submitted" else (
+            ["approve", "return"] if wf.current_stage == 2 and wf.state == "reviewed" else []
+        )
+    if wf.process_key == "campus_escalation":
+        # This is a single Principal decision, not a multi-stage review.
+        return [action for action in ("approve", "return", "reject", "escalate")
+                if wf.state in WF_VALID.get(action, [])]
     candidates = ("review", "approve", "return", "reject", "escalate")
     return [action for action in candidates if wf.state in WF_VALID.get(action, [])]
 
@@ -1310,6 +1404,185 @@ def _start_workflow_record(
     return wf, proc
 
 
+# --------------------------------------------------------------------------- #
+#  Branch Operational Plans                                                    #
+# --------------------------------------------------------------------------- #
+# BOP records deliberately reuse the governed workflow store.  The profile's
+# JSON notes are private structured metadata; workflow ownership, stage and
+# scope remain first-class columns and can never be supplied by the browser.
+BOP_PROCESS_KEY = "branch_operational_plan"
+BOP_LIST_FIELDS = ("initiatives", "activities", "responsible_areas", "resources", "kpi_references", "risks")
+
+
+class BopPayload(BaseModel):
+    title: str = ""
+    planning_period: str = ""
+    strategic_alignment: str = ""
+    initiatives: list[str] = []
+    activities: list[str] = []
+    responsible_areas: list[str] = []
+    resources: list[str] = []
+    timeline: str = ""
+    kpi_references: list[str] = []
+    risks: list[str] = []
+    notes: str = ""
+    expected_version: int | None = None
+
+
+def _require_bop_owner(ctx):
+    if ctx.get("office_n") != 3 or ctx.get("scope_level") != "campus":
+        raise HTTPException(403, "Branch Operational Plans are available only to Campus Head offices")
+    campus = (ctx.get("scope_ref") or "").strip()
+    if not campus:
+        raise HTTPException(403, "Your Campus Head account has no assigned campus scope")
+    return campus
+
+
+def _bop_data(profile):
+    try:
+        data = json.loads(profile.notes or "{}") if profile else {}
+        return data if isinstance(data, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _clean_bop_body(body: BopPayload):
+    title = (body.title or "").strip()
+    if not title:
+        raise HTTPException(422, "Plan title is required")
+    data = {
+        "title": title,
+        "planning_period": (body.planning_period or "").strip(),
+        "strategic_alignment": (body.strategic_alignment or "").strip(),
+        "timeline": (body.timeline or "").strip(),
+        "notes": (body.notes or "").strip(),
+    }
+    for field in BOP_LIST_FIELDS:
+        values = getattr(body, field, [])
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            raise HTTPException(422, f"{field} must be a list of text items")
+        data[field] = [value.strip() for value in values if value and value.strip()]
+    return data
+
+
+def _bop_payload(s, wf):
+    profile = s.query(WorkflowProfile).filter(WorkflowProfile.workflow_id == wf.id).first()
+    data = _bop_data(profile)
+    submission = data.get("submission") if isinstance(data.get("submission"), dict) else None
+    review = data.get("vc_review") if isinstance(data.get("vc_review"), dict) else None
+    return {
+        "id": wf.id, "campus": wf.scope_ref, "campus_scope_id": wf.scope_ref,
+        "title": data.get("title") or wf.title, "planning_period": data.get("planning_period", ""),
+        "strategic_alignment": data.get("strategic_alignment", ""),
+        "initiatives": data.get("initiatives", []), "activities": data.get("activities", []),
+        "responsible_areas": data.get("responsible_areas", []), "resources": data.get("resources", []),
+        "timeline": data.get("timeline", ""), "kpi_references": data.get("kpi_references", []),
+        "risks": data.get("risks", []), "notes": data.get("notes", ""),
+        "status": wf.state, "created_by": wf.initiator_id,
+        "created_at": wf.created_at.isoformat() if wf.created_at else None,
+        "updated_at": wf.updated_at.isoformat() if wf.updated_at else None,
+        "version": wf.version_no or 1, "submission": submission, "vc_review": review,
+    }
+
+
+def _bop_owned_workflow_or_404(s, ctx, plan_id, editable_only=False):
+    campus = _require_bop_owner(ctx)
+    wf = (s.query(WorkflowInstance).filter(WorkflowInstance.id == plan_id).with_for_update().first())
+    if not wf or wf.tenant_id != ctx.get("tenant_id", TENANT) or wf.process_key != BOP_PROCESS_KEY:
+        raise HTTPException(404, "Branch Operational Plan not found")
+    if wf.scope_level != "campus" or wf.scope_ref != campus or wf.initiator_id != ctx.get("sub"):
+        raise HTTPException(403, "This Branch Operational Plan is outside your campus authority")
+    if editable_only and wf.state not in {"draft", "returned"}:
+        raise HTTPException(409, "Submitted or approved plans cannot be edited")
+    return wf
+
+
+def _save_bop_profile(s, wf, data):
+    profile = s.query(WorkflowProfile).filter(WorkflowProfile.workflow_id == wf.id).first()
+    if not profile:
+        profile = WorkflowProfile(id=uid(), tenant_id=wf.tenant_id, workflow_id=wf.id,
+                                  category="Planning", reference_code=_generate_reference_code(s, BOP_PROCESS_KEY, wf.label, wf.created_at))
+        s.add(profile)
+    profile.notes = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+    profile.updated_at = datetime.utcnow()
+    return profile
+
+
+@app.get("/api/bop")
+def list_bops(ctx=Depends(non_front_office), s=Depends(db)):
+    campus = _require_bop_owner(ctx)
+    rows = (s.query(WorkflowInstance)
+            .filter(WorkflowInstance.tenant_id == ctx.get("tenant_id", TENANT),
+                    WorkflowInstance.process_key == BOP_PROCESS_KEY,
+                    WorkflowInstance.scope_level == "campus", WorkflowInstance.scope_ref == campus,
+                    WorkflowInstance.initiator_id == ctx["sub"])
+            .order_by(desc(WorkflowInstance.updated_at)).all())
+    plans = [_bop_payload(s, row) for row in rows]
+    return {"plans": plans, "total": len(plans)}
+
+
+@app.post("/api/bop")
+def create_bop(body: BopPayload, ctx=Depends(non_front_office), s=Depends(db)):
+    campus = _require_bop_owner(ctx)
+    data = _clean_bop_body(body)
+    user = s.query(User).get(ctx["sub"])
+    person = s.query(Person).get(user.person_id) if user else None
+    now = datetime.utcnow()
+    wf = WorkflowInstance(id=uid(), tenant_id=ctx.get("tenant_id", TENANT), process_key=BOP_PROCESS_KEY,
+        label="Branch Operational Plan", office_n=3, title=data["title"], state="draft", initiator_id=ctx["sub"],
+        initiator_name=person.name if person else (user.username if user else "Campus Head"), current_stage=0,
+        scope_level="campus", scope_ref=campus, version_no=1, created_at=now, updated_at=now)
+    s.add(wf)
+    _save_bop_profile(s, wf, data)
+    s.commit()
+    write_audit(s, wf.initiator_id, wf.initiator_name, 3, "bop.create", f"bop:{wf.id}", "", "draft", "Created Branch Operational Plan", ctx.get("auth_level", "mfa"))
+    return {"plan": _bop_payload(s, wf)}
+
+
+@app.put("/api/bop/{plan_id}")
+def update_bop(plan_id: str, body: BopPayload, ctx=Depends(non_front_office), s=Depends(db)):
+    wf = _bop_owned_workflow_or_404(s, ctx, plan_id, editable_only=True)
+    if body.expected_version is not None and body.expected_version != (wf.version_no or 1):
+        raise HTTPException(409, "Plan changed; reload before saving")
+    data = _clean_bop_body(body)
+    previous = wf.state
+    # Submission/review metadata is server-owned and survives an edit/resubmission.
+    prior = _bop_data(s.query(WorkflowProfile).filter(WorkflowProfile.workflow_id == wf.id).first())
+    for key in ("submission", "vc_review"):
+        if key in prior:
+            data[key] = prior[key]
+    wf.title, wf.updated_at, wf.version_no = data["title"], datetime.utcnow(), (wf.version_no or 1) + 1
+    _save_bop_profile(s, wf, data)
+    s.commit()
+    write_audit(s, wf.initiator_id, wf.initiator_name, 3, "bop.edit", f"bop:{wf.id}", previous, wf.state, "Edited Branch Operational Plan", ctx.get("auth_level", "mfa"))
+    return {"plan": _bop_payload(s, wf)}
+
+
+def _submit_bop(s, ctx, plan_id, expected_state, action):
+    wf = _bop_owned_workflow_or_404(s, ctx, plan_id)
+    if wf.state != expected_state:
+        raise HTTPException(409, f"Only a {expected_state} plan can be {action}")
+    data = _bop_data(s.query(WorkflowProfile).filter(WorkflowProfile.workflow_id == wf.id).first())
+    now = datetime.utcnow()
+    data["submission"] = {"submitted_by": ctx["sub"], "submitted_at": now.isoformat()}
+    wf.state, wf.current_stage, wf.updated_at, wf.version_no = "submitted", 1, now, (wf.version_no or 1) + 1
+    _save_bop_profile(s, wf, data)
+    s.commit()
+    write_audit(s, wf.initiator_id, wf.initiator_name, 3, f"bop.{action}", f"bop:{wf.id}", expected_state, "submitted", "Submitted to Vice Chairman", ctx.get("auth_level", "mfa"))
+    _notify_stage(s, wf, _workflow_process(BOP_PROCESS_KEY))
+    return {"plan": _bop_payload(s, wf)}
+
+
+@app.post("/api/bop/{plan_id}/submit")
+def submit_bop(plan_id: str, ctx=Depends(non_front_office), s=Depends(db)):
+    return _submit_bop(s, ctx, plan_id, "draft", "submit")
+
+
+@app.post("/api/bop/{plan_id}/resubmit")
+def resubmit_bop(plan_id: str, ctx=Depends(non_front_office), s=Depends(db)):
+    return _submit_bop(s, ctx, plan_id, "returned", "resubmit")
+
+
 class StartWF(BaseModel):
     process_key: str
     title: str
@@ -1351,14 +1624,14 @@ def start_workflow(body: StartWF, ctx=Depends(non_front_office), s=Depends(db)):
 
 def _notify_stage(s, wf, proc):
     stage = wf.current_stage
-    if stage >= len(proc["chain"]):
+    if stage >= len(proc["chain"]) and wf.state != "escalated":
         return
-    label = proc["chain"][stage]
+    label = _workflow_current_owner(wf, proc)
     recipients = []
     # The notification must follow the active approval stage, not the office
     # that originally created the process.  The latter caused Finance-stage
     # condonation work to be sent back to the HOD.
-    stage_offices = _workflow_stage_offices(proc, stage)
+    stage_offices = _workflow_current_offices(wf, proc)
     if stage_offices:
         recipients.extend(s.query(User).filter(
             User.tenant_id == wf.tenant_id,
@@ -1409,12 +1682,26 @@ class DecideWF(BaseModel):
 
 @app.post("/api/workflows/decide")
 def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)):
+    # A negative or exceptional governance decision is not meaningful without
+    # a durable rationale.  Validate before loading/mutating the record so a
+    # direct API caller cannot bypass the in-app decision modal.
+    if body.action in {"return", "reject", "escalate"} and not (body.reason or "").strip():
+        raise HTTPException(422, f"A reason is required to {body.action} this workflow")
     wf = s.query(WorkflowInstance).filter(WorkflowInstance.id == body.workflow_id).with_for_update().first()
     if not wf or wf.tenant_id != ctx.get("tenant_id", TENANT):
         raise HTTPException(404, "Workflow not found")
     if body.expected_version is not None and body.expected_version != (wf.version_no or 1):
         raise HTTPException(409, "Workflow changed; reload before deciding")
     proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
+    if wf.process_key == BOP_PROCESS_KEY:
+        # BOP is a deliberately narrow VC review flow.  Do not let the generic
+        # workflow endpoint add reject/escalate shortcuts to this planning
+        # governance process.
+        if ctx.get("office_n") != 2:
+            raise HTTPException(403, "Only the Vice Chairman may review a Branch Operational Plan")
+        allowed = {"review", "return"} if wf.current_stage == 1 else {"approve", "return"}
+        if body.action not in allowed:
+            raise HTTPException(403, "This action is not available at the current Branch Operational Plan stage")
     # Attendance corrections have an exact participant resolver (Coordinator,
     # HOD, then VP) and their final decision updates the original attendance
     # record.  Do not run this process through office 5's generic delegated
@@ -1428,7 +1715,7 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
         refreshed = s.query(WorkflowInstance).get(wf.id)
         return {"decision": {"outcome": "ALLOW", "reason": "Attendance correction decision recorded", "authority": "Full", "escalate_to": None},
                 "workflow": _wf_payload(s, refreshed, proc, ctx)}
-    stage_offices = _workflow_stage_offices(proc, wf.current_stage)
+    stage_offices = _workflow_current_offices(wf, proc)
     if ctx["office_n"] not in stage_offices:
         raise HTTPException(403, "Only the current workflow stage owner may act")
     u = s.query(User).get(ctx["sub"])
@@ -1458,8 +1745,8 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
         # Retaining the Finance Manager's university scope here would deny the
         # campus-scoped Principal, including for records submitted before the
         # workflow scope was corrected.
-        target_scope_level="campus" if wf.process_key in {"fee_structure", "attendance_condonation"} else wf.scope_level,
-        escalate_to=proc["escalation"] if proc else None,
+        target_scope_level="campus" if wf.process_key in {"fee_structure", "attendance_condonation", "fee_waiver"} else wf.scope_level,
+        escalate_to=_office_name(_next_executive_escalation_office(ctx, proc)) if proc else None,
     )
     # A rejected authorization is not a workflow decision.  Fail before any
     # Approval/audit/outbox row is written, so callers receive an explicit
@@ -1467,16 +1754,32 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
     if dec.outcome == DENY:
         raise HTTPException(403, dec.reason)
 
+    # Preserve the reviewer's supplied rationale.  The authority engine's
+    # reason explains its verdict (for example, "Authorized"), but it must
+    # never replace the business reason captured in the decision modal.
+    decision_reason = (body.reason or "").strip() or dec.reason
+
     # Record the approval decision.
-    stage_label = proc["chain"][min(wf.current_stage, len(proc["chain"]) - 1)] if proc else body.action
+    stage_label = _workflow_current_owner(wf, proc) if proc else body.action
+    recorded_decision = ESCALATE if body.action == "escalate" else dec.outcome
     s.add(Approval(id=uid(), tenant_id=TENANT, workflow_id=wf.id, actor_id=u.id,
                    actor_name=p.name if p else u.username, stage=wf.current_stage,
-                   stage_label=stage_label, decision=dec.outcome, authority=dec.authority,
-                   reason=body.reason or dec.reason))
+                   stage_label=stage_label, decision=recorded_decision, authority=dec.authority,
+                   reason=decision_reason))
 
     # Apply the decision to workflow state.
     prev_state = wf.state
-    if dec.outcome == ALLOW:
+    was_escalated = wf.state == "escalated"
+    escalation_requested = body.action == "escalate" or dec.outcome == ESCALATE
+    if escalation_requested:
+        escalation_target = _next_executive_escalation_office(ctx, proc)
+        if not escalation_target:
+            raise HTTPException(409, "No escalation authority is configured for this workflow")
+        wf.state = "escalated"
+        wf.escalated = True
+        wf.escalation_from_office_n = ctx["office_n"]
+        wf.escalation_to_office_n = escalation_target
+    elif dec.outcome == ALLOW:
         if body.action == "reject":
             wf.state = "rejected"
         elif body.action == "return":
@@ -1487,14 +1790,17 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
             wf.state = "reviewed"
             wf.current_stage = min(wf.current_stage + 1, len(proc["chain"]) if proc else 4)
         else:  # approve
-            wf.current_stage += 1
-            if proc and wf.current_stage >= len(proc["chain"]):
+            if was_escalated:
+                # The escalation target is the final authority for this route;
+                # never return the request to the original stage chain.
                 wf.state = "approved"
+                wf.escalated = False
             else:
-                wf.state = "under_review"
-    elif dec.outcome == ESCALATE:
-        wf.state = "escalated"
-        wf.escalated = True
+                wf.current_stage += 1
+                if proc and wf.current_stage >= len(proc["chain"]):
+                    wf.state = "approved"
+                else:
+                    wf.state = "under_review"
     elif dec.outcome == RECOMMEND_OUT:
         wf.state = "under_review"
         wf.current_stage += 1
@@ -1505,19 +1811,33 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
         from workflow_dispatcher import apply_decision
         apply_decision(s, wf, body.action, u.id, p.name if p else u.username)
 
+    if wf.process_key == BOP_PROCESS_KEY:
+        profile = s.query(WorkflowProfile).filter(WorkflowProfile.workflow_id == wf.id).first()
+        plan_data = _bop_data(profile)
+        plan_data["vc_review"] = {
+            "reviewer": p.name if p else u.username,
+            "reviewed_at": datetime.utcnow().isoformat(),
+            "feedback": (body.reason or "").strip(),
+        }
+        _save_bop_profile(s, wf, plan_data)
+
     wf.version_no = (wf.version_no or 1) + 1
     wf.updated_at = datetime.utcnow()
     s.commit()
 
     write_audit(s, u.id, p.name if p else u.username, ctx["office_n"],
                 f"workflow.{body.action}:{wf.process_key}", f"wf:{wf.id}",
-                prev_state, wf.state, dec.reason, ctx.get("auth_level", "mfa"))
+                prev_state, wf.state, decision_reason, ctx.get("auth_level", "mfa"))
+    if wf.process_key == BOP_PROCESS_KEY:
+        write_audit(s, u.id, p.name if p else u.username, ctx["office_n"],
+                    f"bop.{body.action}", f"bop:{wf.id}", prev_state, wf.state,
+                    decision_reason, ctx.get("auth_level", "mfa"))
 
     # Notify initiator of outcome.
-    if dec.outcome in (ALLOW, ESCALATE, RECOMMEND_OUT) and wf.state in ("approved", "executed", "escalated", "rejected"):
+    if dec.outcome in (ALLOW, ESCALATE, RECOMMEND_OUT) and wf.state in ("approved", "executed", "escalated", "rejected", "returned"):
         sev = "critical" if wf.state == "escalated" else "info"
         notify(s, wf.initiator_id, f"{wf.label}: {wf.state}",
-               f"{wf.title} — {dec.reason}", severity=sev)
+               f"{wf.title} — {decision_reason}", severity=sev)
     if proc:
         _notify_stage(s, wf, proc)
 
@@ -1537,6 +1857,36 @@ def _wf_payload(s, wf, proc, ctx=None):
             student = s.query(D.Student).get(correction.student_id)
             request_student = student.name if student else correction.student_id
             correction_id = correction.id
+    approval_context = None
+    if wf.process_key == "fee_structure":
+        structure = s.query(D.FeeStructure).filter(D.FeeStructure.workflow_id == wf.id).first()
+        if structure:
+            heads = {head.id: head for head in s.query(D.FeeHead).all()}
+            year, semester, campus = s.get(D.AcademicYear, structure.academic_year_id), s.get(D.Semester, structure.semester_id), s.get(D.Campus, structure.campus_id)
+            program, batch, student_type = s.get(D.Program, structure.program_id), s.get(D.Batch, structure.batch_id), s.get(D.StudentType, structure.student_type_id)
+            lines = s.query(D.FeeStructureLine).filter(D.FeeStructureLine.fee_structure_id == structure.id).order_by(D.FeeStructureLine.installment_no, D.FeeStructureLine.fee_head_id).all()
+            approval_context = {"kind":"fee_structure", "structure_id":structure.id, "code":structure.code, "name":structure.name, "version":structure.version, "status":structure.status,
+                "academic_year":year.name if year else "", "semester":semester.name if semester else "", "campus":campus.name if campus else wf.scope_ref,
+                "program":program.name if program else "", "batch":batch.name if batch else "", "student_type":student_type.name if student_type else "",
+                "description":structure.description or "", "notes":structure.notes or "", "gross_total":float(sum((line.amount or 0 for line in lines), 0)),
+                "lines":[{"fee_head":heads.get(line.fee_head_id).name if heads.get(line.fee_head_id) else line.fee_head_id, "amount":float(line.amount or 0),
+                          "installment_no":line.installment_no, "installment_name":line.installment_name or "", "due_date":line.due_date.isoformat() if line.due_date else None,
+                          "mandatory":line.is_mandatory} for line in lines]}
+    elif wf.source_type == "campus_escalation":
+        escalation = (s.query(D.EscalationRecord).filter(
+            D.EscalationRecord.id == wf.source_id,
+            D.EscalationRecord.tenant_id == wf.tenant_id,
+        ).first())
+        if escalation:
+            risk = s.get(D.RiskRecord, escalation.source_ref) if escalation.source_type == "risk" and escalation.source_ref else None
+            approval_context = {
+                "kind": "campus_escalation", "escalation_id": escalation.id,
+                "category": risk.category if risk else escalation.source_type,
+                "priority": risk.severity if risk else escalation.priority,
+                "risk_id": risk.id if risk else "", "risk_status": risk.status if risk else "",
+                "reason": escalation.reason, "record_status": escalation.status,
+                "campus": escalation.campus,
+            }
     return {
         "id": wf.id, "process_key": wf.process_key, "label": wf.label,
         "office_n": wf.office_n, "title": wf.title, "state": wf.state,
@@ -1545,15 +1895,19 @@ def _wf_payload(s, wf, proc, ctx=None):
         "scope_level": wf.scope_level,
         "scope_ref": getattr(wf, "scope_ref", "") or "",
         "version_no": getattr(wf, "version_no", 1) or 1,
-        "available_actions": _workflow_available_actions(wf, proc, ctx),
-        "current_owner": (proc["chain"][wf.current_stage] if proc and 0 <= wf.current_stage < len(proc["chain"]) else ""),
+        "available_actions": _workflow_available_actions(s, wf, proc, ctx),
+        "current_owner": _workflow_current_owner(wf, proc),
         "campus": wf.scope_ref if wf.scope_level == "campus" else "",
         "updated_at": wf.updated_at.isoformat() if wf.updated_at else None,
         "source_type": getattr(wf, "source_type", "") or "",
         "source_id": getattr(wf, "source_id", "") or "",
+        "approval_context": approval_context,
         "request_student": request_student, "correction_id": correction_id,
         "chain": proc["chain"] if proc else [],
-        "escalation": "" if wf.process_key == "attendance_correction" else (proc["escalation"] if proc else ""),
+        "escalation": "" if wf.process_key == "attendance_correction" else (
+            _office_name(getattr(wf, "escalation_to_office_n", None)) if wf.state == "escalated" else (proc["escalation"] if proc else "")),
+        "escalation_to_office_n": getattr(wf, "escalation_to_office_n", None),
+        "escalation_from_office_n": getattr(wf, "escalation_from_office_n", None),
         "created_at": wf.created_at.isoformat(),
         "profile": {
             "semester_key": profile.semester_key if profile else "",
@@ -1660,7 +2014,7 @@ def list_workflows(scope: str = "all", ctx=Depends(non_front_office), s=Depends(
                 .order_by(desc(WorkflowInstance.updated_at)).limit(100).all())
     elif scope == "inbox":
         candidates = q.order_by(desc(WorkflowInstance.updated_at)).limit(250).all()
-        rows = [row for row in candidates if _workflow_actionable_by(row, _workflow_process(row.process_key), ctx)]
+        rows = [row for row in candidates if _workflow_actionable_by(s, row, _workflow_process(row.process_key), ctx)]
         delegated = active_delegations_for(s, ctx["sub"])
         if delegated:
             seen = {row.id for row in rows}
@@ -1673,7 +2027,7 @@ def list_workflows(scope: str = "all", ctx=Depends(non_front_office), s=Depends(
         rows = sorted(rows, key=lambda item: item.updated_at or item.created_at, reverse=True)[:100]
     else:
         candidates = q.order_by(desc(WorkflowInstance.updated_at)).limit(250).all()
-        rows = [row for row in candidates if _workflow_visible_to(row, _workflow_process(row.process_key), ctx)][:100]
+        rows = [row for row in candidates if _workflow_visible_to(s, row, _workflow_process(row.process_key), ctx)][:100]
     out = []
     for wf in rows:
         proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
@@ -1687,7 +2041,7 @@ def get_workflow(wid: str, ctx=Depends(non_front_office), s=Depends(db)):
     if not wf or wf.tenant_id != ctx.get("tenant_id", TENANT):
         raise HTTPException(404, "Not found")
     proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
-    if not _workflow_visible_to(wf, proc, ctx):
+    if not _workflow_visible_to(s, wf, proc, ctx):
         raise HTTPException(403, "Workflow is outside your scope")
     return _wf_payload(s, wf, proc, ctx)
 

@@ -70,8 +70,9 @@ export function DecisionToast({ decision, onClose }: { decision: any; onClose: (
   )
 }
 
-export function Pill({ s }: { s: string }) {
-  return <span className={`pill s-${s.replace(/[^a-z]/gi, '_').toLowerCase()}`}>{s.replace(/_/g, ' ')}</span>
+export function Pill({ s }: { s?: string | null }) {
+  const value = String(s || 'UNKNOWN')
+  return <span className={`pill s-${value.replace(/[^a-z]/gi, '_').toLowerCase()}`}>{value.replace(/_/g, ' ')}</span>
 }
 
 export function useLoad<T>(fn: () => Promise<T>, deps: any[] = []): [T | null, boolean, () => void] {
