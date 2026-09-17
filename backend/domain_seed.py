@@ -601,7 +601,7 @@ def _ensure_student_portal_demo_sections(s, dept_id: str):
             if program:
                 course.program_id = program.id
 
-               academic_year = (
+        academic_year = (
             f"{DEMO_ATTENDANCE_TODAY.year}-"
             f"{str(DEMO_ATTENDANCE_TODAY.year + 1)[-2:]}"
         )
