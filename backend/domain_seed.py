@@ -601,17 +601,62 @@ def _ensure_student_portal_demo_sections(s, dept_id: str):
             if program:
                 course.program_id = program.id
 
-        offering_id = f"offering_{course.id}_{term.replace('-', '_').lower()}"
-        offering = _ensure(
-            s, D.CourseOffering, offering_id,
-            lambda: D.CourseOffering(
-                id=offering_id, tenant_id=TENANT, course_id=course.id,
-                program_id=course.program_id, academic_year=f"{DEMO_ATTENDANCE_TODAY.year}-{str(DEMO_ATTENDANCE_TODAY.year + 1)[-2:]}",
-                term=term, semester=course.semester, status="Published",
-                created_by="seed", updated_by="seed",
-            ),
-        ) if course.program_id else None
+               academic_year = (
+            f"{DEMO_ATTENDANCE_TODAY.year}-"
+            f"{str(DEMO_ATTENDANCE_TODAY.year + 1)[-2:]}"
+        )
 
+        offering_id = f"offering_{course.id}_{term.replace('-', '_').lower()}"
+        offering = None
+
+        if course.program_id:
+            # CourseOffering has a business-key unique constraint:
+            #
+            # (tenant_id, course_id, program_id, academic_year, term)
+            #
+            # _ensure() only checks the primary-key ID. An older database
+            # may already contain the same business record under a different
+            # primary-key ID. In that case, inserting another row causes
+            # PostgreSQL to raise:
+            #
+            # uq_course_offerings_business_key
+            #
+            # Reuse the existing business record instead of inserting a
+            # duplicate.
+
+            offering = (
+                s.query(D.CourseOffering)
+                .filter(
+                    D.CourseOffering.tenant_id == TENANT,
+                    D.CourseOffering.course_id == course.id,
+                    D.CourseOffering.program_id == course.program_id,
+                    D.CourseOffering.academic_year == academic_year,
+                    D.CourseOffering.term == term,
+                )
+                .first()
+            )
+
+            if offering is None:
+                offering = D.CourseOffering(
+                    id=offering_id,
+                    tenant_id=TENANT,
+                    course_id=course.id,
+                    program_id=course.program_id,
+                    academic_year=academic_year,
+                    term=term,
+                    semester=course.semester,
+                    status="Published",
+                    created_by="seed",
+                    updated_by="seed",
+                )
+                s.add(offering)
+            else:
+                # Existing business row found. Reuse it rather than creating
+                # another CourseOffering with a different primary-key ID.
+                offering.program_id = course.program_id
+                offering.academic_year = academic_year
+                offering.term = term
+                offering.semester = course.semester
         faculty = _ensure(
             s, D.StaffMember, spec["faculty_id"],
             lambda spec=spec, dept_id=dept_id: D.StaffMember(
