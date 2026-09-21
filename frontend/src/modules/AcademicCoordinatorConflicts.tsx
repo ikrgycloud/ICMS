@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { Empty, PageHead, Pill, Spinner } from "./kit";
+import { appPrompt } from "../ui/dialogs";
 
 const labels: Record<string, string> = {
   faculty_overlap: "Faculty overlap",
@@ -437,8 +438,7 @@ export default function AcademicCoordinatorConflicts({
                   <button
                     className="btn btn-crimson"
                     onClick={async () => {
-                      const note =
-                        window.prompt("Resolution note:") || "";
+                      const note = await appPrompt("Record the resolution before closing this conflict.", "Resolve academic conflict");
 
                       if (!note) return;
 

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import { PageHead, Spinner, DecisionToast, Modal } from "./kit";
 import EligibilityDetailView from "./EligibilityDetailView";
+import { appError } from "../ui/dialogs";
 
 const fresh = {
   name: "",
@@ -1883,7 +1884,7 @@ function AdmissionsReports({ apps, phase5 }: any) {
       <div className="card-pad">
         <h3>Admissions Reports</h3>
         <p className="hint">Live admissions performance summary from the current database.</p>
-        <button className="btn btn-out" onClick={() => api.downloadAdmissionsReport().catch((error: any) => alert(error.message))}>Download PDF report</button>
+        <button className="btn btn-out" onClick={() => api.downloadAdmissionsReport().catch((error: any) => appError(error.message || 'Unable to download the admissions report'))}>Download PDF report</button>
         <div className="kpi-grid">
           <button className="kpi" onClick={() => openReport("Total applications", [...new Set<string>(apps.map((app: any) => String(app.current_status || "")))])}><div className="kpi-val">{apps.length}</div><div className="kpi-label">Total applications</div></button>
           <button className="kpi" onClick={() => openReport("Enrolled students", ["ENROLLED"])}><div className="kpi-val">{apps.filter((x: any) => x.current_status === "ENROLLED").length}</div><div className="kpi-label">Enrolled students</div></button>

@@ -37,7 +37,7 @@ export default function AcademicCoordinatorCenter({
       api.sections(),
       api.courses(),
       api.academicCalendar(),
-      api.courseOfferings(),
+      api.courseOfferingsSummary(),
       api.academicConflicts(),
       api.curriculumExecution(),
     ])

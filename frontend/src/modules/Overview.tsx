@@ -1,14 +1,17 @@
 import { api } from '../api'
+import { lazy, Suspense } from 'react'
 import { PageHead, Kpis, Spinner, money, useLoad, Empty } from './kit'
 import ChairmanOverview from './ChairmanOverview'
 import PrincipalDashboard from './PrincipalDashboard'
-import Finance from './Finance'
+
+// Finance is a separate operational workspace; load it only for Accounts.
+const Finance = lazy(() => import('./Finance'))
 
 export default function Overview({ user, go }: { user: any; go: (v: string) => void }) {
   if (user.office_n === 1) return <ChairmanOverview go={go} />
   if ([3, 4].includes(user.office_n)) return <PrincipalDashboard user={user} go={go} />
   if (user.office_n === 22) return <FinanceManagerOverview user={user} go={go} />
-  if (user.office_n === 23) return <Finance caps={{}} user={user} onOpenApprovals={() => go('approvals')} overviewOnly onNavigate={go} />
+  if (user.office_n === 23) return <Suspense fallback={<Spinner />}><Finance caps={{}} user={user} onOpenApprovals={() => go('approvals')} overviewOnly onNavigate={go} /></Suspense>
   const [data, loading] = useLoad<any>(() => api.overview())
   if (loading || !data) return <Spinner />
   const s = data.stats

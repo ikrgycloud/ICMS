@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 import { Empty, Modal, PageHead, Spinner, money } from '../modules/kit'
+import { appAlert, appError } from '../ui/dialogs'
 
 export function StudentCalendarView({ user, go }: { user: any; go: (v: string) => void }) {
   const [month, setMonth] = useState(studentMonthStart())
@@ -2660,9 +2661,9 @@ export function StudentFeesView() {
       const r: any = await api.createStudentChallan(invoice.id, amount)
       setChallans(await api.studentChallans().then((x: any) => x.challans || []))
       setChallanInvoice(null)
-      alert(`Challan ${r.challan.challan_number} for ${money(amount)} is ready to download.`)
+      await appAlert(`Challan ${r.challan.challan_number} for ${money(amount)} is ready to download.`, 'Challan created')
     } catch (error: any) {
-      alert(error.message || 'Unable to generate challan')
+      await appError(error.message || 'Unable to generate challan')
     }
   }
 
@@ -2675,12 +2676,12 @@ export function StudentFeesView() {
         reference_number: offlineReference,
         transaction_date: new Date().toISOString().slice(0, 10),
       })
-      alert('Payment reference submitted for Accounts Office verification.')
+      await appAlert('Payment reference submitted for Accounts Office verification.', 'Payment proof submitted')
       setOffline(null)
       setOfflineReference('')
       setChallans(await api.studentChallans().then((x: any) => x.challans || []))
     } catch (error: any) {
-      alert(error.message || 'Unable to submit payment proof')
+      await appError(error.message || 'Unable to submit payment proof')
     }
   }
 
@@ -2694,7 +2695,7 @@ export function StudentFeesView() {
       }
       new (window as any).Razorpay({ key: order.key_id, amount: order.amount, currency: order.currency, name: 'ICMS', description: order.description, order_id: order.order_id, prefill: order.student, theme: { color: '#8a1f2b' }, handler: async (response: any) => { await api.verifyRazorpayPayment({ invoice_id: invoice.id, ...response }); setData(await api.studentFees()) }}).open()
       setPaymentInvoice(null)
-    } catch (error: any) { alert(error.message || 'Unable to start payment') } finally { setPaying('') }
+    } catch (error: any) { await appError(error.message || 'Unable to start payment') } finally { setPaying('') }
   }
 
   return (

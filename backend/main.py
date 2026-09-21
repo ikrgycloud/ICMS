@@ -14,6 +14,7 @@ import uuid
 import time
 import re
 import json
+import logging
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 
@@ -63,6 +64,8 @@ bearer_scheme = HTTPBearer(scheme_name="BearerAuth", auto_error=False)
 app = FastAPI(title="ICMS — Integrated College/University Management System",
               version="1.0")
 _environment = os.environ.get("ICMS_ENVIRONMENT", "development").lower()
+request_logger = logging.getLogger("icms.request")
+slow_request_ms = int(os.environ.get("SLOW_REQUEST_MS", "1000"))
 _cors_origins = [origin.strip() for origin in os.environ.get("CORS_ALLOW_ORIGINS", "").split(",") if origin.strip()]
 if _environment in {"production", "prod"} and not _cors_origins:
     raise RuntimeError("CORS_ALLOW_ORIGINS must be configured in production")
@@ -71,13 +74,21 @@ app.add_middleware(CORSMiddleware, allow_origins=_cors_origins or ["http://local
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
+    started_at = time.perf_counter()
+    request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
     response = await call_next(request)
+    elapsed_ms = round((time.perf_counter() - started_at) * 1000, 1)
+    response.headers.setdefault("X-Request-ID", request_id)
+    response.headers.setdefault("Server-Timing", f"app;dur={elapsed_ms}")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     if _environment in {"production", "prod"}:
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    log = request_logger.warning if elapsed_ms >= slow_request_ms else request_logger.info
+    log("request_complete request_id=%s method=%s path=%s status=%s duration_ms=%s",
+        request_id, request.method, request.url.path, response.status_code, elapsed_ms)
     return response
 
 # Defense-in-depth for routes that expose Dean academic governance.  This is
@@ -2721,13 +2732,19 @@ def get_notifications(ctx=Depends(auth), s=Depends(db)):
     # Until then, do not leak unrelated institutional workflow notifications.
     if ctx["office_n"] == 35:
         return {"notifications": [], "unread": 0}
-    rows = (s.query(Notification).filter(Notification.user_id == ctx["sub"])
+    filters = (Notification.tenant_id == ctx.get("tenant_id", TENANT),
+               Notification.user_id == ctx["sub"])
+    # Fetch the visible notifications and unread total in one database round
+    # trip. This is a frequently polled endpoint and previously issued two
+    # remote PostgreSQL queries per poll.
+    unread_total = s.query(func.count(Notification.id)).filter(*filters, Notification.read == False).scalar_subquery()
+    rows = (s.query(Notification, unread_total.label("unread_total")).filter(*filters)
             .order_by(desc(Notification.created_at)).limit(50).all())
+    unread = int(rows[0].unread_total or 0) if rows else 0
     return {"notifications": [{"id": n.id, "severity": n.severity, "title": n.title,
                                "body": n.body, "read": n.read,
-                               "at": n.created_at.isoformat()} for n in rows],
-            "unread": s.query(Notification).filter(Notification.user_id == ctx["sub"],
-                                                   Notification.read == False).count()}
+                               "at": n.created_at.isoformat()} for n, _ in rows],
+            "unread": unread}
 
 
 @app.post("/api/notifications/{nid}/read")

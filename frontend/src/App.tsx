@@ -1,98 +1,117 @@
-import { useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { HiOutlineAcademicCap, HiOutlineArchiveBox, HiOutlineArrowPathRoundedSquare, HiOutlineBanknotes, HiOutlineBookOpen, HiOutlineBriefcase, HiOutlineBuildingLibrary, HiOutlineBuildingOffice2, HiOutlineCalculator, HiOutlineCalendarDays, HiOutlineChartBarSquare, HiOutlineChatBubbleLeftRight, HiOutlineCheckBadge, HiOutlineClipboardDocumentCheck, HiOutlineClipboardDocumentList, HiOutlineCog6Tooth, HiOutlineComputerDesktop, HiOutlineCreditCard, HiOutlineDocumentChartBar, HiOutlineDocumentCheck, HiOutlineDocumentMagnifyingGlass, HiOutlineDocumentText, HiOutlineEnvelope, HiOutlineExclamationTriangle, HiOutlineFolder, HiOutlineGift, HiOutlineHome, HiOutlineIdentification, HiOutlineInbox, HiOutlineLifebuoy, HiOutlineMegaphone, HiOutlinePencilSquare, HiOutlinePresentationChartLine, HiOutlineQueueList, HiOutlineRectangleGroup, HiOutlineRocketLaunch, HiOutlineScale, HiOutlineShieldCheck, HiOutlineShoppingCart, HiOutlineSquares2X2, HiOutlineTableCells, HiOutlineTicket, HiOutlineTruck, HiOutlineUserCircle, HiOutlineUserGroup, HiOutlineUserPlus, HiOutlineUsers, HiOutlineWrenchScrewdriver } from 'react-icons/hi2'
 import { api, getUser, logout, saveSession } from './api'
-import Workflows from './views/Workflows'
-import Delegations from './views/Delegations'
-import Directory from './views/Directory'
-import Matrices from './views/Matrices'
-import AuditView from './views/Audit'
-import Permissions from './views/Permissions'
-import OfficeProfile from './views/OfficeProfile'
-import Overview from './modules/Overview'
-import DirectorAdmissionsDashboard from './modules/DirectorAdmissionsDashboard'
-import Calendar from './modules/Calendar'
-import MySchedule from './modules/MySchedule'
-import AcademicCalendar from './modules/AcademicCalendar'
-import AcademicRollover from './modules/AcademicRollover'
-import Students from './modules/Students'
-import Academics from './modules/Academics'
-import AcademicCoordinatorCenter from './modules/AcademicCoordinatorCenter'
-import AcademicCoordinatorConflicts from './modules/AcademicCoordinatorConflicts'
-import AcademicCoordinatorOfferings from './modules/AcademicCoordinatorOfferings'
-import AcademicCoordinatorTimetable from './modules/AcademicCoordinatorTimetable'
-import HodTimetableReview from './modules/HodTimetableReview'
-import VicePrincipalAcademicApprovals from './modules/VicePrincipalAcademicApprovals'
-import TimetableChanges from './modules/TimetableChanges'
-import Curriculum from './modules/Curriculum'
-import AcademicCoordinatorNotices from './modules/AcademicCoordinatorNotices'
-import AcademicCoordinatorCurriculumExecution from './modules/AcademicCoordinatorCurriculumExecution'
-import AcademicCoordinatorReports from './modules/AcademicCoordinatorReports'
-import CoursesSubjects from './modules/CoursesSubjects'
-import Attendance from './modules/Attendance'
-import Examinations from './modules/Examinations'
-import Admissions from './modules/Admissions'
-import Finance, { PrincipalFinance } from './modules/Finance'
-import Library from './modules/Library'
-import HR from './modules/HR'
-import PrincipalRecruitment from './modules/PrincipalRecruitment'
-import FacultyStaff from './modules/FacultyStaff'
-import Assets from './modules/Assets'
-import Hostel from './modules/Hostel'
-import Transport, { PrincipalTransport } from './modules/Transport'
-import Research from './modules/Research'
-import Placements from './modules/Placements'
-import Grievance, { PrincipalGrievance } from './modules/Grievance'
-import Governance from './modules/Governance'
-import DeanAcademicsDashboard from './modules/DeanAcademicsDashboard'
-import DeanAcademicWorkspaces from './modules/DeanAcademicWorkspaces'
-import DeanPrograms from './modules/DeanPrograms'
-import DecisionInbox from './modules/DecisionInbox'
-import MyRequests from './modules/MyRequests'
-import ChairmanApprovals from './modules/ChairmanApprovals'
-import ChairmanDelegation from './modules/ChairmanDelegation'
-import AdminPanel from './modules/AdminPanel'
-import Analytics from './modules/Analytics'
-import Procurement from './modules/Procurement'
-import Facilities from './modules/Facilities'
-import Integrations from './modules/Integrations'
-import StudentHome from './personas/StudentHome'
-import StudentRegistration from './personas/StudentRegistration'
-import { AcademicNotices, StudentAttendanceView, StudentCalendarView, StudentCoursesView, StudentCurriculumExecution, StudentExaminationsView, StudentFeesView, StudentLibraryView, StudentScoresView } from './personas/StudentViews'
-import FacultyCourseOfferings from './personas/FacultyCourseOfferings'
-import FacultyHome from './personas/FacultyHome'
-import AssociateProfessorHome from './personas/AssociateProfessorHome'
-import FacultySchedule from './personas/FacultySchedule'
-import FacultyProfile from './personas/FacultyProfile'
-import FacultyExaminations from './personas/FacultyExaminations'
+// Screen modules are deliberately lazy so a navigation route pays only for
+// its own code, instead of downloading every office workspace at sign-in.
+
 import { FacultyAssignments, StudentAssignments } from './personas/AssignmentViews'
-import FacultyCommunication from './personas/FacultyCommunication'
-import FacultyCourses from './personas/FacultyCourses'
-import FacultyDigitalId from './personas/FacultyDigitalId'
-import FacultyLeave from './personas/FacultyLeave'
-import FacultyPayroll from './personas/FacultyPayroll'
-import FacultyAssessments from './personas/FacultyAssessments'
-import FacultyAttendance from './personas/FacultyAttendance'
-import FacultyAttendanceCorrections from './personas/FacultyAttendanceCorrections'
-import FacultyMarks from './personas/FacultyMarks'
-import FacultyMentoring from './personas/FacultyMentoring'
-import FacultyStudents from './personas/FacultyStudents'
+
 import { FacultyMaterials } from './personas/CourseMaterials'
-import FacultyConditionalView from './personas/FacultyConditionalViews'
-import ParentHome from './personas/ParentHome'
-import FrontDeskWorkspace from './frontdesk/FrontDeskWorkspace'
-import ApplicantPortal from './admissions/ApplicantPortal'
-import DeanAdministration from './modules/DeanAdministration'
-import SpecialistQueue from './modules/SpecialistQueue'
 import { PageHead } from './modules/kit'
-import AccountantReport from './modules/AccountantReport'
-import PrincipalDashboard from './modules/PrincipalDashboard'
-import ViceChairmanCampusReports from './modules/ViceChairmanCampusReports'
 import { CampusHeadApprovals, CampusHeadDashboard, CampusHeadEscalations, CampusHeadOperationalPlan, CampusHeadReports, CampusProfile, DepartmentsPrograms, LeadershipTeam, CampusOverview, InfrastructureOverview, CampusRiskWorkspace } from './modules/CampusHeadPortal'
-import PrincipalAtRisk from './modules/PrincipalAtRisk'
-import PrincipalCompliance from './modules/PrincipalCompliance'
-import PrincipalExaminations from './modules/PrincipalExaminations'
-import PrincipalExaminationOversight from './modules/PrincipalExaminationOversight'
 import { ApprovalHistory, Escalations, PrincipalApprovals, PrincipalWorkflows } from './views/PrincipalWorkflowViews'
+
+// Large role workspaces are requested only when their route is opened. Their
+// existing UI, props, authorization checks, and workflows remain unchanged.
+const Admissions = lazy(() => import('./modules/Admissions'))
+const Finance = lazy(() => import('./modules/Finance'))
+const PrincipalFinance = lazy(() => import('./modules/Finance').then(module => ({ default: module.PrincipalFinance })))
+const DeanAcademicWorkspaces = lazy(() => import('./modules/DeanAcademicWorkspaces'))
+const AcademicNotices = lazy(() => import('./personas/StudentViews').then(module => ({ default: module.AcademicNotices })))
+const StudentAttendanceView = lazy(() => import('./personas/StudentViews').then(module => ({ default: module.StudentAttendanceView })))
+const StudentCalendarView = lazy(() => import('./personas/StudentViews').then(module => ({ default: module.StudentCalendarView })))
+const StudentCoursesView = lazy(() => import('./personas/StudentViews').then(module => ({ default: module.StudentCoursesView })))
+const StudentCurriculumExecution = lazy(() => import('./personas/StudentViews').then(module => ({ default: module.StudentCurriculumExecution })))
+const StudentExaminationsView = lazy(() => import('./personas/StudentViews').then(module => ({ default: module.StudentExaminationsView })))
+const StudentFeesView = lazy(() => import('./personas/StudentViews').then(module => ({ default: module.StudentFeesView })))
+const StudentLibraryView = lazy(() => import('./personas/StudentViews').then(module => ({ default: module.StudentLibraryView })))
+const StudentScoresView = lazy(() => import('./personas/StudentViews').then(module => ({ default: module.StudentScoresView })))
+const Workflows = lazy(() => import('./views/Workflows'))
+const Delegations = lazy(() => import('./views/Delegations'))
+const Directory = lazy(() => import('./views/Directory'))
+const Matrices = lazy(() => import('./views/Matrices'))
+const AuditView = lazy(() => import('./views/Audit'))
+const Permissions = lazy(() => import('./views/Permissions'))
+const OfficeProfile = lazy(() => import('./views/OfficeProfile'))
+const Overview = lazy(() => import('./modules/Overview'))
+const DirectorAdmissionsDashboard = lazy(() => import('./modules/DirectorAdmissionsDashboard'))
+const Calendar = lazy(() => import('./modules/Calendar'))
+const MySchedule = lazy(() => import('./modules/MySchedule'))
+const AcademicCalendar = lazy(() => import('./modules/AcademicCalendar'))
+const AcademicRollover = lazy(() => import('./modules/AcademicRollover'))
+const Students = lazy(() => import('./modules/Students'))
+const Academics = lazy(() => import('./modules/Academics'))
+const AcademicCoordinatorCenter = lazy(() => import('./modules/AcademicCoordinatorCenter'))
+const AcademicCoordinatorConflicts = lazy(() => import('./modules/AcademicCoordinatorConflicts'))
+const AcademicCoordinatorOfferings = lazy(() => import('./modules/AcademicCoordinatorOfferings'))
+const AcademicCoordinatorTimetable = lazy(() => import('./modules/AcademicCoordinatorTimetable'))
+const HodTimetableReview = lazy(() => import('./modules/HodTimetableReview'))
+const VicePrincipalAcademicApprovals = lazy(() => import('./modules/VicePrincipalAcademicApprovals'))
+const TimetableChanges = lazy(() => import('./modules/TimetableChanges'))
+const Curriculum = lazy(() => import('./modules/Curriculum'))
+const AcademicCoordinatorNotices = lazy(() => import('./modules/AcademicCoordinatorNotices'))
+const AcademicCoordinatorCurriculumExecution = lazy(() => import('./modules/AcademicCoordinatorCurriculumExecution'))
+const AcademicCoordinatorReports = lazy(() => import('./modules/AcademicCoordinatorReports'))
+const CoursesSubjects = lazy(() => import('./modules/CoursesSubjects'))
+const Attendance = lazy(() => import('./modules/Attendance'))
+const Examinations = lazy(() => import('./modules/Examinations'))
+const Library = lazy(() => import('./modules/Library'))
+const HR = lazy(() => import('./modules/HR'))
+const PrincipalRecruitment = lazy(() => import('./modules/PrincipalRecruitment'))
+const FacultyStaff = lazy(() => import('./modules/FacultyStaff'))
+const Assets = lazy(() => import('./modules/Assets'))
+const Hostel = lazy(() => import('./modules/Hostel'))
+const Transport = lazy(() => import('./modules/Transport'))
+const PrincipalTransport = lazy(() => import('./modules/Transport').then(module => ({ default: module.PrincipalTransport })))
+const Research = lazy(() => import('./modules/Research'))
+const Placements = lazy(() => import('./modules/Placements'))
+const Grievance = lazy(() => import('./modules/Grievance'))
+const PrincipalGrievance = lazy(() => import('./modules/Grievance').then(module => ({ default: module.PrincipalGrievance })))
+const Governance = lazy(() => import('./modules/Governance'))
+const DeanAcademicsDashboard = lazy(() => import('./modules/DeanAcademicsDashboard'))
+const DeanDepartments = lazy(() => import('./modules/DeanDepartments'))
+const DeanPrograms = lazy(() => import('./modules/DeanPrograms'))
+const DecisionInbox = lazy(() => import('./modules/DecisionInbox'))
+const MyRequests = lazy(() => import('./modules/MyRequests'))
+const ChairmanApprovals = lazy(() => import('./modules/ChairmanApprovals'))
+const ChairmanDelegation = lazy(() => import('./modules/ChairmanDelegation'))
+const AdminPanel = lazy(() => import('./modules/AdminPanel'))
+const Analytics = lazy(() => import('./modules/Analytics'))
+const Procurement = lazy(() => import('./modules/Procurement'))
+const Facilities = lazy(() => import('./modules/Facilities'))
+const Integrations = lazy(() => import('./modules/Integrations'))
+const StudentHome = lazy(() => import('./personas/StudentHome'))
+const StudentRegistration = lazy(() => import('./personas/StudentRegistration'))
+const FacultyCourseOfferings = lazy(() => import('./personas/FacultyCourseOfferings'))
+const FacultyHome = lazy(() => import('./personas/FacultyHome'))
+const AssociateProfessorHome = lazy(() => import('./personas/AssociateProfessorHome'))
+const FacultySchedule = lazy(() => import('./personas/FacultySchedule'))
+const FacultyProfile = lazy(() => import('./personas/FacultyProfile'))
+const FacultyExaminations = lazy(() => import('./personas/FacultyExaminations'))
+const FacultyCommunication = lazy(() => import('./personas/FacultyCommunication'))
+const FacultyCourses = lazy(() => import('./personas/FacultyCourses'))
+const FacultyDigitalId = lazy(() => import('./personas/FacultyDigitalId'))
+const FacultyLeave = lazy(() => import('./personas/FacultyLeave'))
+const FacultyPayroll = lazy(() => import('./personas/FacultyPayroll'))
+const FacultyAssessments = lazy(() => import('./personas/FacultyAssessments'))
+const FacultyAttendance = lazy(() => import('./personas/FacultyAttendance'))
+const FacultyAttendanceCorrections = lazy(() => import('./personas/FacultyAttendanceCorrections'))
+const FacultyMarks = lazy(() => import('./personas/FacultyMarks'))
+const FacultyMentoring = lazy(() => import('./personas/FacultyMentoring'))
+const FacultyStudents = lazy(() => import('./personas/FacultyStudents'))
+const FacultyConditionalView = lazy(() => import('./personas/FacultyConditionalViews'))
+const ParentHome = lazy(() => import('./personas/ParentHome'))
+const FrontDeskWorkspace = lazy(() => import('./frontdesk/FrontDeskWorkspace'))
+const ApplicantPortal = lazy(() => import('./admissions/ApplicantPortal'))
+const DeanAdministration = lazy(() => import('./modules/DeanAdministration'))
+const SpecialistQueue = lazy(() => import('./modules/SpecialistQueue'))
+const AccountantReport = lazy(() => import('./modules/AccountantReport'))
+const PrincipalDashboard = lazy(() => import('./modules/PrincipalDashboard'))
+const ViceChairmanCampusReports = lazy(() => import('./modules/ViceChairmanCampusReports'))
+const PrincipalAtRisk = lazy(() => import('./modules/PrincipalAtRisk'))
+const PrincipalCompliance = lazy(() => import('./modules/PrincipalCompliance'))
+const PrincipalExaminations = lazy(() => import('./modules/PrincipalExaminations'))
+const PrincipalExaminationOversight = lazy(() => import('./modules/PrincipalExaminationOversight'))
 
 const LEVEL_COLORS: Record<number, string> = {
   1: '#d92d3a',
@@ -108,7 +127,7 @@ const LEVEL_COLORS: Record<number, string> = {
 const GROUP_ORDER = ['Workspace', 'Academics', 'Services', 'Operations', 'Platform', 'Authority', 'Reference']
 const DEAN_ACADEMICS_NAV = [
   ['Workspace', 'Overview', 'overview'],
-  ['Academic Governance', 'Programs', 'dean_programs'], ['Academic Governance', 'Curriculum', 'curriculum'], ['Academic Governance', 'Courses', 'courses_subjects'], ['Academic Governance', 'Academic Committees', 'dean_committees'],
+  ['Academic Governance', 'Departments', 'dean_departments'], ['Academic Governance', 'Programs', 'dean_programs'], ['Academic Governance', 'Curriculum', 'curriculum'], ['Academic Governance', 'Courses', 'courses_subjects'], ['Academic Governance', 'Academic Committees', 'dean_committees'],
   ['Academic Operations', 'Academic Calendar', 'academic_calendar'], ['Academic Operations', 'Faculty Allocation', 'dean_allocation'], ['Academic Operations', 'Timetable Readiness', 'dean_timetable'],
   ['Academic Operations', 'Academic Rollover', 'rollover'],
   ['Academic Operations', 'Timetable Changes', 'timetable_changes'],
@@ -121,6 +140,7 @@ const DEAN_ACADEMICS_NAV = [
 // These routes are used by dashboard cards and notifications. They deliberately
 // do not appear in the sidebar: each opens the relevant contextual workspace.
 const DEAN_ACADEMICS_CONTEXT_ROUTES: Record<string, { label: string; key: string; actions: Record<string, never> }> = {
+  dean_departments: { label: 'Department Management', key: 'dean_departments', actions: {} },
   dean_timetable: { label: 'Academic Operations', key: 'dean_academic_operations', actions: {} },
   dean_allocation: { label: 'Academic Operations', key: 'dean_academic_operations', actions: {} },
   dean_risk: { label: 'Academic Quality', key: 'dean_academic_quality', actions: {} },
@@ -278,13 +298,25 @@ export default function App({ onLogout }: { onLogout: () => void }) {
   const [switching, setSwitching] = useState(false)
   const [collapsedDirectorGroups, setCollapsedDirectorGroups] = useState<Record<string, boolean>>({})
   const [collapsedDeanGroups, setCollapsedDeanGroups] = useState<Record<string, boolean>>({})
+  const notificationRequestActive = useRef(false)
 
   function loadWs() {
     api.workspace().then(setWs).catch(() => {})
   }
 
-  function loadNotifs() {
-    api.notifications().then(setNotifs).catch(() => {})
+  async function loadNotifs() {
+    // Do not create background work while the tab is hidden or pile a new poll
+    // behind a slow request. The explicit bell action still refreshes normally.
+    if (document.visibilityState !== 'visible' || notificationRequestActive.current) return
+    notificationRequestActive.current = true
+    try {
+      setNotifs(await api.notifications())
+    } catch {
+      // Notifications are non-critical UI enhancement; retain the last known
+      // count instead of surfacing recurring transport errors to the user.
+    } finally {
+      notificationRequestActive.current = false
+    }
   }
 
   function loadApprovalCount() {
@@ -306,11 +338,13 @@ export default function App({ onLogout }: { onLogout: () => void }) {
     loadWs()
     loadNotifs()
     loadApprovalCount()
-    const timer = setInterval(loadNotifs, 20000)
+    const timer = setInterval(loadNotifs, 60000)
     const approvalTimer = setInterval(loadApprovalCount, 20000)
     const approvalUpdated = () => loadApprovalCount()
+    const pageVisible = () => { if (document.visibilityState === 'visible') void loadNotifs() }
     window.addEventListener('icms:approval-updated', approvalUpdated)
-    return () => { clearInterval(timer); clearInterval(approvalTimer); window.removeEventListener('icms:approval-updated', approvalUpdated) }
+    document.addEventListener('visibilitychange', pageVisible)
+    return () => { clearInterval(timer); clearInterval(approvalTimer); window.removeEventListener('icms:approval-updated', approvalUpdated); document.removeEventListener('visibilitychange', pageVisible) }
   }, [])
 
   useEffect(() => {
@@ -337,7 +371,7 @@ export default function App({ onLogout }: { onLogout: () => void }) {
       // The Dean shell has role-specific destinations that intentionally reuse
       // the governed academic workspace.  They are valid routes even though
       // they are not returned as generic workspace modules by the API.
-      || (user?.office_n === 6 && ['courses_subjects', 'decision_inbox', 'dean_programs', 'dean_academic_operations', 'dean_academic_quality', 'dean_timetable', 'dean_allocation', 'dean_risk', 'dean_committees', 'dean_corrective', 'dean_outcomes', 'dean_planning', 'dean_reports', 'analytics'].includes(view))
+      || (user?.office_n === 6 && ['courses_subjects', 'decision_inbox', 'dean_departments', 'dean_programs', 'dean_academic_operations', 'dean_academic_quality', 'dean_timetable', 'dean_allocation', 'dean_risk', 'dean_committees', 'dean_corrective', 'dean_outcomes', 'dean_planning', 'dean_reports', 'analytics'].includes(view))
       || ([10, 17].includes(user?.office_n) && view === 'source_allocation')
       || (user?.office_n === 10 && view === 'rollover')
       || (user?.office_n === 10 && view === 'hod_course_offerings')
@@ -719,7 +753,9 @@ export default function App({ onLogout }: { onLogout: () => void }) {
             if (showRoles) setShowRoles(false)
           }}
         >
-          <ModuleView view={view} module={current} user={user} onChange={loadNotifs} go={setView} />
+          <Suspense fallback={<div className="center-load"><div className="spinner" /></div>}>
+            <ModuleView view={view} module={current} user={user} onChange={loadNotifs} go={setView} />
+          </Suspense>
         </div>
       </div>
     </div>
@@ -737,7 +773,9 @@ function ModuleView({ view, module, user, onChange, go }: any) {
   }
   switch (view) {
     case 'decision_inbox':
-      return <DecisionInbox />
+      return [6, 10, 17].includes(Number(user.office_n)) ? <DecisionInbox user={user} /> : <div className="empty">Academic approval inbox access is available only to authorized academic roles.</div>
+    case 'dean_departments':
+      return user.office_n === 6 ? <DeanDepartments /> : <div className="empty">Department Management is available only to Dean Academics within an assigned School or College scope.</div>
     case 'dean_programs':
       return <DeanPrograms />
     case 'program_proposals':
@@ -858,7 +896,7 @@ function ModuleView({ view, module, user, onChange, go }: any) {
     case 'coordinator_notices':
       return [6, 17].includes(Number(user.office_n)) ? <AcademicCoordinatorNotices /> : <Academics caps={caps} />
     case 'coordinator_approvals':
-      return <DecisionInbox />
+      return user.office_n === 17 ? <DecisionInbox user={user} /> : <div className="empty">Coordinator approvals are not available for this role.</div>
     case 'coordinator_requests':
       return <MyRequests go={go} />
     case 'coordinator_reports':

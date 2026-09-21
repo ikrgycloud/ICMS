@@ -139,7 +139,7 @@ MODULE_ACTIONS = {
     "academics":    {"view": "view", "create_section": "create", "create_course": "create", "edit": "edit",
                      "assign_faculty": "assign"},
 
-    "academics":    {"view": "view", "create_program": "create", "create_course": "create", "create_section": "create", "edit": "edit",
+    "academics":    {"view": "view", "create_department": "create", "create_program": "create", "create_course": "create", "create_section": "create", "edit": "edit",
                      "assign_faculty": "assign", "manage_timetable": "edit",
                      "create_task": "create", "edit_task": "edit",
                      "publish_task": "publish", "close_task": "edit",
@@ -214,6 +214,9 @@ ACTION_OFFICE_ALLOW = {
     # operational section records from that approved input.  Keeping this
     # single owner prevents a department reviewer from bypassing the setup
     # handoff through a generic Academics screen or direct API request.
+    # Department establishment changes the academic organisational structure.
+    # It is owned by Dean Academics, never by an HOD or operational coordinator.
+    ("academics", "create_department"): {6},
     ("academics", "create_section"): {17},
     ("academics", "create_program"): {6, 10, 17},     # Academic programme master owners
     ("academics", "create_course"): {6, 10, 17},      # Curriculum owners
@@ -324,7 +327,10 @@ def modules_for_office(n: int) -> list:
     if n == 35:
         return list(OFFICE_MODULES[35])
     mods = list(OFFICE_MODULES.get(n, []))
-    if n in {4, 5, 6, 10, 17, 41}:
+    # Curriculum change is a controlled HOD -> Dean academic workflow.  VP
+    # handles operational approvals in its own approval inbox, rather than a
+    # duplicate curriculum workspace which calls HOD/Dean-only APIs.
+    if n in {4, 6, 10, 17, 41}:
         mods.append("curriculum")
     # base modules always available, appended after the office-specific ones
     ordered = []

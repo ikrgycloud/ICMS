@@ -3,6 +3,7 @@ import { api } from "../api";
 import { FiTrash2, FiCamera, FiUpload } from "react-icons/fi";
 import { Html5Qrcode } from "html5-qrcode";
 import { Modal } from "../modules/kit";
+import { appConfirm } from "../ui/dialogs";
 
 const tabs: any = {
   frontdesk_dashboard: "Dashboard",
@@ -163,7 +164,7 @@ function Visitors({ data, reload }: any) {
     } finally { setSaving(false); }
   }
   async function deleteVisitor() {
-    if (!window.confirm("Delete visitor " + selected.name + "? This cannot be undone.")) return;
+    if (!(await appConfirm(`Delete visitor ${selected.name}? This cannot be undone.`, "Delete visitor"))) return;
     setSaving(true); setActionError("");
     try {
       await api.deleteFrontdeskVisitor(selected.id);

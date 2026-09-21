@@ -4,6 +4,24 @@ function tok() { return localStorage.getItem('icms_token') || '' }
 
 const delay = (milliseconds: number) => new Promise(resolve => setTimeout(resolve, milliseconds))
 
+type ReadCacheEntry = { value: any; expiresAt: number }
+const readCache = new Map<string, ReadCacheEntry>()
+const inFlightReads = new Map<string, Promise<any>>()
+const MAX_READ_CACHE_ENTRIES = 100
+
+function cacheTtl(path: string) {
+  // Identity and navigation configuration change rarely; notification counts
+  // should remain fresh. Screen data gets a brief stale-while-revalidate-like
+  // reuse window so moving back to a screen does not repeat the same API call.
+  if (path === '/me' || path === '/workspace') return 30_000
+  if (path.startsWith('/notifications')) return 5_000
+  return 15_000
+}
+
+function clearReadCache() {
+  readCache.clear()
+}
+
 function serviceUnavailableError(status: number) {
   const error = new Error(
     status === 502 || status === 503 || status === 504
@@ -34,7 +52,7 @@ function principalCampusTokenError() {
   return null
 }
 
-async function req(path: string, opts: RequestInit = {}) {
+async function requestJson(path: string, opts: RequestInit = {}) {
   const method = String(opts.method || 'GET').toUpperCase()
   // Read operations are safe to retry when Docker/network routing briefly
   // reconnects. Mutating actions are intentionally never replayed.
@@ -90,6 +108,36 @@ async function req(path: string, opts: RequestInit = {}) {
     throw error
   }
   return data
+}
+
+async function req(path: string, opts: RequestInit = {}) {
+  const method = String(opts.method || 'GET').toUpperCase()
+  const cacheable = method === 'GET' || method === 'HEAD'
+  if (!cacheable) {
+    const result = await requestJson(path, opts)
+    // A successful mutation can alter cards, lists, approval counts, and
+    // notifications. Clearing avoids exposing stale workflow state.
+    clearReadCache()
+    return result
+  }
+
+  const key = `${tok()}::${path}`
+  const now = Date.now()
+  const cached = readCache.get(key)
+  if (cached && cached.expiresAt > now) return cached.value
+  if (cached) readCache.delete(key)
+
+  const active = inFlightReads.get(key)
+  if (active) return active
+  const pending = requestJson(path, opts)
+    .then(data => {
+      if (readCache.size >= MAX_READ_CACHE_ENTRIES) readCache.delete(readCache.keys().next().value!)
+      readCache.set(key, { value: data, expiresAt: Date.now() + cacheTtl(path) })
+      return data
+    })
+    .finally(() => inFlightReads.delete(key))
+  inFlightReads.set(key, pending)
+  return pending
 }
 
 async function download(path: string, filename = 'ICMS-payment-receipt.pdf') {
@@ -460,11 +508,16 @@ export const api = {
   addStudent: (b: any) => req('/students', { method: 'POST', body: JSON.stringify(b) }),
 
   // ---- academics ----
+  academicDepartments: () => req('/academics/departments'),
+  createAcademicDepartment: (body: any) => req('/academics/departments', { method: 'POST', body: JSON.stringify(body) }),
+  updateAcademicDepartment: (id: string, body: any) => req(`/academics/departments/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+  archiveAcademicDepartment: (id: string, body: any) => req(`/academics/departments/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify(body) }),
   academicProgrammes: () => req('/academics/programmes'),
   createAcademicProgramme: (body: any) => req('/academics/programmes', { method: 'POST', body: JSON.stringify(body) }),
   courses: () => req('/academics/courses'),
   academicPrograms: () => req('/academics/programs'),
   courseOfferings: () => req('/academics/course-offerings'),
+  courseOfferingsSummary: () => req('/academics/course-offerings-summary'),
   createCourseOffering: (b: any) => req('/academics/course-offerings', { method: 'POST', body: JSON.stringify(b) }),
   updateCourseOffering: (id: string, b: any) => req(`/academics/course-offerings/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
   changeCourseOfferingStatus: (id: string, status: string) => req(`/academics/course-offerings/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) }),
@@ -683,6 +736,10 @@ export const api = {
   dayCloses: () => req('/finance/day-closes'),
   createDayClose: (body: any) => req('/finance/day-close', { method: 'POST', body: JSON.stringify(body) }),
   academicRollovers: () => req('/academic-rollover'),
+  academicRolloverReadiness: (body: { source_academic_year: string, source_semester: number, target_academic_year: string, target_semester: number }) => {
+    const params = new URLSearchParams(Object.entries(body).map(([key, value]) => [key, String(value)]))
+    return req(`/academic-rollover/readiness?${params.toString()}`)
+  },
   academicRolloverPolicy: () => req('/academic-rollover/policy'),
   updateAcademicRolloverPolicy: (body: any) => req('/academic-rollover/policy', { method: 'PUT', body: JSON.stringify(body) }),
   startAcademicRollover: (body: any) => req('/academic-rollover', { method: 'POST', body: JSON.stringify(body) }),
@@ -806,6 +863,12 @@ export const api = {
   updateGovernance: (semester: string, body: any) =>
     req(`/governance/${encodeURIComponent(semester)}`, { method: 'PUT', body: JSON.stringify(body) }),
   adminUsers: () => req('/admin/users'),
+  deanScopeAssignments: () => req('/academics/dean-scope-assignments'),
+  createAcademicUnit: (body: any) => req('/academics/schools', { method: 'POST', body: JSON.stringify(body) }),
+  createDeanScopeAssignment: (body: any) => req('/academics/dean-scope-assignments', { method: 'POST', body: JSON.stringify(body) }),
+  academicAppointments: () => req('/admin/academic-appointments'),
+  createHodAppointment: (body: any) => req('/academics/hod-appointments', { method: 'POST', body: JSON.stringify(body) }),
+  decideHodAppointment: (id: string, decision: string, body: any) => req(`/academics/hod-appointments/${id}/decision/${decision}`, { method: 'POST', body: JSON.stringify(body) }),
 
   // ---- persona portals ----
   whoami: () => req('/portal/whoami'),

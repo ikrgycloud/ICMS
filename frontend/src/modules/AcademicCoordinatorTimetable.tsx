@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { Empty, Modal, PageHead, Pill, Spinner } from "./kit";
+import { appConfirm, appPrompt } from "../ui/dialogs";
 
 const DAYS = [
   "Monday",
@@ -387,7 +388,7 @@ export default function AcademicCoordinatorTimetable() {
   }
 
   async function deactivate(entry: any) {
-    if (!window.confirm("Deactivate this timetable entry?")) return;
+    if (!(await appConfirm("Deactivate this timetable entry? It will no longer be available for scheduling.", "Deactivate timetable entry"))) return;
     try {
       await api.deactivateTimetableEntry(entry.id);
       setMessage("Timetable entry deactivated.");
@@ -431,15 +432,13 @@ export default function AcademicCoordinatorTimetable() {
   async function createChange() {
     if (!changeModal) return;
     try {
-      await api.createTimetableChange({
+      const created = await api.createTimetableChange({
         timetable_entry_id: changeModal.id,
         expected_version: changeModal.version_no || 1,
         ...changeForm,
       });
       setChangeModal(null);
-      setMessage(
-        "Change request created. Submit it for HOD review from the change workflow.",
-      );
+      setMessage(`Change request created as ${String(created.risk_level || "academic").toLowerCase()} risk. ${created.risk_reason || ""} Route: ${created.approval_route || "Submit it for HOD review from the change workflow."}`);
       await load();
     } catch (e: any) {
       setError(e.message || "Unable to create timetable change");
@@ -447,7 +446,7 @@ export default function AcademicCoordinatorTimetable() {
   }
 
   async function resolveConflict(conflict: any) {
-    const note = window.prompt("Resolution note") || "";
+    const note = await appPrompt("Record the resolution before closing this conflict.", "Resolve timetable conflict");
     if (!note.trim()) return;
     try {
       await api.resolveAcademicConflict(conflict.id, note);
@@ -1003,7 +1002,9 @@ export default function AcademicCoordinatorTimetable() {
           <p className="hint">
             Current: {DAYS[changeModal.day_of_week]} {changeModal.start_time}–
             {changeModal.end_time} · {changeModal.room || "No room"}. This
-            controlled request will require HOD, Dean, and VP approval.
+            The system calculates the approval route from the change impact,
+            published delivery, and affected students. You cannot select or
+            bypass the route.
           </p>
           <div className="form-grid">
             <label>

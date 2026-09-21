@@ -26,7 +26,7 @@ export default function Academics({ caps, go, initialTab = 'sections', offeringW
   const [timetable, setTimetable] = useState<any>({ entries: [] })
   const [editingEntry, setEditingEntry] = useState<any>(null)
   const [form, setForm] = useState({ course_id: '', offering_id: '', section_code: 'A', room: 'LH-5', schedule: 'Mon/Wed 10:00', capacity: 60 })
-  const [programmeForm, setProgrammeForm] = useState({ department_id: '', code: '', name: '', level: 'UG', duration_years: 4 })
+  const [programmeForm, setProgrammeForm] = useState({ department_id: '', code: '', name: '', level: 'UG', duration_years: 4, programme_template: '' })
   const [timetableForm, setTimetableForm] = useState({
     day_of_week: 0,
     start_time: '09:00',
@@ -104,7 +104,7 @@ export default function Academics({ caps, go, initialTab = 'sections', offeringW
       const response = await api.createAcademicProgramme(programmeForm)
       setDecision(response.decision)
       setShowProgrammeAdd(false)
-      setProgrammeForm({ department_id: '', code: '', name: '', level: 'UG', duration_years: 4 })
+      setProgrammeForm({ department_id: '', code: '', name: '', level: 'UG', duration_years: 4, programme_template: '' })
       load()
     } catch (error: any) {
       setDecision({ outcome: 'DENY', reason: error.message })
@@ -313,6 +313,30 @@ export default function Academics({ caps, go, initialTab = 'sections', offeringW
   }
   const selectedSectionOffering = eligibleSectionOfferings.find((offering: any) => offering.id === form.offering_id)
   const hodRequirementsSubmitted = String(selectedOffering?.hod_input?.status || '').toLowerCase() === 'submitted'
+  const selectedDepartment = (programmes?.departments || []).find((department: any) => department.id === programmeForm.department_id)
+  const departmentProgrammes = (programmes?.programmes || []).filter((programme: any) => !programmeForm.department_id || programme.department_id === programmeForm.department_id)
+
+  const handleDepartmentChange = (value: string) => {
+    const nextDepartment = value
+    setProgrammeForm({
+      ...programmeForm,
+      department_id: nextDepartment,
+      programme_template: '',
+      code: '',
+      name: '',
+    })
+  }
+
+  const handleTemplateChange = (value: string) => {
+    const template = (programmes?.programmes || []).find((programme: any) => programme.id === value)
+    setProgrammeForm({
+      ...programmeForm,
+      programme_template: value,
+      code: template?.code || programmeForm.code,
+      name: template?.name || programmeForm.name,
+      level: template?.level || programmeForm.level,
+    })
+  }
 
   return (
     <div className="fade-in">
@@ -444,7 +468,44 @@ export default function Academics({ caps, go, initialTab = 'sections', offeringW
         </Modal>
       )}
 
-      {showProgrammeAdd && <Modal title="Create academic programme" onClose={() => setShowProgrammeAdd(false)} footer={<><button className="btn btn-out" onClick={() => setShowProgrammeAdd(false)} type="button">Cancel</button><button className="btn btn-brass" onClick={submitProgramme} type="button">Create programme</button></>}><div className="form-row"><label>Department</label><select className="select" value={programmeForm.department_id} onChange={e => setProgrammeForm({ ...programmeForm, department_id: e.target.value })}><option value="">Choose department</option>{programmes.departments.map((department: any) => <option key={department.id} value={department.id}>{department.code} - {department.name}</option>)}</select></div><div className="grid-2"><div className="form-row"><label>Programme code</label><input className="inp" value={programmeForm.code} onChange={e => setProgrammeForm({ ...programmeForm, code: e.target.value.toUpperCase() })} placeholder="BTECH-AI" /></div><div className="form-row"><label>Level</label><select className="select" value={programmeForm.level} onChange={e => setProgrammeForm({ ...programmeForm, level: e.target.value })}>{['UG', 'PG', 'DIPLOMA', 'PHD', 'CERTIFICATE'].map(level => <option key={level}>{level}</option>)}</select></div></div><div className="grid-2"><div className="form-row"><label>Programme name</label><input className="inp" value={programmeForm.name} onChange={e => setProgrammeForm({ ...programmeForm, name: e.target.value })} placeholder="B.Tech Artificial Intelligence" /></div><div className="form-row"><label>Duration in years</label><input className="inp" type="number" min="1" max="10" value={programmeForm.duration_years} onChange={e => setProgrammeForm({ ...programmeForm, duration_years: Number(e.target.value) })} /></div></div></Modal>}
+      {showProgrammeAdd && <Modal title="Create academic programme" onClose={() => setShowProgrammeAdd(false)} footer={<><button className="btn btn-out" onClick={() => setShowProgrammeAdd(false)} type="button">Cancel</button><button className="btn btn-brass" onClick={submitProgramme} type="button">Create programme</button></>}>
+        <div style={{ display: 'grid', gap: 18 }}>
+          <div style={{ background: 'linear-gradient(135deg, rgba(19,74,124,0.12), rgba(255,255,255,0.9))', border: '1px solid rgba(19,74,124,0.12)', borderRadius: 16, padding: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+              <div>
+                <div className="eyebrow" style={{ letterSpacing: '0.12em', textTransform: 'uppercase', color: '#55718f', fontSize: 11, fontWeight: 700 }}>Academic structure</div>
+                <h3 style={{ margin: '4px 0 0', fontSize: 20 }}>{selectedDepartment ? selectedDepartment.name : 'Select department'}</h3>
+              </div>
+              <div style={{ borderRadius: 999, background: '#eff6ff', color: '#1d4ed8', padding: '8px 12px', fontWeight: 700, fontSize: 12 }}>{selectedDepartment?.code || 'Dept'}</div>
+            </div>
+            <div className="grid-2">
+              <div className="form-row"><label>Department</label><select className="select" value={programmeForm.department_id} onChange={e => handleDepartmentChange(e.target.value)}><option value="">Choose department</option>{programmes.departments.map((department: any) => <option key={department.id} value={department.id}>{department.code} - {department.name}</option>)}</select></div>
+              <div className="form-row"><label>Programme catalog</label><select className="select" value={programmeForm.programme_template} onChange={e => handleTemplateChange(e.target.value)}><option value="">Select existing programme</option>{departmentProgrammes.map((programme: any) => <option key={programme.id} value={programme.id}>{programme.code} - {programme.name}</option>)}</select></div>
+            </div>
+          </div>
+
+          <div className="grid-2">
+            <div className="form-row"><label>Programme code</label><input className="inp" value={programmeForm.code} onChange={e => setProgrammeForm({ ...programmeForm, code: e.target.value.toUpperCase() })} placeholder="BTECH-AI" /></div>
+            <div className="form-row"><label>Level</label><select className="select" value={programmeForm.level} onChange={e => setProgrammeForm({ ...programmeForm, level: e.target.value })}>{['UG', 'PG', 'DIPLOMA', 'PHD', 'CERTIFICATE'].map(level => <option key={level}>{level}</option>)}</select></div>
+          </div>
+
+          <div className="grid-2">
+            <div className="form-row"><label>Programme name</label><input className="inp" value={programmeForm.name} onChange={e => setProgrammeForm({ ...programmeForm, name: e.target.value })} placeholder="B.Tech Artificial Intelligence" /></div>
+            <div className="form-row"><label>Duration in years</label><input className="inp" type="number" min="1" max="10" value={programmeForm.duration_years} onChange={e => setProgrammeForm({ ...programmeForm, duration_years: Number(e.target.value) })} /></div>
+          </div>
+
+          {departmentProgrammes.length > 0 && (
+            <div style={{ border: '1px solid rgba(148,163,184,0.25)', borderRadius: 14, background: '#f8fafc', padding: 12 }}>
+              <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.12em', color: '#64748b', fontWeight: 700, marginBottom: 8 }}>Department shortlist</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                {departmentProgrammes.slice(0, 6).map((programme: any) => (
+                  <span key={programme.id} style={{ background: '#e2e8f0', color: '#0f172a', borderRadius: 999, padding: '6px 10px', fontSize: 12, fontWeight: 600 }}>{programme.code}</span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </Modal>}
 
       {showTimetable && (
         <Modal

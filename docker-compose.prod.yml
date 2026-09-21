@@ -38,6 +38,13 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       ICMS_ENVIRONMENT: production
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS}
+      # Bound PostgreSQL connections per API process. Tune only after database
+      # monitoring shows sustained pool waiting or unused capacity.
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
+      DB_POOL_TIMEOUT_SECONDS: ${DB_POOL_TIMEOUT_SECONDS:-10}
+      DB_POOL_RECYCLE_SECONDS: ${DB_POOL_RECYCLE_SECONDS:-1800}
+      SLOW_REQUEST_MS: ${SLOW_REQUEST_MS:-1000}
       DEMO_DATA_ENABLED: "false"
       # Production data must be provisioned through approved migrations and
       # imports, never through development/demo seed routines on container start.
@@ -56,7 +63,7 @@ services:
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8000/', timeout=5)"
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5)"
         ]
       interval: 15s
       timeout: 5s

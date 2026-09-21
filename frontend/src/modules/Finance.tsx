@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { api } from '../api'
 import { PageHead, Spinner, DecisionToast, Modal, money, Empty } from './kit'
 import PayrollPanel from './PayrollPanel'
+import { appConfirm, appPrompt } from '../ui/dialogs'
 
 /**
  * Campus / Branch Head finance oversight.  The API is responsible for applying
@@ -137,9 +138,9 @@ function FinanceWorkspace({ caps, user, onOpenApprovals, overviewOnly = false, o
   }, [user?.office_n])
   useEffect(() => { if (tab === 'payments') api.pendingPayments().then((r:any) => setPendingPayments(r.payments || [])).catch(() => setPendingPayments([])) }, [tab])
   async function decideOffline(payment:any, action:string) {
-    const remarks = ['bounced', 'rejected'].includes(action) ? window.prompt('Reason (required):') || '' : ''
+    const remarks = ['bounced', 'rejected'].includes(action) ? await appPrompt('Document the reason for this payment decision.', 'Payment decision reason') : ''
     try { await api.verifyOfflinePayment(payment.id, action, remarks); setPendingPayments(rows => rows.filter(row => row.id !== payment.id)); load() }
-    catch (error:any) { alert(error.message || 'Could not update payment') }
+    catch (error:any) { setDecision({ outcome: 'DENY', reason: error.message || 'Could not update payment' }) }
   }
 
   function reviewInvoice(invoice:any) {
@@ -209,12 +210,12 @@ function FinanceWorkspace({ caps, user, onOpenApprovals, overviewOnly = false, o
   }
 
   async function createReconciliation() {
-    const notes = window.prompt('Reconciliation notes:', '') || ''
+    const notes = await appPrompt('Add reconciliation notes for the audit trail.', 'Close reconciliation')
     try {
       const result = await api.createReconciliation({ notes })
       setDecision({ outcome: 'APPROVE', reason: `Reconciliation closed: ${result.reconciliation?.id || 'created'}` })
       load()
-    } catch (error:any) { alert(error.message || 'Could not create reconciliation') }
+    } catch (error:any) { setDecision({ outcome: 'DENY', reason: error.message || 'Could not create reconciliation' }) }
   }
 
   function requestRefund(invoice:any) {
@@ -266,7 +267,7 @@ function FinanceWorkspace({ caps, user, onOpenApprovals, overviewOnly = false, o
         const result = await api.executeRefund(row.id)
         setDecision({ outcome: 'APPROVE', reason: `Refund executed: ${result.refund?.status || 'executed'}` })
       } else {
-        const remarks = decision === 'rejected' ? window.prompt('Reject reason (optional):', '') || '' : ''
+        const remarks = decision === 'rejected' ? await appPrompt('Explain the rejection for the requester.', 'Reject refund request') : ''
         const result = await api.decideRefund(row.id, { decision, remarks })
         setDecision({ outcome: decision === 'rejected' ? 'DENY' : 'APPROVE', reason: `Refund ${result.refund?.status || decision}` })
       }
@@ -322,7 +323,7 @@ function FinanceWorkspace({ caps, user, onOpenApprovals, overviewOnly = false, o
   }
 
   async function resubmitWaiver(row:any) {
-    const reason = window.prompt('Update the documented reason before resubmitting to Principal:', row.reason || '')?.trim() || ''
+    const reason = (await appPrompt('Update the documented reason before resubmitting to Principal.', 'Resubmit waiver recommendation', row.reason || '')).trim()
     if (!reason) return
     try {
       const result = await api.resubmitFeeWaiverRequest(row.id, { reason })
@@ -334,33 +335,33 @@ function FinanceWorkspace({ caps, user, onOpenApprovals, overviewOnly = false, o
   }
 
   async function createVendorPayment() {
-    const vendorName = window.prompt('Vendor name:', '')?.trim() || ''
+    const vendorName = (await appPrompt('Enter the vendor name.', 'Create vendor payment')).trim()
     if (!vendorName) {
-      alert('Vendor name is required.')
+      setDecision({ outcome: 'DENY', reason: 'Vendor name is required.' })
       return
     }
-    const invoiceRef = window.prompt('Invoice / bill reference:', '')?.trim() || ''
-    const amountText = window.prompt('Payment amount (₹):', '0') || '0'
+    const invoiceRef = (await appPrompt('Enter the supplier invoice or bill reference.', 'Vendor invoice reference')).trim()
+    const amountText = await appPrompt('Enter the payment amount in rupees.', 'Vendor payment amount', '0')
     const amount = Number(amountText)
     if (!Number.isFinite(amount) || amount <= 0) {
-      alert('Enter a valid vendor payment amount greater than zero.')
+      setDecision({ outcome: 'DENY', reason: 'Enter a valid vendor payment amount greater than zero.' })
       return
     }
-    const notes = window.prompt('Notes:', '') || ''
+    const notes = await appPrompt('Add any supporting notes for the approver.', 'Vendor payment notes')
     try {
       const result = await api.createVendorPayment({ vendor_name: vendorName, invoice_ref: invoiceRef, amount, notes })
       setDecision({ outcome: 'APPROVE', reason: `Vendor payment requested: ${result.vendor_payment?.status || 'pending_approval'}` })
       load()
-    } catch (error:any) { alert(error.message || 'Could not create vendor payment') }
+    } catch (error:any) { setDecision({ outcome: 'DENY', reason: error.message || 'Could not create vendor payment' }) }
   }
 
   async function closeDay() {
-    const notes = window.prompt('Day-close notes:', '') || ''
+    const notes = await appPrompt('Add day-close notes for the audit trail.', 'Close finance day')
     try {
       const result = await api.createDayClose({ notes })
       setDecision({ outcome: 'APPROVE', reason: `Day closed: ${result.day_close?.id || 'created'}` })
       load()
-    } catch (error:any) { alert(error.message || 'Could not close the day') }
+    } catch (error:any) { setDecision({ outcome: 'DENY', reason: error.message || 'Could not close the day' }) }
   }
 
   async function loadStudents(q = '') {
@@ -875,7 +876,7 @@ function FeeSetup({ canManage, onOpenApprovals }: { canManage: boolean; onOpenAp
     }
   }, [])
   async function saveHead() { try { setSaving(true); if (head.id) await api.updateFeeHead(head.id, head); else await api.createFeeHead(head); setHead(null); load() } catch (e:any) { setError(e.message) } finally { setSaving(false) } }
-  async function toggle(h:any) { if (!confirm(`${h.is_active ? 'Deactivate' : 'Activate'} ${h.name}?`)) return; try { await api.setFeeHeadStatus(h.id, !h.is_active); load() } catch (e:any) { setError(e.message) } }
+  async function toggle(h:any) { if (!(await appConfirm(`${h.is_active ? 'Deactivate' : 'Activate'} ${h.name}?`, 'Update fee head'))) return; try { await api.setFeeHeadStatus(h.id, !h.is_active); load() } catch (e:any) { setError(e.message) } }
   async function saveDraft() {
     const required = [
       ['Academic Year', draft.academic_year_id], ['Semester', draft.semester_id],

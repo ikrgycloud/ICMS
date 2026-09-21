@@ -45,12 +45,12 @@ export default function DeanAcademicsDashboard({ go }: { go: (view: string) => v
   useEffect(() => { load(initialFilters) }, [])
 
   const kpis = useMemo(() => [
-    ['Programs', data?.kpis?.programs ?? 0, 'curriculum'],
-    ['Departments', data?.kpis?.departments ?? 0, 'analytics'],
+    ['Programs', data?.kpis?.programs ?? 0, 'dean_programs'],
+    ['Departments', data?.kpis?.departments ?? 0, 'dean_departments'],
     ['Courses', data?.kpis?.courses ?? 0, 'courses_subjects'],
     ['Faculty', data?.kpis?.faculty ?? 0, 'academics'],
     ['Curriculum Reviews', data?.kpis?.curriculum_reviews ?? 0, 'curriculum'],
-    ['Timetable Conflicts', data?.kpis?.timetable_conflicts ?? 0, 'academics'],
+    ['Timetable Conflicts', data?.kpis?.timetable_conflicts ?? 0, 'dean_timetable'],
     ['Academic Actions', data?.kpis?.academic_actions ?? 0, 'dean_risk'],
     ['Needs My Decision', data?.kpis?.needs_my_decision ?? 0, 'decision_inbox'],
   ], [data])

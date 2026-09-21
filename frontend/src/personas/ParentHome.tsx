@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { api } from '../api'
 import { Spinner, money } from '../modules/kit'
+import { appError } from '../ui/dialogs'
 
 export default function ParentHome({ user }: { user: any }) {
   const [home, setHome] = useState<any>(null)
@@ -9,7 +10,7 @@ export default function ParentHome({ user }: { user: any }) {
   if (!home) return <Spinner />
   const w = home.ward
   const initials = (w.name || 'W').split(' ').map((x: string) => x[0]).slice(0, 2).join('')
-  async function pay(invoice: any) { try { setPaying(invoice.id); const order = await api.createParentRazorpayOrder(invoice.id); if (!(window as any).Razorpay) await new Promise<void>((resolve, reject) => { const script=document.createElement('script'); script.src='https://checkout.razorpay.com/v1/checkout.js'; script.onload=()=>resolve(); script.onerror=()=>reject(new Error('Could not load Razorpay checkout')); document.body.appendChild(script) }); new (window as any).Razorpay({ key:order.key_id, amount:order.amount, currency:order.currency, name:'ICMS', description:order.description, order_id:order.order_id, prefill:order.student, handler:async (response:any)=>{ await api.verifyParentRazorpayPayment({invoice_id:invoice.id,...response}); setHome(await api.parentHome()) }}).open() } catch (error:any) { alert(error.message || 'Unable to start payment') } finally { setPaying('') } }
+  async function pay(invoice: any) { try { setPaying(invoice.id); const order = await api.createParentRazorpayOrder(invoice.id); if (!(window as any).Razorpay) await new Promise<void>((resolve, reject) => { const script=document.createElement('script'); script.src='https://checkout.razorpay.com/v1/checkout.js'; script.onload=()=>resolve(); script.onerror=()=>reject(new Error('Could not load Razorpay checkout')); document.body.appendChild(script) }); new (window as any).Razorpay({ key:order.key_id, amount:order.amount, currency:order.currency, name:'ICMS', description:order.description, order_id:order.order_id, prefill:order.student, handler:async (response:any)=>{ await api.verifyParentRazorpayPayment({invoice_id:invoice.id,...response}); setHome(await api.parentHome()) }}).open() } catch (error:any) { await appError(error.message || 'Unable to start payment') } finally { setPaying('') } }
 
   return (
     <div className="fade-in">

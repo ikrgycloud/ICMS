@@ -39,7 +39,20 @@ CAMPUS_SCOPES = [
 
 DATABASE_URL = os.environ.get("DATABASE_URL", f"sqlite:///{HERE}/icms.db")
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
+
+# Keep database connections bounded and recyclable in production.  SQLAlchemy's
+# implicit defaults are reasonable for a developer laptop but leave no clear
+# operational control when several API workers share PostgreSQL.  SQLite keeps
+# its native pool because these options do not apply there.
+engine_options = {"connect_args": connect_args, "pool_pre_ping": True}
+if not DATABASE_URL.startswith("sqlite"):
+    engine_options.update({
+        "pool_size": int(os.environ.get("DB_POOL_SIZE", "10")),
+        "max_overflow": int(os.environ.get("DB_MAX_OVERFLOW", "10")),
+        "pool_timeout": int(os.environ.get("DB_POOL_TIMEOUT_SECONDS", "10")),
+        "pool_recycle": int(os.environ.get("DB_POOL_RECYCLE_SECONDS", "1800")),
+    })
+engine = create_engine(DATABASE_URL, **engine_options)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
@@ -280,6 +293,30 @@ def seed():
                 s.add(AuthorityMembership(id=membership_id, tenant_id=TENANT,
                       user_id=f"user_{office_number}", org_scope_id=main_scope,
                       office_n=office_number, status="active"))
+
+        # Dean Academics needs a valid academic scope before the department
+        # register can open.  In the demo/development tenant we grant a default
+        # whole-tenant scope so the Dean can establish departments immediately
+        # without manual scope assignment.
+        dean_user = s.get(User, "user_6")
+        if dean_user:
+            default_assignment_id = "dean_scope_default_6"
+            if not s.get(domain_models.DeanScopeAssignment, default_assignment_id):
+                s.add(domain_models.DeanScopeAssignment(
+                    id=default_assignment_id,
+                    tenant_id=TENANT,
+                    dean_user_id="user_6",
+                    school_id=None,
+                    dept_id=None,
+                    program_id=None,
+                    section_id=None,
+                    active=True,
+                    effective_from=datetime.utcnow(),
+                    effective_to=None,
+                    created_by="system",
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                ))
 
         s.commit()
         return {"status": "seeded", "offices": len(OFFICES),

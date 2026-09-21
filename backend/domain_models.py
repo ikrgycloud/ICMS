@@ -30,6 +30,7 @@ class Department(Base):
     campus = Column(String)            # scope_ref (campus)
     school_id = Column(String, ForeignKey("schools.id"), nullable=True, index=True)
     hod_person_id = Column(String, nullable=True)
+    status = Column(String, default="active", nullable=False, index=True)
 
 
 class School(Base):
@@ -1837,6 +1838,25 @@ class DeanScopeAssignment(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class DepartmentHODAppointment(Base):
+    """Auditable appointment of a HOD; only an approved appointment changes scope."""
+    __tablename__ = "department_hod_appointments"
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, index=True, nullable=False)
+    department_id = Column(String, ForeignKey("departments.id"), index=True, nullable=False)
+    staff_id = Column(String, ForeignKey("staff_members.id"), index=True, nullable=False)
+    requested_by = Column(String, ForeignKey("users.id"), nullable=False)
+    status = Column(String, default="SUBMITTED", index=True, nullable=False)
+    rationale = Column(Text, default="")
+    effective_from = Column(DateTime, default=datetime.utcnow, nullable=False)
+    decided_by = Column(String, ForeignKey("users.id"), nullable=True)
+    decided_at = Column(DateTime, nullable=True)
+    decision_reason = Column(Text, default="")
+    status_version = Column(Integer, default=1, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class FacultyAllocation(Base):
     __tablename__ = "faculty_allocations"
     id = Column(String, primary_key=True)
@@ -1876,6 +1896,11 @@ class TimetableException(Base):
     change_payload_json = Column(Text, default="{}")
     base_version = Column(Integer, default=0)
     workflow_version_no = Column(Integer, default=1, nullable=False)
+    # Legacy requests retain the original full governance route until a new
+    # server-classified request is created.
+    risk_level = Column(String, default="INSTITUTIONAL", nullable=False, index=True)
+    risk_reason = Column(Text, default="")
+    approval_route = Column(String, default="HOD → Dean Academics → Vice Principal → Academic Coordinator")
     published_at = Column(DateTime, nullable=True)
 
 

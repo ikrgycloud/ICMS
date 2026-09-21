@@ -6,7 +6,7 @@ type Filter = 'ALL' | 'PENDING' | 'URGENT' | 'TODAY' | 'COMPLETED'
 
 const COMPLETED_STATES = new Set(['APPROVED', 'REJECTED', 'RETURNED', 'IMPLEMENTED', 'CLOSED', 'EXECUTED'])
 
-export default function DecisionInbox() {
+export default function DecisionInbox({ user }: { user?: any }) {
   const [data, setData] = useState<any>(null)
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
@@ -22,12 +22,16 @@ export default function DecisionInbox() {
   const [saving, setSaving] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
+  // This inbox is shared with generic workflow approvals.  The academic
+  // governance source is deliberately available only to academic authority
+  // offices; do not request it for a stale route after a role switch.
+  const canLoadAcademicGovernance = [6, 10, 17].includes(Number(user?.office_n))
 
   async function load() {
     setRefreshing(true); setError('')
     try {
       const [inbox, workflows] = await Promise.all([
-        api.governanceInbox(),
+        canLoadAcademicGovernance ? api.governanceInbox() : Promise.resolve({ proposals: [], history: [], summary: {} }),
         api.workflows('inbox'),
       ])
       const workflowProposals = (workflows?.workflows || []).map((item: any) => ({

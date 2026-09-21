@@ -148,6 +148,10 @@ from migrations import v0059_budget_campus_scope
 from migrations import v0060_campus_performance_scope
 from migrations import v0061_workflow_executive_escalation_route
 from migrations import v0062_campus_report_vc_review
+from migrations import v0063_timetable_change_risk_routing
+from migrations import v0064_notification_polling_indexes
+from migrations import v0065_department_hod_appointments
+from migrations import v0066_department_lifecycle
 MIGRATIONS.append(v0053_timetable_change_workflow_version)
 MIGRATIONS.append(v0056_campus_head_domains)
 MIGRATIONS.append(v0057_student_campus_scope)
@@ -156,6 +160,10 @@ MIGRATIONS.append(v0059_budget_campus_scope)
 MIGRATIONS.append(v0060_campus_performance_scope)
 MIGRATIONS.append(v0061_workflow_executive_escalation_route)
 MIGRATIONS.append(v0062_campus_report_vc_review)
+MIGRATIONS.append(v0063_timetable_change_risk_routing)
+MIGRATIONS.append(v0064_notification_polling_indexes)
+MIGRATIONS.append(v0065_department_hod_appointments)
+MIGRATIONS.append(v0066_department_lifecycle)
 
 
 def upgrade(engine):

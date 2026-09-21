@@ -99,17 +99,51 @@ def actor_hierarchy(ctx: dict, session) -> AcademicHierarchy:
 
 
 def dean_scope_assignments(ctx: dict, session) -> list[D.DeanScopeAssignment]:
-    """Return only currently-effective persisted assignments for this Dean."""
+    """Return only currently-effective persisted assignments for this Dean.
+
+    Development and demo environments are allowed a default "all active schools"
+    scope when no explicit assignment has been created yet. This prevents an
+    unconfigured Dean from seeing a blank department register while still keeping
+    production strict about missing scope rows.
+    """
     if ctx.get("office_n") != 6:
         return []
     now = datetime.utcnow()
-    return session.query(D.DeanScopeAssignment).filter(
+    assignments = session.query(D.DeanScopeAssignment).filter(
         D.DeanScopeAssignment.tenant_id == ctx.get("tenant_id"),
         D.DeanScopeAssignment.dean_user_id == ctx.get("sub"),
         D.DeanScopeAssignment.active == True,
         D.DeanScopeAssignment.effective_from <= now,
         (D.DeanScopeAssignment.effective_to == None) | (D.DeanScopeAssignment.effective_to >= now),
     ).all()
+    if assignments:
+        return assignments
+    from database import demo_data_enabled
+    if not demo_data_enabled():
+        return []
+    active_school_count = session.query(D.School.id).filter(
+        D.School.tenant_id == ctx.get("tenant_id"),
+        D.School.status == "active",
+    ).count()
+    if active_school_count == 0:
+        return []
+    return [
+        D.DeanScopeAssignment(
+            id=f"default_dean_scope_{ctx.get('sub')}",
+            tenant_id=ctx.get("tenant_id"),
+            dean_user_id=ctx.get("sub"),
+            school_id=None,
+            dept_id=None,
+            program_id=None,
+            section_id=None,
+            active=True,
+            effective_from=now,
+            effective_to=None,
+            created_by="system",
+            created_at=now,
+            updated_at=now,
+        )
+    ]
 
 
 def dean_scope_allows(ctx: dict, session, target: AcademicHierarchy) -> bool:

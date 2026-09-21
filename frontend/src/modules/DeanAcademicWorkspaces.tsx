@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import { Empty, Modal, PageHead, Pill, Spinner } from "./kit";
 import CommitteeGovernance from "./CommitteeGovernance";
+import { appPrompt } from "../ui/dialogs";
 
 const WORKSPACE_TAB_GROUPS = [
   { label: "Operations", tabs: [{ key: "allocation", label: "Faculty Allocation" }, { key: "readiness", label: "Timetable Readiness" }, { key: "delivery", label: "Semester Delivery" }] },
@@ -202,7 +203,7 @@ export default function DeanAcademicWorkspaces({
     }
   }
   async function decideTimetable(plan: any, action: "approve" | "return") {
-    const reason = action === "return" ? window.prompt("Return reason (required)") || "" : "";
+    const reason = action === "return" ? await appPrompt("Explain what must be corrected before resubmission.", "Return timetable for correction") : "";
     if (action === "return" && !reason.trim()) return;
     setSaving(true);
     try {
@@ -295,7 +296,7 @@ export default function DeanAcademicWorkspaces({
     }
   }
   async function measureReview(review: any) {
-    const result = window.prompt("Effectiveness result");
+    const result = await appPrompt("Record the measured result and supporting conclusion.", "Effectiveness result");
     if (!result) return;
     setSaving(true);
     try {

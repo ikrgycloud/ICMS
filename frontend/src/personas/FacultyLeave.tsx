@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { Empty, Modal, Spinner } from '../modules/kit'
+import { appConfirm } from '../ui/dialogs'
 
 const blank = { kind: 'Casual', from_date: '', to_date: '', half_day: false, reason: '' }
 const title = (value: string) => (value || '').replace(/_/g, ' ').replace(/\b\w/g, part => part.toUpperCase())
@@ -53,7 +54,7 @@ export default function FacultyLeave() {
   }
 
   const cancel = async (row: any) => {
-    if (!window.confirm('Cancel this leave request?')) return
+    if (!(await appConfirm('Cancel this leave request? This cannot be undone.', 'Cancel leave request'))) return
     setSaving(true)
     setMessage('')
     try {
