@@ -18,7 +18,7 @@ environment {
     // IMPORTANT:
     // Replace this with the REAL PUBLIC IP or reachable private IP
     // of your ICMS Application EC2.
-    APP_SERVER = "ubuntu@16.16.216.155"
+    APP_SERVER = "ubuntu@13.63.138.123"
 
     APP_DIR = "/opt/icms"
 }
