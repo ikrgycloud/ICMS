@@ -1,9 +1,6 @@
 services:
   db:
     image: postgres:16-alpine
-    # Optional local-only database. The normal server-backed profile does not
-    # start this service; enable it explicitly with --profile local-db.
-    profiles: ["local-db"]
     environment:
       POSTGRES_USER: icms
       POSTGRES_PASSWORD: icms_secret
@@ -22,10 +19,11 @@ services:
     build: ./backend
     env_file: ./backend/.env
     environment:
-      # DATABASE_URL and production safeguards are supplied exclusively by
-      # backend/.env. This keeps credentials out of Compose and makes the
-      # configured PostgreSQL server the single persistence target.
+      DATABASE_URL: ${DATABASE_URL:-postgresql://icms:icms_secret@db:5432/icms}
       PYTHONDONTWRITEBYTECODE: "1"
+    depends_on:
+      db:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/docs', timeout=2)\""]
       interval: 5s
@@ -39,7 +37,7 @@ services:
     build: ./backend
     env_file: ./backend/.env
     environment:
-      # Must use the identical DATABASE_URL and production flags as backend.
+      DATABASE_URL: ${DATABASE_URL:-postgresql://icms:icms_secret@db:5432/icms}
       PYTHONDONTWRITEBYTECODE: "1"
     depends_on:
       backend:
@@ -56,3 +54,5 @@ services:
 
 volumes:
   icms_pgdata:
+    external: true
+    name: icms-merged_icms_pgdata

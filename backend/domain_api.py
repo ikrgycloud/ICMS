@@ -8736,7 +8736,8 @@ def fee_structure_affected_students(structure_id: str, ctx=Depends(auth), s=Depe
 
 def _fee_structure_matching_students(s, row):
     campus, batch, student_type = s.get(D.Campus, row.campus_id), s.get(D.Batch, row.batch_id), s.get(D.StudentType, row.student_type_id)
-    if not campus or not batch or not student_type:
+    semester = s.get(D.Semester, row.semester_id)
+    if not campus or not batch or not student_type or not semester:
         raise HTTPException(409, "Fee structure references are incomplete; revise the draft before continuing")
     return s.query(D.Student).filter(
         D.Student.tenant_id == row.tenant_id,
@@ -8744,8 +8745,33 @@ def _fee_structure_matching_students(s, row):
         D.Student.batch == batch.name,
         D.Student.campus == campus.name,
         D.Student.student_type == student_type.name,
+        D.Student.semester == semester.sequence,
         D.Student.status == "active",
     ).all()
+
+
+def _apply_fee_structure_to_students(s, row, lines, students):
+    """Idempotently ensure invoices and roll-number accounts for matching students."""
+    created = 0
+    accounts_created = 0
+    for student in students:
+        accounts_created += int(_ensure_student_portal_account(s, student))
+        for line in lines:
+            term = f"{row.academic_year_id}:{row.semester_id}:line:{line.id}"
+            existing = s.query(D.FeeInvoice.id).filter(
+                D.FeeInvoice.student_id == student.id,
+                D.FeeInvoice.fee_structure_id == row.id,
+                D.FeeInvoice.term == term,
+            ).first()
+            if existing:
+                continue
+            s.add(D.FeeInvoice(
+                id=uid(), tenant_id=row.tenant_id, student_id=student.id,
+                term=term, amount=float(line.amount), paid=0, status="due",
+                due_date=line.due_date, fee_structure_id=row.id,
+            ))
+            created += 1
+    return created, accounts_created
 
 
 @router.get("/fee-structures/{structure_id}/impact-preview")
@@ -8861,36 +8887,20 @@ def publish_fee_structure(structure_id: str, ctx=Depends(auth), s=Depends(db)):
     if row.status == "DRAFT":
         raise HTTPException(409, "Fee structure must be approved before publishing")
     if row.status == "PUBLISHED":
-        published_students = (s.query(D.Student).join(D.FeeInvoice, D.FeeInvoice.student_id == D.Student.id)
-                              .filter(D.FeeInvoice.fee_structure_id == row.id).distinct().all())
-        accounts_created = sum(1 for student in published_students if _ensure_student_portal_account(s, student))
-        if accounts_created:
+        lines = s.query(D.FeeStructureLine).filter(D.FeeStructureLine.fee_structure_id == row.id).all()
+        students = _fee_structure_matching_students(s, row)
+        created, accounts_created = _apply_fee_structure_to_students(s, row, lines, students)
+        if created or accounts_created:
             s.commit()
-        return {"structure": _fee_structure_payload(s, row), "matched_students": len(published_students),
-                "invoices_created": 0, "student_accounts_created": accounts_created}
+        return {"structure": _fee_structure_payload(s, row), "matched_students": len(students),
+                "invoices_created": created, "student_accounts_created": accounts_created}
     if row.status != "APPROVED":
         raise HTTPException(409, "Only APPROVED fee structures can be published")
     lines = s.query(D.FeeStructureLine).filter(D.FeeStructureLine.fee_structure_id == row.id).all()
     if not lines:
         raise HTTPException(422, "A fee structure must contain at least one fee line")
     students = _fee_structure_matching_students(s, row)
-    created = 0
-    accounts_created = 0
-    for student in students:
-        accounts_created += int(_ensure_student_portal_account(s, student))
-        for line in lines:
-            existing = s.query(D.FeeInvoice).filter(
-                D.FeeInvoice.student_id == student.id,
-                D.FeeInvoice.fee_structure_id == row.id,
-                D.FeeInvoice.term == f"{row.academic_year_id}:{row.semester_id}:line:{line.id}",
-            ).first()
-            if existing:
-                continue
-            s.add(D.FeeInvoice(id=uid(), tenant_id=TENANT, student_id=student.id,
-                               term=f"{row.academic_year_id}:{row.semester_id}:line:{line.id}",
-                               amount=float(line.amount), paid=0, status="due",
-                               due_date=line.due_date, fee_structure_id=row.id))
-            created += 1
+    created, accounts_created = _apply_fee_structure_to_students(s, row, lines, students)
     row.status = "PUBLISHED"
     row.updated_by, row.updated_at = ctx["sub"], datetime.utcnow()
     s.commit()

@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 
 import domain_models as D
 from authority import pwhash
-from domain_seed import _seed_student_portal_accounts
+from domain_seed import _seed_fee_cohort_students, _seed_student_portal_accounts
 from main import LoginIn, login
 from models import Base, Person, Role, User, UserRole
 
@@ -57,6 +57,28 @@ class StudentSeedAccountTests(unittest.TestCase):
         self.assertIn("token", result)
         self.assertEqual(result["user"]["username"], "23cse002")
         self.assertIsNotNone(self.session.query(User).filter(User.username.ilike("23cse002")).first())
+
+    def test_fee_demo_cohorts_cover_all_semesters_and_student_types_with_logins(self):
+        self.session.add(D.Department(id="dept_cse", tenant_id="t_main", code="CSE", name="Computing"))
+        self.session.add(D.Program(id="prog_cse_btech", tenant_id="t_main", dept_id="dept_cse",
+                                   code="BTECH-CSE", name="BTECH Computing", level="UG", duration_years=4))
+        self.session.commit()
+
+        _seed_fee_cohort_students(self.session)
+        _seed_student_portal_accounts(self.session)
+
+        students = self.session.query(D.Student).filter(
+            D.Student.program_id == "prog_cse_btech",
+            D.Student.id.like("student_fee_demo_%"),
+        ).all()
+        self.assertEqual(len(students), 80)
+        self.assertEqual({(student.batch, student.semester, student.student_type) for student in students},
+                         {(batch, semester, kind) for batch in ("2023", "2024", "2025", "2026", "2027")
+                          for semester in range(1, 9) for kind in ("Regular", "Management")})
+        for student in students:
+            user = self.session.get(User, student.user_id)
+            self.assertEqual(user.username, student.roll_no.lower())
+            self.assertEqual(user.password_hash, pwhash("demo123"))
 
     def test_payroll_employee_code_variants_can_login_with_normalized_employee_id(self):
         employee = User(id="user_payroll_001", tenant_id="t_main", person_id="person_001",

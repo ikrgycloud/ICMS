@@ -2004,6 +2004,47 @@ def _seed_core_domain(s):
     s.commit()
 
 
+def _seed_fee_cohort_students(s):
+    """Ensure every demo program/batch/semester/category has a login-ready student."""
+    programs = s.query(D.Program).filter(D.Program.tenant_id == TENANT).order_by(D.Program.id).all()
+    batch_years = {str(row[0]) for row in s.query(D.Batch.name).all() if row[0]}
+    batch_years.update({str(row[0]) for row in s.query(D.Student.batch).all() if row[0]})
+    batch_years.update({"2023", "2024", "2025", "2026", "2027"})
+    existing_rolls = {str(row[0]).lower() for row in s.query(D.Student.roll_no).all() if row[0]}
+    existing_cohorts = set(s.query(
+        D.Student.program_id, D.Student.batch, D.Student.semester, D.Student.student_type
+    ).filter(D.Student.tenant_id == TENANT, D.Student.status == "active").all())
+    for program in programs:
+        dept = s.get(D.Department, program.dept_id)
+        code = (dept.code if dept else program.code or "GEN").upper()
+        code = "".join(ch for ch in code if ch.isalnum())[:8] or "GEN"
+        for semester in range(1, 9):
+            for batch_year in sorted(batch_years):
+                for student_type in ("Regular", "Management"):
+                    cohort = (program.id, batch_year, semester, student_type)
+                    if cohort in existing_cohorts:
+                        continue
+                    roll = f"T{batch_year[-2:]}{code}{semester}{'M' if student_type == 'Management' else 'R'}"
+                    suffix = 1
+                    base_roll = roll
+                    while roll.lower() in existing_rolls:
+                        suffix += 1
+                        roll = f"{base_roll}{suffix}"
+                    existing_rolls.add(roll.lower())
+                    student_id = f"student_fee_demo_{slug(program.id)}_{batch_year}_{semester}_{slug(student_type)}"
+                    s.add(D.Student(
+                        id=student_id, tenant_id=TENANT, roll_no=roll,
+                        name=f"{student_type} Test Student {code} {batch_year} S{semester}",
+                        email=f"{roll.lower()}@icms.edu", program_id=program.id,
+                        dept_id=program.dept_id, campus=dept.campus if dept else CAMPUS_SCOPES[0],
+                        batch=batch_year, semester=semester, section="A", status="active",
+                        cgpa=round(7.0 + (semester % 3) * 0.3, 2), hosteller=False,
+                        scholarship=(student_type == "Regular"), student_type=student_type,
+                    ))
+                    existing_cohorts.add(cohort)
+    s.commit()
+
+
 def _seed_even_semester_curriculum(s):
     """Backfill a complete approved curriculum for the live demonstration tenant."""
     for dept_code, courses in EVEN_SEMESTER_COURSE_BANK.items():
@@ -4145,27 +4186,49 @@ def _seed_student_portal_accounts(s):
     """Create an individual portal login for every seeded student.
 
     Roll numbers are the usernames and all demo accounts start with the same
-    documented seed password. The shared ``student`` account remains bound to
-    its showcase profile, so it is not replaced by a roll-number login.
+    documented seed password. Existing shared showcase accounts are preserved;
+    a separate roll-number alias is created for their linked student as well.
     """
     student_role = s.get(Role, "role_36_0")
-    for student in s.query(D.Student).order_by(D.Student.roll_no).all():
+    students = s.query(D.Student).order_by(D.Student.roll_no).all()
+    users = s.query(User).all()
+    people_ids = {row[0] for row in s.query(Person.id).all()}
+    user_role_ids = {row[0] for row in s.query(UserRole.id).all()}
+    linked_user_ids = {student.user_id for student in students if student.user_id}
+    users_by_id = {user.id: user for user in users}
+    users_by_username = {}
+    for candidate in users:
+        key = (candidate.username or "").strip().lower()
+        if key:
+            users_by_username.setdefault(key, []).append(candidate)
+
+    duplicate_users_to_remove = {}
+    assignments = []
+    demo_password_hash = pwhash("demo123")
+    for student in students:
         username = (student.roll_no or "").strip().lower()
         if not username:
             continue
 
-        user = s.get(User, student.user_id) if student.user_id else None
-        # Keep the established shared showcase login exactly as-is.
-        if user and user.username == "student":
-            continue
+        linked_user = users_by_id.get(student.user_id) if student.user_id else None
+        if linked_user and (linked_user.username or "").strip().lower() == "student":
+            linked_user = None
+        username_matches = users_by_username.get(username, [])
+        user = linked_user if linked_user and (linked_user.username or "").strip().lower() == username else None
         if not user:
-            user = s.query(User).filter(User.username.ilike(username)).first()
+            user = next((candidate for candidate in username_matches
+                         if candidate.scope_ref == student.id), None)
+        if not user:
+            user = next((candidate for candidate in username_matches
+                         if candidate.id in linked_user_ids), None)
+        if not user:
+            user = username_matches[0] if username_matches else None
+
         person_id = f"person_student_{username}"
         user_id = f"user_student_{username}"
 
         if not user:
-            person = s.get(Person, person_id)
-            if not person:
+            if person_id not in people_ids:
                 person = Person(
                     id=person_id,
                     tenant_id=student.tenant_id or TENANT,
@@ -4174,12 +4237,13 @@ def _seed_student_portal_accounts(s):
                     contact="",
                 )
                 s.add(person)
+                people_ids.add(person_id)
             user = User(
                 id=user_id,
                 tenant_id=student.tenant_id or TENANT,
                 person_id=person_id,
                 username=username,
-                password_hash=pwhash("demo123"),
+                password_hash=demo_password_hash,
                 status="active",
                 mfa_enabled=False,
                 office_n=36,
@@ -4188,23 +4252,45 @@ def _seed_student_portal_accounts(s):
                 scope_ref=student.id,
             )
             s.add(user)
+            users_by_id[user.id] = user
+            users_by_username.setdefault(username, []).append(user)
 
         # Older admissions demo data used a placeholder instead of a usable
         # password hash. Upgrade only that seed placeholder on repeat runs.
         if user.password_hash == "seed":
-            user.password_hash = pwhash("demo123")
+            user.password_hash = demo_password_hash
 
+        # Remove only stale case-variant aliases that point at this same
+        # student and are no longer linked to any student record.
+        for duplicate in username_matches:
+            if duplicate.id == user.id or duplicate.scope_ref != student.id or duplicate.id in linked_user_ids:
+                continue
+            duplicate_users_to_remove[duplicate.id] = duplicate
+
+        # A legacy linked login may carry a placeholder username. Every
+        # individual student account must resolve by that student's roll no.
+        assignments.append((student, user, username))
+
+    for duplicate in duplicate_users_to_remove.values():
+        s.query(UserRole).filter(UserRole.user_id == duplicate.id).delete(synchronize_session=False)
+        s.delete(duplicate)
+    if duplicate_users_to_remove:
+        s.flush()
+
+    for student, user, username in assignments:
+        user.username = username
         student.user_id = user.id
         user.scope_ref = student.id
         if student_role:
             link_id = f"ur_student_{student.id}"
-            if not s.get(UserRole, link_id):
+            if link_id not in user_role_ids:
                 s.add(UserRole(
                     id=link_id,
                     user_id=user.id,
                     role_id=student_role.id,
                     org_scope_id=student.id,
                 ))
+                user_role_ids.add(link_id)
 
     s.commit()
 
@@ -4596,12 +4682,12 @@ def _ensure_karthik_menon_student_login(s):
 
 
 def _ensure_legacy_student_roll_login(s):
-    """Keep the local-work roll-number login without replacing main's student account."""
-    current = s.query(D.Student).filter(D.Student.user_id == "user_36").first()
-    student = s.query(D.Student).filter(D.Student.roll_no == "25ECE072").first() or current
+    """Preserve the optional 25ECE072 login only when that student exists."""
+    student = s.query(D.Student).filter(D.Student.roll_no == "25ECE072").first()
     if not student:
         return
     user = s.get(User, "user_36")
+    current = s.query(D.Student).filter(D.Student.user_id == user.id).first() if user else None
     if current and current.id != student.id:
         current.user_id = None
     # ``student`` is a documented convenience login mapped by ``/auth/login``
@@ -4976,6 +5062,7 @@ def seed_domain():
         _ensure_aarav_kulkarni_professor_login(s)
         _ensure_karthik_menon_student_login(s)
         _seed_student_portal_demo_profile(s)
+        _seed_fee_cohort_students(s)
         _seed_principal_dashboard_data(s)
         _seed_principal_schedule_events(s)
         _seed_development_backlog_history(s)
@@ -5007,7 +5094,6 @@ def seed_domain():
             _seed_admissions_phase4(s)
             _seed_admissions_phase5(s)
         _seed_student_portal_accounts(s)
-        _ensure_legacy_student_roll_login(s)
         _ensure_payroll_staff_logins(s)
         return {
             "status": "domain-seeded",
