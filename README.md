@@ -184,3 +184,6 @@ login remains available for the showcase student profile.
 
 FastAPI · SQLAlchemy 2 · PostgreSQL 16 (SQLite fallback) · React 18 · Vite 5 · TypeScript ·
 Nginx (production frontend) · Docker Compose.
+
+
+could you find this type of duplicates or anything gaps could you  report me in the roles like academic coordinator , dean academics, vp , hod, principal , proffessor okay ,.. end to end workflow going or not , don't check directly on api's ,.. check in the live application along navigation data fetching properly or not check them okay ,.. 

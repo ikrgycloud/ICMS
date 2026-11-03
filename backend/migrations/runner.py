@@ -152,6 +152,11 @@ from migrations import v0063_timetable_change_risk_routing
 from migrations import v0064_notification_polling_indexes
 from migrations import v0065_department_hod_appointments
 from migrations import v0066_department_lifecycle
+from migrations import v0067_normalize_academic_calendar_status
+from migrations import v0068_sections_query_indexes
+from migrations import v0069_performance_query_indexes
+from migrations import v0070_student_risk_query_indexes
+from migrations import v0071_workflow_list_indexes
 MIGRATIONS.append(v0053_timetable_change_workflow_version)
 MIGRATIONS.append(v0056_campus_head_domains)
 MIGRATIONS.append(v0057_student_campus_scope)
@@ -164,6 +169,11 @@ MIGRATIONS.append(v0063_timetable_change_risk_routing)
 MIGRATIONS.append(v0064_notification_polling_indexes)
 MIGRATIONS.append(v0065_department_hod_appointments)
 MIGRATIONS.append(v0066_department_lifecycle)
+MIGRATIONS.append(v0067_normalize_academic_calendar_status)
+MIGRATIONS.append(v0068_sections_query_indexes)
+MIGRATIONS.append(v0069_performance_query_indexes)
+MIGRATIONS.append(v0070_student_risk_query_indexes)
+MIGRATIONS.append(v0071_workflow_list_indexes)
 
 
 def upgrade(engine):

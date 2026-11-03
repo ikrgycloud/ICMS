@@ -7,7 +7,7 @@ Every table carries tenant_id (Document §6 multi-tenancy).
 """
 from datetime import datetime
 from sqlalchemy import (Column, Integer, String, Boolean, Float, DateTime, Text,
-                        ForeignKey)
+                        ForeignKey, Index)
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
@@ -214,6 +214,10 @@ class ApprovalLimit(Base):
 class WorkflowInstance(Base):
     """A running approval workflow (Document §7, §10)."""
     __tablename__ = "workflow_instances"
+    __table_args__ = (
+        Index("ix_workflows_tenant_scope_updated", "tenant_id", "scope_level", "scope_ref", "updated_at"),
+        Index("ix_workflows_tenant_initiator_updated", "tenant_id", "initiator_id", "updated_at"),
+    )
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
     process_key = Column(String)
@@ -257,6 +261,7 @@ class WorkflowProfile(Base):
 class Approval(Base):
     """Each decision on a workflow (Document §10)."""
     __tablename__ = "approvals"
+    __table_args__ = (Index("ix_approvals_actor_workflow", "actor_id", "workflow_id"),)
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
     workflow_id = Column(String, ForeignKey("workflow_instances.id"))

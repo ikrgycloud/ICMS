@@ -1214,7 +1214,7 @@ def _workflow_current_owner(wf, proc):
     return ""
 
 
-def _workflow_visible_to(s, wf, proc, ctx):
+def _workflow_visible_to(s, wf, proc, ctx, approved_workflow_ids=None):
     if wf.tenant_id != ctx.get("tenant_id", TENANT):
         return False
     if ctx.get("office_n") in {3, 4} and ctx.get("scope_level") == "campus":
@@ -1233,7 +1233,10 @@ def _workflow_visible_to(s, wf, proc, ctx):
         return True
     # Recorded approvers retain read-only access to the record they helped
     # decide. Terminal actionability still fails closed below.
-    if s.query(Approval.id).filter(Approval.workflow_id == wf.id, Approval.actor_id == ctx.get("sub")).first():
+    if approved_workflow_ids is not None:
+        if wf.id in approved_workflow_ids:
+            return True
+    elif s.query(Approval.id).filter(Approval.workflow_id == wf.id, Approval.actor_id == ctx.get("sub")).first():
         return True
     # A Campus Head retains read-only access to the audit/history of a
     # campus-scoped workflow after acting.  It does not grant a later action:
@@ -1243,7 +1246,7 @@ def _workflow_visible_to(s, wf, proc, ctx):
     return ctx["office_n"] in _workflow_current_offices(wf, proc)
 
 
-def _workflow_actionable_by(s, wf, proc, ctx):
+def _workflow_actionable_by(s, wf, proc, ctx, approved_workflow_ids=None):
     """True only when this actor owns the current, non-terminal review stage.
 
     Visibility is intentionally broader so users can read their own requests
@@ -1251,7 +1254,7 @@ def _workflow_actionable_by(s, wf, proc, ctx):
     surfaces old records from the office that started a workflow and invites a
     decision that the server must reject.
     """
-    if not _workflow_visible_to(s, wf, proc, ctx):
+    if not _workflow_visible_to(s, wf, proc, ctx, approved_workflow_ids):
         return False
     if wf.initiator_id == ctx["sub"]:
         return False
@@ -1262,9 +1265,9 @@ def _workflow_actionable_by(s, wf, proc, ctx):
     return ctx["office_n"] in _workflow_current_offices(wf, proc)
 
 
-def _workflow_available_actions(s, wf, proc, ctx):
+def _workflow_available_actions(s, wf, proc, ctx, approved_workflow_ids=None):
     """Server-calculated decision controls for an approval card or modal."""
-    if not ctx or not _workflow_actionable_by(s, wf, proc, ctx):
+    if not ctx or not _workflow_actionable_by(s, wf, proc, ctx, approved_workflow_ids):
         return []
     if wf.process_key == BOP_PROCESS_KEY:
         if ctx.get("office_n") != 2:
@@ -1855,13 +1858,14 @@ def decide_workflow(body: DecideWF, ctx=Depends(non_front_office), s=Depends(db)
     return {"decision": dec.as_dict(), "workflow": _wf_payload(s, wf, proc, ctx)}
 
 
-def _wf_payload(s, wf, proc, ctx=None):
-    approvals = (s.query(Approval).filter(Approval.workflow_id == wf.id)
-                 .order_by(Approval.created_at).all())
-    profile = s.query(WorkflowProfile).filter(WorkflowProfile.workflow_id == wf.id).first()
+def _wf_payload(s, wf, proc, ctx=None, prefetched=None, list_view=False):
+    approvals = (prefetched.get("approvals", {}).get(wf.id, []) if prefetched else
+                 s.query(Approval).filter(Approval.workflow_id == wf.id).order_by(Approval.created_at).all())
+    profile = (prefetched.get("profiles", {}).get(wf.id) if prefetched else
+               s.query(WorkflowProfile).filter(WorkflowProfile.workflow_id == wf.id).first())
     request_student = ""
     correction_id = ""
-    if wf.process_key == "attendance_correction":
+    if not list_view and wf.process_key == "attendance_correction":
         correction = (s.query(D.AttendanceCorrectionRequest)
                       .filter(D.AttendanceCorrectionRequest.workflow_instance_id == wf.id).first())
         if correction:
@@ -1869,7 +1873,7 @@ def _wf_payload(s, wf, proc, ctx=None):
             request_student = student.name if student else correction.student_id
             correction_id = correction.id
     approval_context = None
-    if wf.process_key == "fee_structure":
+    if not list_view and wf.process_key == "fee_structure":
         structure = s.query(D.FeeStructure).filter(D.FeeStructure.workflow_id == wf.id).first()
         if structure:
             heads = {head.id: head for head in s.query(D.FeeHead).all()}
@@ -1883,7 +1887,7 @@ def _wf_payload(s, wf, proc, ctx=None):
                 "lines":[{"fee_head":heads.get(line.fee_head_id).name if heads.get(line.fee_head_id) else line.fee_head_id, "amount":float(line.amount or 0),
                           "installment_no":line.installment_no, "installment_name":line.installment_name or "", "due_date":line.due_date.isoformat() if line.due_date else None,
                           "mandatory":line.is_mandatory} for line in lines]}
-    elif wf.source_type == "campus_escalation":
+    elif not list_view and wf.source_type == "campus_escalation":
         escalation = (s.query(D.EscalationRecord).filter(
             D.EscalationRecord.id == wf.source_id,
             D.EscalationRecord.tenant_id == wf.tenant_id,
@@ -1906,7 +1910,8 @@ def _wf_payload(s, wf, proc, ctx=None):
         "scope_level": wf.scope_level,
         "scope_ref": getattr(wf, "scope_ref", "") or "",
         "version_no": getattr(wf, "version_no", 1) or 1,
-        "available_actions": _workflow_available_actions(s, wf, proc, ctx),
+        "available_actions": _workflow_available_actions(
+            s, wf, proc, ctx, prefetched.get("approved_ids") if prefetched else None),
         "current_owner": _workflow_current_owner(wf, proc),
         "campus": wf.scope_ref if wf.scope_level == "campus" else "",
         "updated_at": wf.updated_at.isoformat() if wf.updated_at else None,
@@ -1924,7 +1929,10 @@ def _wf_payload(s, wf, proc, ctx=None):
             "semester_key": profile.semester_key if profile else "",
             "semester_label": profile.semester_label if profile else "",
             "category": profile.category if profile else _approval_category(wf.process_key, wf.label),
-            "reference_code": profile.reference_code if profile else _generate_reference_code(s, wf.process_key, wf.label, wf.created_at),
+            # List rendering must not count matching profiles once per legacy
+            # workflow.  A stable fallback is sufficient until the record is
+            # opened or receives a persisted workflow profile.
+            "reference_code": profile.reference_code if profile else f"{_reference_prefix(wf.process_key, wf.label)}-{wf.created_at.year}-{wf.id[:6].upper()}",
             "notes": profile.notes if profile else "",
         },
         "history": [{"stage": a.stage, "stage_label": a.stage_label, "actor": a.actor_name,
@@ -2018,14 +2026,17 @@ def _visible_page_numbers(page: int, total_pages: int):
 @app.get("/api/workflows")
 def list_workflows(scope: str = "all", ctx=Depends(non_front_office), s=Depends(db)):
     q = s.query(WorkflowInstance).filter(WorkflowInstance.tenant_id == ctx.get("tenant_id", TENANT))
+    candidate_limit = 250
     if scope == "mine":
         q = q.filter(WorkflowInstance.initiator_id == ctx["sub"])
         rows = q.order_by(desc(WorkflowInstance.updated_at)).limit(100).all()
-        rows = (q.filter(WorkflowInstance.initiator_id == ctx["sub"])
-                .order_by(desc(WorkflowInstance.updated_at)).limit(100).all())
     elif scope == "inbox":
-        candidates = q.order_by(desc(WorkflowInstance.updated_at)).limit(250).all()
-        rows = [row for row in candidates if _workflow_actionable_by(s, row, _workflow_process(row.process_key), ctx)]
+        candidates = q.order_by(desc(WorkflowInstance.updated_at)).limit(candidate_limit).all()
+        candidate_ids = [row.id for row in candidates]
+        approved_ids = {row[0] for row in s.query(Approval.workflow_id).filter(
+            Approval.actor_id == ctx["sub"], Approval.workflow_id.in_(candidate_ids)).all()} if candidate_ids else set()
+        rows = [row for row in candidates if _workflow_actionable_by(
+            s, row, _workflow_process(row.process_key), ctx, approved_ids)]
         delegated = active_delegations_for(s, ctx["sub"])
         if delegated:
             seen = {row.id for row in rows}
@@ -2037,12 +2048,33 @@ def list_workflows(scope: str = "all", ctx=Depends(non_front_office), s=Depends(
                     seen.add(wf.id)
         rows = sorted(rows, key=lambda item: item.updated_at or item.created_at, reverse=True)[:100]
     else:
-        candidates = q.order_by(desc(WorkflowInstance.updated_at)).limit(250).all()
-        rows = [row for row in candidates if _workflow_visible_to(s, row, _workflow_process(row.process_key), ctx)][:100]
+        # Campus executives can have a large tenant workflow history.  Scope
+        # in SQL before applying the remaining policy visibility checks.
+        if ctx.get("office_n") in {3, 4} and ctx.get("scope_level") == "campus":
+            q = q.filter(WorkflowInstance.scope_level == "campus",
+                         or_(WorkflowInstance.scope_ref == ctx.get("scope_ref"),
+                             WorkflowInstance.scope_ref == ""))
+        candidates = q.order_by(desc(WorkflowInstance.updated_at)).limit(candidate_limit).all()
+        candidate_ids = [row.id for row in candidates]
+        approved_ids = {row[0] for row in s.query(Approval.workflow_id).filter(
+            Approval.actor_id == ctx["sub"], Approval.workflow_id.in_(candidate_ids)).all()} if candidate_ids else set()
+        rows = [row for row in candidates if _workflow_visible_to(
+            s, row, _workflow_process(row.process_key), ctx, approved_ids)][:100]
+    workflow_ids = [wf.id for wf in rows]
+    approvals_by_workflow = {}
+    profiles_by_workflow = {}
+    if workflow_ids:
+        for approval in (s.query(Approval).filter(Approval.workflow_id.in_(workflow_ids))
+                         .order_by(Approval.workflow_id, Approval.created_at).all()):
+            approvals_by_workflow.setdefault(approval.workflow_id, []).append(approval)
+        profiles_by_workflow = {profile.workflow_id: profile for profile in s.query(WorkflowProfile).filter(
+                                WorkflowProfile.workflow_id.in_(workflow_ids)).all()}
+    prefetched = {"approvals": approvals_by_workflow, "profiles": profiles_by_workflow,
+                  "approved_ids": approved_ids if "approved_ids" in locals() else set()}
     out = []
     for wf in rows:
         proc = next((p for p in APPROVAL_MATRIX if p["key"] == wf.process_key), None)
-        out.append(_wf_payload(s, wf, proc, ctx))
+        out.append(_wf_payload(s, wf, proc, ctx, prefetched, list_view=True))
     return {"workflows": out}
 
 

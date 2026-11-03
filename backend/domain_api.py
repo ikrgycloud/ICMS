@@ -18,7 +18,7 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import and_, desc, false, func, or_, select, text
+from sqlalchemy import and_, case, desc, false, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 
 from core import db, auth, uid, write_audit, notify, active_delegation_for
@@ -219,7 +219,7 @@ def dean_dashboard(
     ).all()
     calendar = s.query(D.AcademicCalendarEntry).filter(
         D.AcademicCalendarEntry.tenant_id == ctx["tenant_id"],
-        D.AcademicCalendarEntry.status == "published",
+        D.AcademicCalendarEntry.status == "Published",
         D.AcademicCalendarEntry.start_date >= date.today(),
     ).order_by(D.AcademicCalendarEntry.start_date).limit(8).all()
 
@@ -268,10 +268,16 @@ def dean_dashboard(
     }
     # Report pending work by proposal type.  Programme inventory is not the
     # same as programme changes awaiting a Dean decision.
+    calendar_review_rows = ((s.query(D.AcademicCalendarEntry)
+                             .filter(D.AcademicCalendarEntry.tenant_id == ctx["tenant_id"],
+                                     D.AcademicCalendarEntry.status == "Dean Review")
+                             .order_by(desc(D.AcademicCalendarEntry.updated_at)).all())
+                            if ctx["office_n"] == 6 else [])
     approval_counts = {
         proposal_type: sum(1 for row in scoped_proposals if row.proposal_type == proposal_type)
         for proposal_type in ("program", "curriculum", "calendar", "allocation")
     }
+    approval_counts["calendar"] += len(calendar_review_rows)
     faculty_query = scoped_academic_query(s, D.StaffMember, ctx).filter(D.StaffMember.status == "active")
     if school_id:
         faculty_query = faculty_query.filter(D.StaffMember.school_id == school_id)
@@ -354,9 +360,10 @@ def dean_dashboard(
             "programs": len(program_rows), "departments": len(department_rows), "courses": len(course_rows),
             "faculty": len(faculty_rows), "curriculum_reviews": approval_counts["curriculum"],
             "timetable_conflicts": len(timetable_conflicts) + sum(1 for row in exceptions if row.status != "RESOLVED"), "academic_actions": sum(1 for row in actions if row.state != "VERIFIED"),
-            "academic_risks": len(reviews), "needs_my_decision": len(scoped_proposals),
+            "academic_risks": len(reviews), "needs_my_decision": len(scoped_proposals) + len(calendar_review_rows),
         },
         "approvals": approval_counts,
+        "calendar_review_queue": [_calendar_entry_payload(row, ctx) for row in calendar_review_rows],
         "health": {
             "attendance": attendance_rate,
             "pass_rate": pass_rate,
@@ -1092,12 +1099,31 @@ def principal_overview(academic_year: str = "", student_semester: str = "", ctx=
         selected_student_semester = 0
     selected_student_semester = selected_student_semester if selected_student_semester in range(1, 9) else 0
     if selected_student_semester: student_query = student_query.filter(D.Student.semester == selected_student_semester)
-    students = student_query.all()
-    student_ids = [row.id for row in students]
-    attendance = s.query(D.AttendanceRecord).filter(D.AttendanceRecord.tenant_id == tenant_id, D.AttendanceRecord.student_id.in_(student_ids)).all() if student_ids else []
+    # Keep the executive view aggregate-only.  Loading every student and every
+    # attendance record made this endpoint grow linearly with the campus.
+    student_ids = student_query.with_entities(D.Student.id).subquery()
+    student_count, avg_cgpa_raw, passing, distinction, first, second, others, at_risk, backlogs = (
+        student_query.with_entities(
+            func.count(D.Student.id), func.coalesce(func.avg(D.Student.cgpa), 0),
+            func.coalesce(func.sum(case((D.Student.cgpa >= 4.5, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((D.Student.cgpa >= 7.5, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((and_(D.Student.cgpa >= 6, D.Student.cgpa < 7.5), 1), else_=0)), 0),
+            func.coalesce(func.sum(case((and_(D.Student.cgpa >= 4.5, D.Student.cgpa < 6), 1), else_=0)), 0),
+            func.coalesce(func.sum(case((D.Student.cgpa < 4.5, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((D.Student.cgpa < 6, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((D.Student.cgpa < 4.5, 1), else_=0)), 0),
+        ).one()
+    )
+    attendance_query = s.query(D.AttendanceRecord).filter(
+        D.AttendanceRecord.tenant_id == tenant_id,
+        D.AttendanceRecord.student_id.in_(select(student_ids.c.id)),
+    )
     today = date.today()
-    today_rows = [row for row in attendance if row.on_date == today]
-    attendance_pct = round(100 * sum(1 for row in today_rows if row.present) / len(today_rows), 1) if today_rows else None
+    today_total, today_present = attendance_query.filter(D.AttendanceRecord.on_date == today).with_entities(
+        func.count(D.AttendanceRecord.id),
+        func.coalesce(func.sum(case((D.AttendanceRecord.present == True, 1), else_=0)), 0),
+    ).one()
+    attendance_pct = round(100 * today_present / today_total, 1) if today_total else None
     # Monthly points use actual recorded attendance; no synthetic graph values.
     trend = []
     month_cursor = today.replace(day=1)
@@ -1108,41 +1134,44 @@ def principal_overview(academic_year: str = "", student_semester: str = "", ctx=
     months.reverse()
     for month in months:
         next_month = (month.replace(day=28) + timedelta(days=4)).replace(day=1)
-        rows = [r for r in attendance if month <= r.on_date < next_month]
-        trend.append({"label": month.strftime("%b"), "value": round(100 * sum(1 for r in rows if r.present) / len(rows), 1) if rows else None})
-    cgpas = [row.cgpa or 0 for row in students]
-    avg_cgpa = round(sum(cgpas) / len(cgpas), 2) if cgpas else 0
-    pass_rate = round(100 * sum(1 for x in cgpas if x >= 4.5) / len(cgpas), 1) if cgpas else None
-    bands = {"distinction": sum(1 for x in cgpas if x >= 7.5), "first": sum(1 for x in cgpas if 6 <= x < 7.5), "second": sum(1 for x in cgpas if 4.5 <= x < 6), "others": sum(1 for x in cgpas if x < 4.5)}
+        total, present = attendance_query.filter(D.AttendanceRecord.on_date >= month, D.AttendanceRecord.on_date < next_month).with_entities(
+            func.count(D.AttendanceRecord.id), func.coalesce(func.sum(case((D.AttendanceRecord.present == True, 1), else_=0)), 0),
+        ).one()
+        trend.append({"label": month.strftime("%b"), "value": round(100 * present / total, 1) if total else None})
+    avg_cgpa = round(float(avg_cgpa_raw or 0), 2)
+    pass_rate = round(100 * passing / student_count, 1) if student_count else None
+    bands = {"distinction": distinction, "first": first, "second": second, "others": others}
     # WorkflowInstance predates campus_scope_id in the target schema. Restrict
     # the dashboard to this tenant's Principal-owned campus workflows instead
     # of querying unrelated offices or global workflow records.
-    pending_workflows = s.query(WorkflowInstance).filter(
+    workflow_query = s.query(WorkflowInstance).filter(
         WorkflowInstance.tenant_id == tenant_id,
         WorkflowInstance.office_n == ctx["office_n"],
         WorkflowInstance.scope_level == "campus",
         WorkflowInstance.state.in_(["submitted", "under_review", "reviewed", "escalated"]),
-    ).all()
-    scoped_sections = [row for row in s.query(D.Section).filter(D.Section.tenant_id == tenant_id).all()
-                       if _can_view_exam_section(s, ctx, row)]
-    section_ids = [row.id for row in scoped_sections]
-    assessments = s.query(D.Assessment).filter(D.Assessment.tenant_id == tenant_id, D.Assessment.section_id.in_(section_ids)).count() if section_ids else 0
-    marks = s.query(D.Mark).filter(D.Mark.tenant_id == tenant_id, D.Mark.assessment_id.in_(s.query(D.Assessment.id).filter(D.Assessment.tenant_id == tenant_id, D.Assessment.section_id.in_(section_ids)))).count() if section_ids else 0
+    )
+    pending_workflows = workflow_query.order_by(desc(WorkflowInstance.updated_at)).limit(5).all()
+    workflow_count = workflow_query.order_by(None).count()
+    section_ids = s.query(D.Section.id).filter(D.Section.tenant_id == tenant_id).subquery()
+    section_count = s.query(func.count()).select_from(section_ids).scalar() or 0
+    assessment_ids = s.query(D.Assessment.id).filter(D.Assessment.tenant_id == tenant_id, D.Assessment.section_id.in_(select(section_ids.c.id))).subquery()
+    assessments = s.query(func.count()).select_from(assessment_ids).scalar() or 0
+    marks = s.query(D.Mark).filter(D.Mark.tenant_id == tenant_id, D.Mark.assessment_id.in_(select(assessment_ids.c.id))).count()
     asset_maintenance = s.query(D.Asset).filter(D.Asset.tenant_id == tenant_id, D.Asset.status == "maintenance").count()
     faculty_count = s.query(D.StaffMember).filter(D.StaffMember.tenant_id == tenant_id, D.StaffMember.campus == campus, D.StaffMember.status == "active").count()
     notifications = s.query(Notification).filter(Notification.tenant_id == tenant_id, Notification.user_id == ctx["sub"]).order_by(desc(Notification.created_at)).limit(6).all()
     return {
         "filters": {"academic_years": years, "selected_year": selected_year, "selected_student_semester": selected_student_semester, "student_semesters": list(range(1, 9))},
-        "kpis": {"students": len(students), "faculty": faculty_count, "attendance": attendance_pct, "decisions": len(pending_workflows), "risk_students": sum(1 for x in cgpas if x < 6), "critical_alerts": sum(1 for n in notifications if n.severity == "critical")},
-        "attendance": {"today": attendance_pct, "today_records": len(today_rows), "trend": trend},
-        "performance": {"average_cgpa": avg_cgpa, "pass_rate": pass_rate, "bands": bands, "at_risk": sum(1 for x in cgpas if x < 6), "backlogs": sum(1 for x in cgpas if x < 4.5)},
-        "examinations": {"sections": len(scoped_sections), "assessments": assessments, "marks_submitted": marks,
+        "kpis": {"students": student_count, "faculty": faculty_count, "attendance": attendance_pct, "decisions": workflow_count, "risk_students": at_risk, "critical_alerts": sum(1 for n in notifications if n.severity == "critical")},
+        "attendance": {"today": attendance_pct, "today_records": today_total, "trend": trend},
+        "performance": {"average_cgpa": avg_cgpa, "pass_rate": pass_rate, "bands": bands, "at_risk": at_risk, "backlogs": backlogs},
+        "examinations": {"sections": section_count, "assessments": assessments, "marks_submitted": marks,
                          "pending_moderation": s.query(D.ResultSheet).filter(
                              D.ResultSheet.tenant_id == tenant_id,
-                             D.ResultSheet.section_id.in_(section_ids),
+                             D.ResultSheet.section_id.in_(select(section_ids.c.id)),
                              D.ResultSheet.status != "published",
-                         ).count() if section_ids else 0},
-        "welfare": {"at_risk": sum(1 for x in cgpas if x < 6), "grievances": None, "discipline": None, "critical": None},
+                         ).count()},
+        "welfare": {"at_risk": at_risk, "grievances": None, "discipline": None, "critical": None},
         # Procurement and asset-request records are not modelled yet.  Return
         # an explicit unavailable value rather than presenting a fabricated 0.
         "operations": {"maintenance": asset_maintenance, "procurement": None, "asset_requests": None, "facilities": asset_maintenance},
@@ -2085,7 +2114,7 @@ def decide_academic_calendar_proposal(proposal_id: str, decision: str, body: Aca
     previous = proposal.state; proposal.state = target; proposal.status_version += 1; proposal.updated_at = datetime.utcnow()
     if target == "ESCALATED": proposal.escalated_to_office_n = 5
     if target == "APPROVED":
-        entry = D.AcademicCalendarEntry(id=uid(), tenant_id=TENANT, term=data["term"], title=data["title"], category=data.get("category", "Teaching"), campus=data.get("campus", "All Campuses"), start_date=date.fromisoformat(data["start_date"]), end_date=date.fromisoformat(data["end_date"]), description=data.get("description", ""), status="published", owner_office_n=6, created_by=proposal.submitted_by, updated_by=ctx["sub"])
+        entry = D.AcademicCalendarEntry(id=uid(), tenant_id=TENANT, term=data["term"], title=data["title"], category=data.get("category", "Teaching"), campus=data.get("campus", "All Campuses"), start_date=date.fromisoformat(data["start_date"]), end_date=date.fromisoformat(data["end_date"]), description=data.get("description", ""), status="Published", owner_office_n=6, created_by=proposal.submitted_by, updated_by=ctx["sub"])
         s.add(entry); s.flush(); proposal.implementation_ref = entry.id
     _proposal_event(s, proposal, ctx, previous, target, body.reason)
     submitter = s.get(User, proposal.submitted_by)
@@ -2097,13 +2126,8 @@ def decide_academic_calendar_proposal(proposal_id: str, decision: str, body: Aca
 @router.get("/academic-calendar")
 def academic_calendar(term: str = "", academic_year: str = "", program_id: str = "", department_id: str = "", student_year: int | None = None, ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academic_calendar", "view")[0])
-    term_rows = (s.query(D.AcademicCalendarEntry.term, func.max(D.AcademicCalendarEntry.updated_at).label("last_updated"))
-                 .filter(D.AcademicCalendarEntry.status != "deleted")
-                 .group_by(D.AcademicCalendarEntry.term)
-                 .order_by(desc("last_updated")).all())
-    term_options = [row[0] for row in term_rows]
-    selected_term = term if term in term_options else (term_options[0] if term_options else "")
-
+    # Do not switch every user's timeline to the term most recently edited by
+    # somebody else. Without an explicit term, return all visible terms.
     query = s.query(D.AcademicCalendarEntry).filter(D.AcademicCalendarEntry.tenant_id == ctx["tenant_id"], D.AcademicCalendarEntry.status != "deleted")
     # Published records are the only calendar data visible to downstream users.
     # Creators and the current reviewer additionally see just the work assigned
@@ -2116,6 +2140,16 @@ def academic_calendar(term: str = "", academic_year: str = "", program_id: str =
         query = query.filter(or_(D.AcademicCalendarEntry.status == "Published", D.AcademicCalendarEntry.status == "VP Review"))
     else:
         query = query.filter(D.AcademicCalendarEntry.status == "Published")
+    term_options = [row[0] for row in query.with_entities(D.AcademicCalendarEntry.term).distinct().order_by(D.AcademicCalendarEntry.term).all() if row[0]]
+    selected_term = term if term in term_options else ""
+    # Review work is deliberately independent from timeline filters; an
+    # assigned decision must never disappear because the timeline changed term.
+    if ctx["office_n"] == 6:
+        review_rows = query.filter(D.AcademicCalendarEntry.status == "Dean Review").order_by(desc(D.AcademicCalendarEntry.updated_at)).all()
+    elif ctx["office_n"] == 5:
+        review_rows = query.filter(D.AcademicCalendarEntry.status == "VP Review").order_by(desc(D.AcademicCalendarEntry.updated_at)).all()
+    else:
+        review_rows = []
     if selected_term:
         query = query.filter(D.AcademicCalendarEntry.term == selected_term)
     if academic_year:
@@ -2166,9 +2200,22 @@ def academic_calendar(term: str = "", academic_year: str = "", program_id: str =
         "months": [{"label": label, "count": count} for label, count in months.items()],
         "entries": [_calendar_entry_payload(row, ctx) for row in rows],
         "proposals": [],
-        "review_inbox": [_calendar_entry_payload(row, ctx) for row in rows if (ctx["office_n"] == 6 and row.status == "Dean Review") or (ctx["office_n"] == 5 and row.status == "VP Review")],
+        "review_inbox": [_calendar_entry_payload(row, ctx) for row in review_rows],
         "workflow_permissions": {"propose": ctx["office_n"] == 17, "decide": ctx["office_n"] in {5, 6}, "publish": ctx["office_n"] == 17},
     }
+
+
+@router.get("/academic-calendar/review-queue")
+def academic_calendar_review_queue(ctx=Depends(auth), s=Depends(db)):
+    """Return the authoritative, unfiltered calendar work queue for reviewers."""
+    require(gate(s, ctx, "academic_calendar", "view")[0])
+    status = "Dean Review" if ctx["office_n"] == 6 else "VP Review" if ctx["office_n"] == 5 else None
+    if not status:
+        raise HTTPException(403, "This office has no academic calendar review queue")
+    rows = (s.query(D.AcademicCalendarEntry)
+            .filter(D.AcademicCalendarEntry.tenant_id == ctx["tenant_id"], D.AcademicCalendarEntry.status == status)
+            .order_by(desc(D.AcademicCalendarEntry.updated_at)).all())
+    return {"stage": status, "entries": [_calendar_entry_payload(row, ctx) for row in rows]}
 
 
 @router.post("/academic-calendar")
@@ -2670,22 +2717,41 @@ def list_students(q: str = "", dept: str = "", program: str = "", academic_year:
         query = query.filter(D.Student.semester.between((study_year - 1) * 2 + 1, study_year * 2))
     if section:
         query = query.filter(D.Student.section == section)
+    # Risk filtering used to materialise every student, all result history and
+    # attendance rows, then issue one CGPA query per student.  Keep the entire
+    # classification in the database and only enrich the requested page.
+    latest_result = (s.query(
+        D.StudentSubjectResult.student_id.label("student_id"),
+        D.StudentSubjectResult.outcome.label("outcome"),
+        func.row_number().over(
+            partition_by=(D.StudentSubjectResult.student_id, D.StudentSubjectResult.subject_code),
+            order_by=D.StudentSubjectResult.attempt.desc(),
+        ).label("row_number"),
+    ).filter(D.StudentSubjectResult.tenant_id == ctx["tenant_id"]).subquery())
+    backlog_counts = (s.query(
+        latest_result.c.student_id.label("student_id"),
+        func.sum(case((latest_result.c.outcome == "failed", 1), else_=0)).label("current_backlogs"),
+    ).filter(latest_result.c.row_number == 1).group_by(latest_result.c.student_id).subquery())
+    attendance_counts = (s.query(
+        D.AttendanceRecord.student_id.label("student_id"),
+        func.count(D.AttendanceRecord.id).label("attendance_total"),
+        func.sum(case((D.AttendanceRecord.present == True, 1), else_=0)).label("attendance_present"),
+    ).filter(D.AttendanceRecord.tenant_id == ctx["tenant_id"])
+     .group_by(D.AttendanceRecord.student_id).subquery())
+    backlog_value = func.coalesce(backlog_counts.c.current_backlogs, 0)
+    attendance_risk = and_(attendance_counts.c.attendance_total > 0,
+                           attendance_counts.c.attendance_present * 100 < attendance_counts.c.attendance_total * 75)
     if risk == "academic":
         query = query.filter(D.Student.cgpa < 6.5)
-    if risk in {"backlogs", "no-backlogs", "at-risk"}:
-        scoped_ids = [row[0] for row in query.with_entities(D.Student.id).all()]
-        summaries = _backlog_summary(s, scoped_ids)
+    elif risk in {"backlogs", "no-backlogs", "at-risk"}:
+        query = (query.outerjoin(backlog_counts, backlog_counts.c.student_id == D.Student.id)
+                 .outerjoin(attendance_counts, attendance_counts.c.student_id == D.Student.id))
         if risk == "backlogs":
-            query = query.filter(D.Student.id.in_([sid for sid, item in summaries.items() if item["current"] > 0]))
+            query = query.filter(backlog_value > 0)
         elif risk == "no-backlogs":
-            query = query.filter(D.Student.id.in_([sid for sid, item in summaries.items() if item["current"] == 0]))
+            query = query.filter(backlog_value == 0)
         else:
-            attendance = _attendance_totals(s, scoped_ids)
-            at_risk_ids = [sid for sid, item in summaries.items()
-                           if item["current"] > 0
-                           or (s.query(D.Student.cgpa).filter(D.Student.id == sid).scalar() or 0) < 6.5
-                           or (sid in attendance and 100 * attendance[sid][1] / attendance[sid][0] < 75)]
-            query = query.filter(D.Student.id.in_(at_risk_ids))
+            query = query.filter(or_(D.Student.cgpa < 6.5, backlog_value > 0, attendance_risk))
     total = query.count()
     rows = (query.order_by(D.Student.roll_no)
             .offset((page - 1) * page_size)
@@ -2696,27 +2762,29 @@ def list_students(q: str = "", dept: str = "", program: str = "", academic_year:
     placement_by_student = _admission_placement_map(s, student_ids)
     backlogs = _backlog_summary(s, student_ids)
     attendance_by_student = _attendance_totals(s, student_ids)
-    all_students = query.all()
-    all_backlogs = _backlog_summary(s, [student.id for student in all_students])
-    attendance_totals = _attendance_totals(s, [student.id for student in all_students])
-    risk_summary = {"at_risk": 0, "academic_risk": 0, "attendance_risk": 0, "attendance_available": len(attendance_totals), "average_attendance": None, "average_cgpa": None,
-                    "backlogs": 0, "no_backlogs": 0}
-    attendance_values = []
-    cgpas = []
-    for student in all_students:
-        academic = (student.cgpa or 0) < 6.5
-        current_backlogs = all_backlogs[student.id]["current"]
-        if academic: risk_summary["academic_risk"] += 1
-        if current_backlogs: risk_summary["backlogs"] += 1
-        else: risk_summary["no_backlogs"] += 1
-        if student.id in attendance_totals:
-            pct = 100 * attendance_totals[student.id][1] / attendance_totals[student.id][0]
-            attendance_values.append(pct)
-            if pct < 75: risk_summary["attendance_risk"] += 1
-        if student.cgpa is not None: cgpas.append(student.cgpa)
-        if academic or current_backlogs or (student.id in attendance_totals and 100 * attendance_totals[student.id][1] / attendance_totals[student.id][0] < 75): risk_summary["at_risk"] += 1
-    if attendance_values: risk_summary["average_attendance"] = round(sum(attendance_values) / len(attendance_values), 1)
-    if cgpas: risk_summary["average_cgpa"] = round(sum(cgpas) / len(cgpas), 2)
+    summary_query = query if risk in {"backlogs", "no-backlogs", "at-risk"} else (
+        query.outerjoin(backlog_counts, backlog_counts.c.student_id == D.Student.id)
+             .outerjoin(attendance_counts, attendance_counts.c.student_id == D.Student.id)
+    )
+    summary_row = summary_query.with_entities(
+        func.count(D.Student.id),
+        func.coalesce(func.sum(case((D.Student.cgpa < 6.5, 1), else_=0)), 0),
+        func.coalesce(func.sum(case((backlog_value > 0, 1), else_=0)), 0),
+        func.coalesce(func.sum(case((backlog_value == 0, 1), else_=0)), 0),
+        func.coalesce(func.sum(case((attendance_risk, 1), else_=0)), 0),
+        func.coalesce(func.sum(case((attendance_counts.c.attendance_total > 0, 1), else_=0)), 0),
+        func.avg(case((attendance_counts.c.attendance_total > 0,
+                       attendance_counts.c.attendance_present * 100.0 / attendance_counts.c.attendance_total), else_=None)),
+        func.avg(D.Student.cgpa),
+    ).one()
+    risk_summary = {
+        "at_risk": total if risk == "at-risk" else 0,
+        "academic_risk": int(summary_row[1] or 0), "backlogs": int(summary_row[2] or 0),
+        "no_backlogs": int(summary_row[3] or 0), "attendance_risk": int(summary_row[4] or 0),
+        "attendance_available": int(summary_row[5] or 0),
+        "average_attendance": round(float(summary_row[6]), 1) if summary_row[6] is not None else None,
+        "average_cgpa": round(float(summary_row[7]), 2) if summary_row[7] is not None else None,
+    }
     return {"students": [{
         "id": r.id, "roll_no": r.roll_no, "name": r.name, "email": r.email, "dept": dept_map.get(r.dept_id).code if r.dept_id in dept_map else "", "department_name": dept_map.get(r.dept_id).name if r.dept_id in dept_map else "",
         "program": program_map.get(r.program_id).name if r.program_id in program_map else "", "program_code": program_map.get(r.program_id).code if r.program_id in program_map else "",
@@ -5426,8 +5494,7 @@ def change_course_offering_status(offering_id: str, body: CourseOfferingStatusIn
     return {"offering": _course_offering_payload(s, row), "decision": dec.as_dict()}
 
 
-@router.get("/academics/sections")
-def list_sections(ctx=Depends(auth), s=Depends(db)):
+def _legacy_list_sections(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view")[0])
     course_map = {c.id: (c.code, c.title, c.semester) for c in s.query(D.Course).all()}
     program_map = {p.id: p for p in s.query(D.Program).all()}
@@ -5472,6 +5539,106 @@ def list_sections(ctx=Depends(auth), s=Depends(db)):
     return {"sections": out,
             "can_create": can(s, ctx, "academics", "create_section"),
             "can_assign": can(s, ctx, "academics", "assign_faculty")}
+
+
+@router.get("/academics/sections")
+def list_sections_page(
+    limit: int = Query(default=200, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    include_timetable: bool = Query(default=False),
+    ctx=Depends(auth),
+    s=Depends(db),
+):
+    """Return a scoped section page without loading whole tables or N+1 counts."""
+    require(gate(s, ctx, "academics", "view")[0])
+    tenant_id = ctx["tenant_id"]
+    section_query = scoped_academic_query(s, D.Section, ctx)
+
+    if ctx["office_n"] in {11, 12, 13, 14}:
+        staff = (s.query(D.StaffMember)
+                 .filter(D.StaffMember.tenant_id == tenant_id, D.StaffMember.user_id == ctx["sub"])
+                 .first())
+        section_ids = {item.section_id for item in active_allocations_for_faculty(s, staff.id)} if staff else set()
+        section_query = section_query.filter(D.Section.id.in_(section_ids)) if section_ids else section_query.filter(false())
+    elif ctx["office_n"] == 36:
+        student = (s.query(D.Student)
+                   .filter(D.Student.tenant_id == tenant_id,
+                           or_(D.Student.user_id == ctx["sub"], D.Student.id == ctx.get("scope_ref")))
+                   .first())
+        enrolled_section_ids = (s.query(D.Enrollment.section_id)
+                                .filter(D.Enrollment.tenant_id == tenant_id,
+                                        D.Enrollment.student_id == student.id,
+                                        D.Enrollment.status == "enrolled")) if student else None
+        # Enrollment is authoritative for students; do not apply a staff
+        # department scope before this relationship is resolved.
+        section_query = (s.query(D.Section)
+                         .filter(D.Section.tenant_id == tenant_id,
+                                 D.Section.id.in_(enrolled_section_ids))) if enrolled_section_ids is not None else s.query(D.Section).filter(false())
+
+    total = section_query.order_by(None).count()
+    enrollment_counts = (s.query(D.Enrollment.section_id.label("section_id"),
+                                 func.count(D.Enrollment.id).label("enrolled"))
+                         .filter(D.Enrollment.tenant_id == tenant_id,
+                                 D.Enrollment.status == "enrolled")
+                         .group_by(D.Enrollment.section_id)
+                         .subquery())
+    rows = (section_query
+            .outerjoin(D.Course, and_(D.Course.id == D.Section.course_id,
+                                      D.Course.tenant_id == tenant_id))
+            .outerjoin(D.CourseOffering, and_(D.CourseOffering.id == D.Section.offering_id,
+                                              D.CourseOffering.tenant_id == tenant_id))
+            .outerjoin(D.Program, and_(D.Program.id == D.CourseOffering.program_id,
+                                       D.Program.tenant_id == tenant_id))
+            .outerjoin(D.Department, and_(D.Department.id == func.coalesce(D.Program.dept_id, D.Section.dept_id),
+                                          D.Department.tenant_id == tenant_id))
+            .outerjoin(D.StaffMember, and_(D.StaffMember.id == D.Section.faculty_person_id,
+                                           D.StaffMember.tenant_id == tenant_id))
+            .outerjoin(enrollment_counts, enrollment_counts.c.section_id == D.Section.id)
+            .with_entities(
+                D.Section, D.Course.code, D.Course.title, D.Course.semester,
+                D.Program.id, D.Program.code, D.Program.name,
+                D.Department.id, D.Department.name, D.StaffMember.name,
+                func.coalesce(enrollment_counts.c.enrolled, 0),
+            )
+            .order_by(D.Section.term.desc(), D.Section.section_code, D.Section.id)
+            .offset(offset).limit(limit).all())
+    sections = [{
+        "id": section.id, "offering_id": section.offering_id,
+        "course_code": course_code or "", "course_title": course_title or "", "semester": semester,
+        "program_id": program_id or "", "program_code": program_code or "", "program": program_name or "",
+        "department_id": department_id or "", "department": department_name or "",
+        "section": section.section_code, "term": section.term,
+        "faculty": faculty_name or "—", "room": section.room, "schedule": section.schedule,
+        "enrolled": int(enrolled or 0), "capacity": section.capacity,
+    } for (section, course_code, course_title, semester, program_id, program_code, program_name,
+           department_id, department_name, faculty_name, enrolled) in rows]
+    # Timetable screens used to fetch this data once per section from the
+    # browser.  Return it in one scoped query when explicitly requested.
+    # Keeping this opt-in preserves the light-weight default list response.
+    if include_timetable and sections:
+        section_ids = [item[0].id for item in rows]
+        entries_by_section = {section_id: [] for section_id in section_ids}
+        for entry in (s.query(D.TimetableEntry)
+                      .filter(D.TimetableEntry.tenant_id == tenant_id,
+                              D.TimetableEntry.section_id.in_(section_ids))
+                      .order_by(D.TimetableEntry.day_of_week, D.TimetableEntry.start_time).all()):
+            entries_by_section[entry.section_id].append({
+                "id": entry.id, "section_id": entry.section_id,
+                "day_of_week": entry.day_of_week, "start_time": entry.start_time,
+                "end_time": entry.end_time, "room": entry.room,
+                "building": entry.building, "effective_from": entry.effective_from.isoformat() if entry.effective_from else "",
+                "effective_to": entry.effective_to.isoformat() if entry.effective_to else "",
+                "status": entry.status,
+            })
+        for item in sections:
+            item["timetable"] = entries_by_section.get(item["id"], [])
+    return {
+        "sections": sections,
+        "pagination": {"offset": offset, "limit": limit, "total": total,
+                       "has_more": offset + len(sections) < total},
+        "can_create": can(s, ctx, "academics", "create_section"),
+        "can_assign": can(s, ctx, "academics", "assign_faculty"),
+    }
 
 
 class SectionIn(BaseModel):
@@ -6055,9 +6222,43 @@ def _materialize_published_timetable_sessions(s, plan):
 @router.get("/academics/timetable-plans")
 def list_timetable_plans(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "academics", "view")[0])
-    rows = [x for x in s.query(D.TimetablePlanWorkflow).filter_by(tenant_id=TENANT).order_by(D.TimetablePlanWorkflow.updated_at.desc()).all()
-            if _offering_in_academic_scope(s, s.get(D.CourseOffering, x.offering_id), ctx)]
-    return {"plans": [_timetable_plan_payload(x, s) for x in rows]}
+    tenant_id = ctx["tenant_id"]
+    # The former implementation performed up to six ORM lookups per plan,
+    # then another two per plan while applying HOD scope.  Resolve the review
+    # queue as one joined query instead.
+    allowed_departments = _hod_department_ids(s, ctx)
+    query = (s.query(D.TimetablePlanWorkflow, D.CourseOffering, D.Section,
+                     D.TimetableEntry, D.Course, D.Program, D.StaffMember)
+             .outerjoin(D.CourseOffering, and_(D.CourseOffering.id == D.TimetablePlanWorkflow.offering_id,
+                                               D.CourseOffering.tenant_id == tenant_id))
+             .outerjoin(D.Section, and_(D.Section.id == D.TimetablePlanWorkflow.section_id,
+                                        D.Section.tenant_id == tenant_id))
+             .outerjoin(D.TimetableEntry, and_(D.TimetableEntry.id == D.TimetablePlanWorkflow.timetable_entry_id,
+                                               D.TimetableEntry.tenant_id == tenant_id))
+             .outerjoin(D.Course, and_(D.Course.id == D.CourseOffering.course_id, D.Course.tenant_id == tenant_id))
+             .outerjoin(D.Program, and_(D.Program.id == D.CourseOffering.program_id, D.Program.tenant_id == tenant_id))
+             .outerjoin(D.StaffMember, and_(D.StaffMember.id == D.Section.faculty_person_id,
+                                            D.StaffMember.tenant_id == tenant_id))
+             .filter(D.TimetablePlanWorkflow.tenant_id == tenant_id))
+    if allowed_departments is not None:
+        query = query.filter(or_(D.Program.dept_id.in_(allowed_departments), D.Course.dept_id.in_(allowed_departments))) if allowed_departments else query.filter(false())
+    rows = query.order_by(D.TimetablePlanWorkflow.updated_at.desc()).all()
+    submitter_ids = {plan.submitted_by for plan, *_ in rows if plan.submitted_by}
+    submitters = {u.id: (getattr(u, "name", "") or u.username or u.id) for u in s.query(User).filter(User.id.in_(submitter_ids)).all()} if submitter_ids else {}
+    plans = []
+    for plan, offering, section, entry, course, program, faculty in rows:
+        payload = _timetable_plan_payload(plan)
+        payload.update({
+            "offering": {"course_code": course.code if course else "", "course_title": course.title if course else "",
+                         "program": program.name if program else "", "term": offering.term if offering else ""},
+            "section": section.section_code if section else "", "faculty": faculty.name if faculty else "",
+            "faculty_id": faculty.id if faculty else "",
+            "timetable": {"id": entry.id, "day_of_week": entry.day_of_week, "start_time": entry.start_time,
+                          "end_time": entry.end_time, "room": entry.room, "building": entry.building} if entry else None,
+            "submitted_actor": submitters.get(plan.submitted_by, plan.submitted_by),
+        })
+        plans.append(payload)
+    return {"plans": plans}
 
 
 @router.post("/academics/timetable-plans/submit")
@@ -7643,26 +7844,64 @@ def _invoice_fee_category_details(s, invoice):
     return {"fee_category_id": None, "fee_category": primary, "categories": summaries}
 
 
+def _invoice_fee_category_details_batch(s, invoices):
+    """Build fee-category summaries for a page without per-invoice queries."""
+    by_structure = {}
+    structure_ids = {invoice.fee_structure_id for invoice in invoices if invoice.fee_structure_id}
+    if structure_ids:
+        rows = (s.query(D.FeeStructureLine, D.FeeHead)
+                .join(D.FeeHead, D.FeeHead.id == D.FeeStructureLine.fee_head_id)
+                .filter(D.FeeStructureLine.fee_structure_id.in_(structure_ids)).all())
+        for line, head in rows:
+            by_structure.setdefault(line.fee_structure_id, []).append((line, head))
+    details = {}
+    for invoice in invoices:
+        categories = {}
+        for line, head in by_structure.get(invoice.fee_structure_id, []):
+            category = _format_fee_category(head.category)
+            categories[category] = categories.get(category, 0.0) + float(line.amount or 0)
+        if not categories:
+            details[invoice.id] = {"fee_category_id": None, "fee_category": "Uncategorised", "categories": [{
+                "fee_category_id": None, "fee_category": "Uncategorised", "assigned": float(invoice.amount or 0),
+                "paid": float(invoice.paid or 0), "balance": float((invoice.amount or 0) - (invoice.paid or 0)),
+            }]}
+            continue
+        summaries = []
+        remaining_paid = float(invoice.paid or 0)
+        for category in sorted(categories):
+            assigned = round(categories[category], 2)
+            paid = round(min(remaining_paid, assigned), 2)
+            remaining_paid = max(remaining_paid - paid, 0)
+            summaries.append({"fee_category_id": None, "fee_category": category, "assigned": assigned,
+                              "paid": paid, "balance": round(max(assigned - paid, 0), 2)})
+        details[invoice.id] = {"fee_category_id": None,
+                               "fee_category": summaries[0]["fee_category"] if len(summaries) == 1 else "Mixed",
+                               "categories": summaries}
+    return details
+
+
 @router.get("/finance/invoices")
 def list_invoices(ctx=Depends(auth), s=Depends(db)):
     require(gate(s, ctx, "finance", "view")[0])
-    students = _student_scope(s.query(D.Student), ctx).all()
+    students = _student_scope(s.query(D.Student), ctx).with_entities(D.Student.id, D.Student.roll_no, D.Student.name).all()
     student_ids = [st.id for st in students]
     stu_map = {st.id: (st.roll_no, st.name) for st in students}
     rows = (s.query(D.FeeInvoice).filter(D.FeeInvoice.tenant_id == ctx["tenant_id"],
             D.FeeInvoice.student_id.in_(student_ids)).limit(300).all() if student_ids else [])
+    invoice_details_by_id = _invoice_fee_category_details_batch(s, rows)
+    condonations = {row.invoice_id: row for row in s.query(D.AttendanceCondonationRequest).filter(
+        D.AttendanceCondonationRequest.tenant_id == ctx["tenant_id"],
+        D.AttendanceCondonationRequest.invoice_id.in_([r.id for r in rows]),
+    ).all()} if rows else {}
+    workflow_ids = {row.workflow_id for row in condonations.values() if row.workflow_id}
+    workflows = {row.id: row for row in s.query(WorkflowInstance).filter(WorkflowInstance.id.in_(workflow_ids)).all()} if workflow_ids else {}
     out = []
     category_buckets = {}
     for r in rows:
         roll, name = stu_map.get(r.student_id, ("", ""))
-        invoice_details = _invoice_fee_category_details(s, r)
-        condonation = None
-        if r.invoice_type == "condonation":
-            condonation = (s.query(D.AttendanceCondonationRequest)
-                           .filter(D.AttendanceCondonationRequest.invoice_id == r.id,
-                                   D.AttendanceCondonationRequest.tenant_id == ctx["tenant_id"])
-                           .first())
-        workflow = s.get(WorkflowInstance, condonation.workflow_id) if condonation else None
+        invoice_details = invoice_details_by_id[r.id]
+        condonation = condonations.get(r.id) if r.invoice_type == "condonation" else None
+        workflow = workflows.get(condonation.workflow_id) if condonation else None
         row = {"id": r.id, "roll_no": roll, "name": name, "term": r.term,
                "amount": r.amount, "paid": r.paid, "balance": r.amount - r.paid,
                "status": r.status, "fee_category_id": invoice_details["fee_category_id"],
@@ -7680,16 +7919,21 @@ def list_invoices(ctx=Depends(auth), s=Depends(db)):
             bucket["paid"] += category["paid"]
             bucket["balance"] += category["balance"]
 
-    summary = {
-        "total_billed": s.query(func.coalesce(func.sum(D.FeeInvoice.amount), 0)).filter(D.FeeInvoice.tenant_id == ctx["tenant_id"], D.FeeInvoice.student_id.in_(student_ids)).scalar() or 0 if student_ids else 0,
-        "total_collected": s.query(func.coalesce(func.sum(D.FeeInvoice.paid), 0)).filter(D.FeeInvoice.tenant_id == ctx["tenant_id"], D.FeeInvoice.student_id.in_(student_ids)).scalar() or 0 if student_ids else 0,
-        "outstanding": s.query(func.coalesce(func.sum(D.FeeInvoice.amount - D.FeeInvoice.paid), 0)).filter(D.FeeInvoice.tenant_id == ctx["tenant_id"], D.FeeInvoice.student_id.in_(student_ids)).scalar() or 0 if student_ids else 0,
-    }
+    totals = (s.query(func.coalesce(func.sum(D.FeeInvoice.amount), 0),
+                      func.coalesce(func.sum(D.FeeInvoice.paid), 0),
+                      func.coalesce(func.sum(D.FeeInvoice.amount - D.FeeInvoice.paid), 0))
+              .filter(D.FeeInvoice.tenant_id == ctx["tenant_id"], D.FeeInvoice.student_id.in_(student_ids)).one()) if student_ids else (0, 0, 0)
+    summary = {"total_billed": totals[0] or 0, "total_collected": totals[1] or 0, "outstanding": totals[2] or 0}
     payments = s.query(D.Payment).filter(D.Payment.student_id.in_(student_ids)).order_by(desc(D.Payment.at)).limit(300).all() if student_ids else []
     payment_rows = []
+    invoice_by_id = {invoice.id: invoice for invoice in rows}
+    missing_invoice_ids = {payment.invoice_id for payment in payments if payment.invoice_id and payment.invoice_id not in invoice_by_id}
+    if missing_invoice_ids:
+        invoice_by_id.update({invoice.id: invoice for invoice in s.query(D.FeeInvoice).filter(D.FeeInvoice.id.in_(missing_invoice_ids)).all()})
+        invoice_details_by_id.update(_invoice_fee_category_details_batch(s, list(invoice_by_id.values())))
     for payment in payments:
         roll, name = stu_map.get(payment.student_id, ("", ""))
-        invoice_details = _invoice_fee_category_details(s, s.get(D.FeeInvoice, payment.invoice_id)) if payment.invoice_id else {"fee_category_id": None, "fee_category": "Uncategorised", "categories": []}
+        invoice_details = invoice_details_by_id.get(payment.invoice_id, {"fee_category_id": None, "fee_category": "Uncategorised", "categories": []})
         payment_rows.append({"id": payment.id, "invoice_id": payment.invoice_id, "roll_no": roll,
                              "name": name, "amount": payment.amount, "method": payment.method,
                              "reference": payment.reference, "status": payment.status or "success",

@@ -47,7 +47,7 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
     [returnReason, setReturnReason] = useState(""),
     [returnError, setReturnError] = useState(""),
     [saving, setSaving] = useState(false);
-  async function load(value = term) {
+  async function load(value = term, fresh = false) {
     setLoading(true);
     try {
       const response = await api.academicCalendar(value, {
@@ -55,7 +55,7 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
         programId,
         departmentId,
         studentYear,
-      });
+      }, fresh);
       const next = response || { entries: [], proposals: [], summary: {}, term_options: [] };
       setData(next);
       if (!value && next?.selected_term) setTerm(next.selected_term);
@@ -68,6 +68,22 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
   useEffect(() => {
     load(term);
   }, [term, academicYear, programId, departmentId, studentYear]);
+  // Reviewers can keep their queue open while a coordinator submits work in a
+  // different browser session. Refresh only while the tab is visible.
+  useEffect(() => {
+    if (![5, 6].includes(Number(user?.office_n))) return;
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void load(term, true);
+    };
+    const timer = window.setInterval(refreshWhenVisible, 5_000);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    window.addEventListener("focus", refreshWhenVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.removeEventListener("focus", refreshWhenVisible);
+    };
+  }, [term, academicYear, programId, departmentId, studentYear, user?.office_n]);
   const yearOptions = data?.academic_year_options || [];
   const campuses = useMemo<string[]>(
     () => [
@@ -180,7 +196,7 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
         ? await api.updateAcademicCalendarEntry(form.id, payload)
         : await api.createAcademicCalendarEntry(payload);
       setModal(false);
-      await load();
+      await load(term, true);
     } catch (e: any) {
       setError(e.message || "Could not save the event.");
     } finally {
@@ -228,7 +244,7 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
     try {
       await api.deleteAcademicCalendarEntry(form.id);
       setModal(false);
-      await load();
+      await load(term, true);
     } catch (e: any) {
       setError(e.message || "Could not delete the event.");
     } finally {
@@ -241,12 +257,12 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
       await api.decideAcademicCalendarEntry(proposal.id, { action: decision, reason: decision === "approve" ? "" : "Decision recorded by reviewer", expected_version: proposal.version_no });
       setModal(false);
       setDetail(null);
-      await load();
+      await load(term, true);
     } catch (e: any) {
       if (e?.status === 409) {
         setModal(false);
         setDetail(null);
-        await load();
+        await load(term, true);
         setError("This calendar is no longer current. The queue was refreshed; reopen the latest version before deciding.");
       } else setError(e.message || "Could not record decision.");
     } finally {
@@ -255,7 +271,7 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
   }
   async function submitDraft() {
     setSaving(true);
-    try { await api.submitAcademicCalendarEntry(form.id); setModal(false); await load(); }
+    try { await api.submitAcademicCalendarEntry(form.id); setModal(false); await load(term, true); }
     catch (e: any) { setError(e.message || "Could not submit the draft."); }
     finally { setSaving(false); }
   }
@@ -267,9 +283,9 @@ export default function AcademicCalendar({ user, caps }: { user: any; caps: any 
     setSaving(true);
     try {
       await api.decideAcademicCalendarEntry(returnDetail.id, { action: "return", reason: returnReason.trim(), expected_version: returnDetail.version_no });
-      setReturnDetail(null); setReturnReason(""); setReturnError(""); setModal(false); setDetail(null); await load();
+      setReturnDetail(null); setReturnReason(""); setReturnError(""); setModal(false); setDetail(null); await load(term, true);
     } catch (e: any) {
-      if (e?.status === 409) { setReturnDetail(null); setModal(false); setDetail(null); await load(); setError("This calendar is no longer current. The queue was refreshed; reopen the latest version before deciding."); }
+      if (e?.status === 409) { setReturnDetail(null); setModal(false); setDetail(null); await load(term, true); setError("This calendar is no longer current. The queue was refreshed; reopen the latest version before deciding."); }
       else setReturnError(e.message || "Could not return the calendar.");
     } finally { setSaving(false); }
   }

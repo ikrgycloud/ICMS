@@ -1593,7 +1593,7 @@ def _seed_calendar_data(s):
             description=description, owner_office_n=owner_office_n: D.AcademicCalendarEntry(
                 id=entry_id, tenant_id=TENANT, term=term, title=title,
                 category=category, campus=campus, start_date=start_date,
-                end_date=end_date, description=description, status="published",
+                end_date=end_date, description=description, status="Published",
                 owner_office_n=owner_office_n, created_by=f"user_{owner_office_n}",
                 updated_by=f"user_{owner_office_n}"
             ),

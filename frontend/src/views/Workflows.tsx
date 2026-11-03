@@ -26,7 +26,7 @@ export default function Workflows({ user, onChange, initialTab = 'inbox' }: { us
     })
   }
   useEffect(() => { load() }, [tab])
-  useEffect(() => { if ([5, 6, 10, 17].includes(user.office_n)) { Promise.all([api.timetablePlans(), api.sections(), api.courseOfferings(), api.academicConflicts()]).then(async ([p, s, o, c]) => { const entries = (await Promise.all((s.sections || []).map(async (x: any) => ({ x, t: (await api.sectionTimetable(x.id)).entries || [] })))).flatMap((z: any) => z.t.map((t: any) => ({ ...t, section: z.x }))); setTimetablePlans((p.plans || []).map((plan: any) => { const e = entries.find((x: any) => x.id === plan.timetable_entry_id), off = (o.offerings || []).find((x: any) => x.id === plan.offering_id); return { ...plan, entry: e, offering: off, conflict: (c.conflicts || []).some((x: any) => x.left.entry_id === plan.timetable_entry_id || x.right.entry_id === plan.timetable_entry_id) } })) }).catch(() => {}) } }, [user.office_n])
+  useEffect(() => { if ([5, 6, 10, 17].includes(user.office_n)) { Promise.all([api.timetablePlans(), api.academicConflicts()]).then(([p, c]) => { setTimetablePlans((p.plans || []).map((plan: any) => ({ ...plan, entry: plan.timetable, conflict: (c.conflicts || []).some((x: any) => x.left.entry_id === plan.timetable_entry_id || x.right.entry_id === plan.timetable_entry_id) }))) }).catch(() => {}) } }, [user.office_n])
 
   async function timetableDecision(plan: any, action: string, reason = '') {
     if (action === 'return' && !reason.trim()) { setDecisionPrompt({ plan, action, reason: '', error: 'A return reason is required.' }); return }

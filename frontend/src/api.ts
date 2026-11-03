@@ -364,16 +364,20 @@ export const api = {
   createCalendarEvent: (body: any) => req('/calendar', { method: 'POST', body: JSON.stringify(body) }),
   updateCalendarEvent: (id: string, body: any) => req(`/calendar/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   deleteCalendarEvent: (id: string) => req(`/calendar/${id}`, { method: 'DELETE' }),
-  academicCalendar: (term = '', filters: any = {}) => {
+  academicCalendar: (term = '', filters: any = {}, fresh = false) => {
     const params = new URLSearchParams()
     if (term) params.set('term', term)
     if (filters.academicYear) params.set('academic_year', filters.academicYear)
     if (filters.programId) params.set('program_id', filters.programId)
     if (filters.departmentId) params.set('department_id', filters.departmentId)
     if (filters.studentYear) params.set('student_year', String(filters.studentYear))
+    // Calendar workflow screens are shared across different users.  A fresh
+    // read is required after a coordinator submits an item for review.
+    if (fresh) params.set('_refresh', String(Date.now()))
     const qs = params.toString()
     return req(`/academic-calendar${qs ? `?${qs}` : ''}`)
   },
+  academicCalendarReviewQueue: () => req(`/academic-calendar/review-queue?_refresh=${Date.now()}`),
   deanDashboard: (filters: Record<string, string | number> = {}) => {
     const params = new URLSearchParams()
     Object.entries(filters).forEach(([key, value]) => {
@@ -533,7 +537,14 @@ export const api = {
   curriculumExecutionIssue: (body: any) => req('/academics/curriculum-execution/issues', { method: 'POST', body: JSON.stringify(body) }),
   updateCurriculumExecutionIssue: (id: string, body: any) => req(`/academics/curriculum-execution/issues/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   createCourse: (b: any) => req('/academics/courses', { method: 'POST', body: JSON.stringify(b) }),
-  sections: () => req('/academics/sections'),
+  sections: (page: { limit?: number; offset?: number; includeTimetable?: boolean } = {}) => {
+    const params = new URLSearchParams()
+    if (page.limit != null) params.set('limit', String(page.limit))
+    if (page.offset != null) params.set('offset', String(page.offset))
+    if (page.includeTimetable) params.set('include_timetable', 'true')
+    const qs = params.toString()
+    return req(`/academics/sections${qs ? `?${qs}` : ''}`)
+  },
   createSection: (b: any) => req('/academics/sections', { method: 'POST', body: JSON.stringify(b) }),
   teachingAllocations: (facultyId = '') =>
     req(`/academics/teaching-allocations${facultyId ? `?faculty_id=${encodeURIComponent(facultyId)}` : ''}`),

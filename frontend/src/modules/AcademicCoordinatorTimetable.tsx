@@ -58,18 +58,12 @@ export default function AcademicCoordinatorTimetable() {
     try {
       const [sectionResult, offeringResult, planResult, conflictResult] =
         await Promise.all([
-          api.sections(),
+          api.sections({ includeTimetable: true }),
           api.courseOfferings(),
           api.timetablePlans(),
           api.academicConflicts(),
         ]);
-      const loaded = await Promise.all(
-        (sectionResult.sections || []).map(async (section: any) => ({
-          ...section,
-          timetable: (await api.sectionTimetable(section.id)).entries || [],
-        })),
-      );
-      setSections(loaded);
+      setSections(sectionResult.sections || []);
       setOfferings(offeringResult.offerings || []);
       setPlans(planResult.plans || []);
       setConflicts(conflictResult.conflicts || []);

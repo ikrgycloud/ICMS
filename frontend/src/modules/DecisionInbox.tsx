@@ -30,9 +30,10 @@ export default function DecisionInbox({ user }: { user?: any }) {
   async function load() {
     setRefreshing(true); setError('')
     try {
-      const [inbox, workflows] = await Promise.all([
+      const [inbox, workflows, calendarQueue] = await Promise.all([
         canLoadAcademicGovernance ? api.governanceInbox() : Promise.resolve({ proposals: [], history: [], summary: {} }),
         api.workflows('inbox'),
+        Number(user?.office_n) === 6 ? api.academicCalendarReviewQueue() : Promise.resolve({ entries: [] }),
       ])
       const workflowProposals = (workflows?.workflows || []).map((item: any) => ({
         id: item.id,
@@ -53,13 +54,23 @@ export default function DecisionInbox({ user }: { user?: any }) {
         source: 'workflow',
         process_key: item.process_key,
       }))
+      const calendarReviews = (calendarQueue?.entries || []).map((entry: any) => ({
+        id: entry.id, type: 'calendar', title: entry.title,
+        requester: entry.created_by || 'Academic Coordinator',
+        department: entry.department_id || 'Institution scope',
+        payload: { description: entry.description, term: entry.term, category: entry.category, campus: entry.campus },
+        state: entry.status, status_label: entry.status, priority: 'Medium', overdue: false,
+        due_at: null, events: [], version_no: entry.version_no,
+        created_at: entry.created_at, updated_at: entry.updated_at,
+        source: 'calendar_entry',
+      }))
       setData({
         ...inbox,
-        proposals: [...(inbox.proposals || []), ...workflowProposals],
-        count: (inbox.proposals || []).length + workflowProposals.length,
+        proposals: [...(inbox.proposals || []), ...calendarReviews, ...workflowProposals],
+        count: (inbox.proposals || []).length + calendarReviews.length + workflowProposals.length,
         summary: {
           ...(inbox.summary || {}),
-          pending: (inbox.proposals || []).length + workflowProposals.length,
+          pending: (inbox.proposals || []).length + calendarReviews.length + workflowProposals.length,
           urgent: (inbox.summary?.urgent ?? 0) + workflowProposals.filter((item: any) => item.priority === 'High' || item.priority === 'Critical').length,
           due_today: inbox.summary?.due_today ?? 0,
           completed_month: inbox.summary?.completed_month ?? 0,
@@ -68,6 +79,20 @@ export default function DecisionInbox({ user }: { user?: any }) {
     } catch (e: any) { setError(e.message || 'Approvals could not be loaded.') } finally { setRefreshing(false) }
   }
   useEffect(() => { load() }, [])
+  useEffect(() => {
+    if (Number(user?.office_n) !== 6) return
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void load()
+    }
+    const timer = window.setInterval(refreshWhenVisible, 5_000)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    window.addEventListener('focus', refreshWhenVisible)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+      window.removeEventListener('focus', refreshWhenVisible)
+    }
+  }, [user?.office_n])
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => { if (event.key === '/' && document.activeElement?.tagName !== 'INPUT') { event.preventDefault(); searchRef.current?.focus() } }
     window.addEventListener('keydown', shortcut)
@@ -119,6 +144,8 @@ export default function DecisionInbox({ user }: { user?: any }) {
       // generic governance transition intentionally cannot provide them.
       if (selected.source === 'workflow') {
         await api.decideWorkflow(selected.id, decision, decisionReason)
+      } else if (selected.source === 'calendar_entry') {
+        await api.decideAcademicCalendarEntry(selected.id, { action: decision, reason: decision === 'approve' ? '' : decisionReason, expected_version: selected.version_no })
       } else {
         switch (String(selected.type || '').toLowerCase()) {
           case 'curriculum':

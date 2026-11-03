@@ -125,6 +125,7 @@ class HODInput(Base):
 
 class TimetablePlanWorkflow(Base):
     __tablename__ = "timetable_plan_workflows"
+    __table_args__ = (Index("ix_timetable_plans_tenant_updated", "tenant_id", "updated_at"),)
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
     offering_id = Column(String, ForeignKey("course_offerings.id"), index=True)
@@ -185,6 +186,10 @@ class ClassSessionCheckIn(Base):
 class Section(Base):
     """A running class: a course offered in a term by a faculty member."""
     __tablename__ = "sections"
+    __table_args__ = (
+        Index("ix_sections_tenant_dept", "tenant_id", "dept_id"),
+        Index("ix_sections_tenant_offering", "tenant_id", "offering_id"),
+    )
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
     course_id = Column(String, ForeignKey("courses.id"))
@@ -249,6 +254,10 @@ class CourseMaterial(Base):
 # --------------------------------------------------------------------------- #
 class Student(Base):
     __tablename__ = "students"
+    __table_args__ = (
+        Index("ix_students_tenant_campus_cgpa", "tenant_id", "campus", "cgpa"),
+        Index("ix_students_tenant_scope_cgpa", "tenant_id", "campus_scope_id", "cgpa"),
+    )
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
     roll_no = Column(String, index=True)
@@ -522,11 +531,15 @@ class Enrollment(Base):
     status = Column(String, default="enrolled")  # requested/enrolled/dropped
     requested_at = Column(DateTime, default=datetime.utcnow)
     grade = Column(String, default="")
-    __table_args__ = (UniqueConstraint("tenant_id", "student_id", "section_id", name="uq_enrollment_student_section"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "student_id", "section_id", name="uq_enrollment_student_section"),
+        Index("ix_enrollments_tenant_section_status", "tenant_id", "section_id", "status"),
+    )
 
 
 class AttendanceRecord(Base):
     __tablename__ = "attendance_records"
+    __table_args__ = (Index("ix_attendance_tenant_student_date", "tenant_id", "student_id", "on_date"),)
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
     section_id = Column(String, ForeignKey("sections.id"))
@@ -653,6 +666,7 @@ class ResultSheet(Base):
 class StudentSubjectResult(Base):
     """Subject-level published outcomes; backlog state is derived, never manually cleared."""
     __tablename__ = "student_subject_results"
+    __table_args__ = (Index("ix_subject_results_tenant_student_subject_attempt", "tenant_id", "student_id", "subject_code", "attempt"),)
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
     student_id = Column(String, ForeignKey("students.id"), index=True)
@@ -1131,6 +1145,7 @@ class ApplicationStatusHistory(Base):
 # --------------------------------------------------------------------------- #
 class FeeInvoice(Base):
     __tablename__ = "fee_invoices"
+    __table_args__ = (Index("ix_fee_invoices_tenant_student", "tenant_id", "student_id"),)
     id = Column(String, primary_key=True)
     tenant_id = Column(String, index=True)
     student_id = Column(String, ForeignKey("students.id"))
@@ -1744,7 +1759,9 @@ class AcademicCalendarEntry(Base):
     start_time = Column(String, default="")
     end_time = Column(String, default="")
     description = Column(Text, default="")
-    status = Column(String, default="published")
+    # Calendar workflow states are title-cased. Migration v0067 normalizes
+    # existing rows created before the governed workflow was introduced.
+    status = Column(String, default="Published")
     version_no = Column(Integer, default=1, nullable=False)
     requires_vp = Column(Boolean, default=False, nullable=False)
     dean_approved_by = Column(String, default="")
