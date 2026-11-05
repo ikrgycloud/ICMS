@@ -38,6 +38,10 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       ICMS_ENVIRONMENT: production
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS}
+      # Razorpay credentials are provided by the deployment environment and
+      # must never be baked into the image or committed to this repository.
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
       # Bound PostgreSQL connections per API process. Tune only after database
       # monitoring shows sustained pool waiting or unused capacity.
       DB_POOL_SIZE: ${DB_POOL_SIZE:-10}

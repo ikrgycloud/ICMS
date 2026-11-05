@@ -12,6 +12,7 @@ import hmac
 from html import escape
 from io import BytesIO
 import json
+import logging
 import os
 from urllib import request as urlrequest
 from fastapi import APIRouter, Depends, HTTPException
@@ -40,12 +41,17 @@ router = APIRouter(prefix="/api/portal")
 PORTAL_TODAY = date(2026, 8, 25)
 PORTAL_NOW = datetime(2026, 8, 25, 16, 15)
 GST_RATE = 0.18
+payment_logger = logging.getLogger("icms.payments")
 
 
 def _razorpay_configured():
     key = os.environ.get("RAZORPAY_KEY_ID", "")
     secret = os.environ.get("RAZORPAY_KEY_SECRET", "")
     if not key or not secret:
+        payment_logger.error(
+            "razorpay_configuration_missing key_id_present=%s key_secret_present=%s",
+            bool(key), bool(secret),
+        )
         raise HTTPException(503, "Online payments are not configured")
     return key, secret
 
