@@ -4,8 +4,8 @@ agent any
 
 environment {
 
-    AWS_REGION     = "eu-north-1"
-    AWS_ACCOUNT_ID = "032844082845"
+    AWS_REGION     = "ap-south-1"
+    AWS_ACCOUNT_ID = "310853013925"
 
     BACKEND_REPO  = "icms-backend"
     FRONTEND_REPO = "icms-frontend"
@@ -18,7 +18,7 @@ environment {
     // IMPORTANT:
     // Replace this with the REAL PUBLIC IP or reachable private IP
     // of your ICMS Application EC2.
-    APP_SERVER = "ubuntu@13.63.138.123"
+    APP_SERVER = "ubuntu@65.2.6.2"
 
     APP_DIR = "/opt/icms"
 }
